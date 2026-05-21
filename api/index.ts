@@ -67,13 +67,13 @@ app.get('/health', async () => {
 // Register routes with auth middleware
 await app.register(async (app) => {
   app.addHook('preHandler', authMiddleware)
-  await app.register(automationRoutes, { prefix: '/automation' })
-  await app.register(sessionRoutes, { prefix: '/sessions' })
-  await app.register(aiRoutes, { prefix: '/ai' })
-  await app.register(queueRoutes, { prefix: '/queue' })
-  await app.register(approvalRoutes, { prefix: '/approvals' })
-  await app.register(rateLimitRoutes, { prefix: '/rate-limits' })
-  await app.register(linkedinSessionRoutes, { prefix: '/linkedin' })
+  await app.register(automationRoutes, { prefix: '/api/automation' })
+  await app.register(sessionRoutes, { prefix: '/api/sessions' })
+  await app.register(aiRoutes, { prefix: '/api/ai' })
+  await app.register(queueRoutes, { prefix: '/api/queue' })
+  await app.register(approvalRoutes, { prefix: '/api/approvals' })
+  await app.register(rateLimitRoutes, { prefix: '/api/rate-limits' })
+  await app.register(linkedinSessionRoutes, { prefix: '/api/linkedin' })
 })
 
 // Public routes
