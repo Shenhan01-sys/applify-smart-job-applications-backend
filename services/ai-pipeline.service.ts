@@ -27,7 +27,7 @@ interface CoverLetterParams {
 
 interface AnswerQuestionParams {
   question: string
-  questionType: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox'
+  questionType: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox' | 'file'
   options?: string[]
   jobDescription: string
   userProfile: any

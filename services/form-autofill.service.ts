@@ -2,14 +2,6 @@ import { aiPipelineService } from './ai-pipeline.service.js'
 
 export interface FormField {
   type: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox' | 'file'
-}
-
-interface AnswerQuestionParamsExtended {
-  question: string
-  questionType: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox' | 'file'
-  options?: string[]
-  jobDescription: string
-  userProfile: any
   label: string
   id?: string
   name?: string
