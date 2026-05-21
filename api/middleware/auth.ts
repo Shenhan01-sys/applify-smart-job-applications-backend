@@ -26,7 +26,6 @@ export async function authMiddleware(
 
     // Attach user to request
     ;(request as any).user = user
-    return
   } catch (err) {
     return reply.status(401).send({ error: 'Authentication failed' })
   }
