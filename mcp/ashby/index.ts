@@ -45,7 +45,7 @@ export class AshbyMCPClient extends BaseMCPClient {
         body: JSON.stringify({ query }),
       })
 
-      const data = await response.json()
+      const data: any = await response.json()
 
       let jobs: JobPosting[] =
         data.data?.jobBoardWithToken?.jobPostings.map((job: any) => ({

@@ -63,7 +63,7 @@ export class LinkedInMCPClient extends BaseMCPClient {
       // Extract job data
       const jobs = await page.evaluate(() => {
         const jobCards = document.querySelectorAll('[data-job-id]')
-        return Array.from(jobCards).slice(0, 25).map((card) => {
+        return Array.from(jobCards).slice(0, 25).map((card: any) => {
           const jobId = card.getAttribute('data-job-id') || ''
           const titleEl = card.querySelector('.job-card-list__title')
           const companyEl = card.querySelector('.job-card-container__company-name')
@@ -82,8 +82,8 @@ export class LinkedInMCPClient extends BaseMCPClient {
       await page.close()
 
       const jobPostings: JobPosting[] = jobs
-        .filter((j) => j.id && j.title)
-        .map((j) => ({
+        .filter((j: any) => j.id && j.title)
+        .map((j: any) => ({
           id: j.id,
           title: j.title,
           company: j.company || 'Unknown',

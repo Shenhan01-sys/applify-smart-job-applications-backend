@@ -49,7 +49,7 @@ export class TracingService {
       },
     })
 
-    await trace.update()
+    await trace.update({})
 
     return { traceId: trace.id, generationId: generation.id }
   }
@@ -90,7 +90,7 @@ export class TracingService {
       })
     }
 
-    await trace.update()
+    await trace.update({})
 
     return trace.id
   }
@@ -124,7 +124,7 @@ export class TracingService {
       output: { success: params.success },
     })
 
-    await trace.update()
+    await trace.update({})
 
     return trace.id
   }

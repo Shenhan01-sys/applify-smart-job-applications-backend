@@ -61,7 +61,7 @@ export class JobStreetMCPClient extends BaseMCPClient {
       // Extract job listings
       const jobs = await page.evaluate(() => {
         const articles = document.querySelectorAll('article')
-        return Array.from(articles).slice(0, 20).map((article, index) => {
+        return Array.from(articles).slice(0, 20).map((article: any, index: number) => {
           const titleEl = article.querySelector('h1 a')
           const companyEl = article.querySelector('[data-automation="jobTitle"]')
           const locationEl = article.querySelector('[data-automation="jobLocation"]')
@@ -81,8 +81,8 @@ export class JobStreetMCPClient extends BaseMCPClient {
       await page.close()
 
       const jobPostings: JobPosting[] = jobs
-        .filter((j) => j.title)
-        .map((j) => ({
+        .filter((j: any) => j.title)
+        .map((j: any) => ({
           id: j.id,
           title: j.title,
           company: j.company || 'Unknown',

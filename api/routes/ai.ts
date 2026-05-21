@@ -17,6 +17,7 @@ export async function aiRoutes(
         jobDescription,
         userProfile,
         tone,
+        userId: (request as any).user?.id || 'anonymous',
       })
 
       return { success: true, coverLetter }

@@ -61,7 +61,7 @@ export class AIPipelineService {
     }
   }
 
-  async generateCoverLetter(params: CoverLetterParams & { userId: string }): Promise<string> {
+  async generateCoverLetter(params: CoverLetterParams & { userId?: string }): Promise<string> {
     const { jobTitle, company, jobDescription, userProfile, tone = 'professional', userId } = params
     const startTime = Date.now()
 

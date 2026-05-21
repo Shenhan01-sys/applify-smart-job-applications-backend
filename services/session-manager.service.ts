@@ -114,7 +114,7 @@ Alternatively, our team can help setup persistent browser profiles.`,
       return 0
     }
 
-    return data?.length || 0
+    return (data as any[])?.length || 0
   }
 }
 

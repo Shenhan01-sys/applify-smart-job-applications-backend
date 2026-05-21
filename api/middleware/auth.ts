@@ -7,7 +7,6 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
 export async function authMiddleware(
   request: FastifyRequest,
   reply: FastifyReply,
-  done: HookHandlerDoneFunction
 ) {
   const authHeader = request.headers.authorization
 
@@ -27,7 +26,6 @@ export async function authMiddleware(
 
     // Attach user to request
     ;(request as any).user = user
-    done()
   } catch (err) {
     return reply.status(401).send({ error: 'Authentication failed' })
   }

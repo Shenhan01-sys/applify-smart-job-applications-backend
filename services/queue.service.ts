@@ -1,10 +1,10 @@
-import { Queue, Worker, Job } from 'bullmq'
-import IORedis from 'ioredis'
+import { Queue, Worker } from 'bullmq'
+import { Redis } from 'ioredis'
 import { supabase } from '../api/index.js'
 import { automationService } from './automation.service.js'
 import { aiPipelineService } from './ai-pipeline.service.js'
 
-const redisConnection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
+const redisConnection = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
 })
@@ -60,27 +60,27 @@ export class QueueService {
       analyzeQueue.getJobs(['waiting', 'active', 'completed', 'failed']),
     ])
 
-    const filterByUser = (jobs: Job[]) =>
-      jobs.filter((j) => j.data.userId === userId)
+    const filterByUserAndStatus = (jobs: any[], status: string) =>
+      jobs.filter((j) => j.data?.userId === userId && (j as any).status === status)
 
     return {
       scan: {
-        waiting: filterByUser(scanJobs.filter((j) => j.status === 'waiting')).length,
-        active: filterByUser(scanJobs.filter((j) => j.status === 'active')).length,
-        completed: filterByUser(scanJobs.filter((j) => j.status === 'completed')).length,
-        failed: filterByUser(scanJobs.filter((j) => j.status === 'failed')).length,
+        waiting: filterByUserAndStatus(scanJobs, 'waiting').length,
+        active: filterByUserAndStatus(scanJobs, 'active').length,
+        completed: filterByUserAndStatus(scanJobs, 'completed').length,
+        failed: filterByUserAndStatus(scanJobs, 'failed').length,
       },
       apply: {
-        waiting: filterByUser(applyJobs.filter((j) => j.status === 'waiting')).length,
-        active: filterByUser(applyJobs.filter((j) => j.status === 'active')).length,
-        completed: filterByUser(applyJobs.filter((j) => j.status === 'completed')).length,
-        failed: filterByUser(applyJobs.filter((j) => j.status === 'failed')).length,
+        waiting: filterByUserAndStatus(applyJobs, 'waiting').length,
+        active: filterByUserAndStatus(applyJobs, 'active').length,
+        completed: filterByUserAndStatus(applyJobs, 'completed').length,
+        failed: filterByUserAndStatus(applyJobs, 'failed').length,
       },
       analyze: {
-        waiting: filterByUser(analyzeJobs.filter((j) => j.status === 'waiting')).length,
-        active: filterByUser(analyzeJobs.filter((j) => j.status === 'active')).length,
-        completed: filterByUser(analyzeJobs.filter((j) => j.status === 'completed')).length,
-        failed: filterByUser(analyzeJobs.filter((j) => j.status === 'failed')).length,
+        waiting: filterByUserAndStatus(analyzeJobs, 'waiting').length,
+        active: filterByUserAndStatus(analyzeJobs, 'active').length,
+        completed: filterByUserAndStatus(analyzeJobs, 'completed').length,
+        failed: filterByUserAndStatus(analyzeJobs, 'failed').length,
       },
     }
   }
