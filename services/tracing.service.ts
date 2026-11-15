@@ -1,8 +1,12 @@
 import { Langfuse } from 'langfuse'
 
+// Nilai contoh dari .env.example ('pk-...', 'sk-...', 'your-...') dianggap belum diisi,
+// supaya Langfuse tetap nonaktif (bukan mengirim trace dengan kunci palsu lalu gagal 401).
+const realKey = (v?: string) => (v && !/\.\.\.$|^your-/i.test(v) ? v : '')
+
 const langfuse = new Langfuse({
-  publicKey: process.env.LANGFUSE_PUBLIC_KEY || '',
-  secretKey: process.env.LANGFUSE_SECRET_KEY || '',
+  publicKey: realKey(process.env.LANGFUSE_PUBLIC_KEY),
+  secretKey: realKey(process.env.LANGFUSE_SECRET_KEY),
   baseUrl: process.env.LANGFUSE_BASE_URL || 'https://cloud.langfuse.com',
 })
 
@@ -12,7 +16,7 @@ export class TracingService {
    */
   async traceAIGeneration(params: {
     userId: string
-    type: 'cover_letter' | 'answer' | 'skill_extraction' | 'match_analysis'
+    type: 'cover_letter' | 'answer' | 'skill_extraction' | 'match_analysis' | 'cv_generation' | 'cv_evaluation'
     model: string
     prompt: string
     output: string

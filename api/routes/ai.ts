@@ -20,7 +20,7 @@ export async function aiRoutes(
         userId: (request as any).user?.id || 'anonymous',
       })
 
-      return { success: true, coverLetter }
+      return { success: true, coverLetter, model: aiPipelineService.lastModelUsed }
     } catch (error: any) {
       return reply.status(500).send({ success: false, error: error.message })
     }
@@ -79,6 +79,44 @@ export async function aiRoutes(
       )
 
       return { success: true, results }
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, error: error.message })
+    }
+  })
+
+  // Generate CV / Resume (ATS-optimized, tailored to job)
+  app.post('/cv', async (request, reply) => {
+    const { jobTitle, company, jobDescription, userProfile } = request.body as any
+
+    try {
+      const cv = await aiPipelineService.generateCV({
+        jobTitle,
+        company,
+        jobDescription,
+        userProfile,
+        userId: (request as any).user?.id || 'anonymous',
+      })
+
+      return { success: true, cv }
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, error: error.message })
+    }
+  })
+
+  // Evaluate CV / Resume against a job (scoring + recommendations)
+  app.post('/cv/evaluate', async (request, reply) => {
+    const { cvText, jobTitle, company, jobDescription } = request.body as any
+
+    try {
+      const evaluation = await aiPipelineService.evaluateCV({
+        cvText,
+        jobTitle,
+        company,
+        jobDescription,
+        userId: (request as any).user?.id || 'anonymous',
+      })
+
+      return { success: true, evaluation }
     } catch (error: any) {
       return reply.status(500).send({ success: false, error: error.message })
     }

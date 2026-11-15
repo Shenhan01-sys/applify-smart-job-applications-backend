@@ -1,101 +1,76 @@
 import { supabase } from '../api/index.js'
-import { mcpRegistry } from './mcp-registry.js'
-import { BaseMCPClient, JobPosting } from '../mcp/shared/types.js'
+import { aggregateJobs, AggregateResult } from './job-aggregation.service.js'
+import { ingestJobs, IngestSummary } from './job-ingest.service.js'
 
 export interface SearchParams {
   keywords?: string
   location?: string
   platforms?: string[]
+  companies?: Record<string, string[]>
   userId: string
-}
-
-export interface ApplyParams {
-  userId: string
-  jobId: string
-  platform: string
-  jobData: JobPosting
-  settings: any
+  /** Simpan hasil ke tabel jobs (default true). */
+  persist?: boolean
+  limitPerSource?: number
 }
 
 export class AutomationService {
-  async searchJobs(params: SearchParams) {
-    const { keywords, location, platforms, userId } = params
+  /**
+   * Cari lowongan lintas sumber (klien MCP), terapkan preferensi pengguna
+   * (blacklist, tipe kerja), peringkat relevansi terhadap kata kunci + skill
+   * pengguna, lalu (opsional) simpan ke tabel jobs.
+   */
+  async searchJobs(params: SearchParams): Promise<AggregateResult & { ingest: IngestSummary | null }> {
+    const { userId } = params
 
-    // Get user's automation settings
-    const { data: settings } = await supabase
-      .from('user_automation_settings')
-      .select('*')
-      .eq('user_id', userId)
-      .single()
+    const [{ data: settings }, { data: skillRows }] = await Promise.all([
+      supabase.from('user_automation_settings').select('*').eq('user_id', userId).maybeSingle(),
+      supabase.from('user_skills').select('name').eq('user_id', userId),
+    ])
 
-    // Determine which platforms to search
-    const platformsToSearch = platforms || ['greenhouse', 'lever', 'ashby', 'workable']
-    const allResults: Array<{ platform: string; jobs: JobPosting[] }> = []
+    const keywords =
+      params.keywords ??
+      (Array.isArray(settings?.search_keywords) ? settings.search_keywords.join(' ') : '') ??
+      ''
+    const location = params.location ?? settings?.search_location ?? 'Indonesia'
+    const skills = (skillRows ?? []).map((s: any) => s.name).filter(Boolean)
 
-    for (const platformName of platformsToSearch) {
-      const client = mcpRegistry.get(platformName)
-      if (!client) continue
+    const result = await aggregateJobs({
+      keywords,
+      location,
+      platforms: params.platforms,
+      companies: params.companies,
+      skills,
+      limitPerSource: params.limitPerSource,
+    })
 
-      try {
-        const response = await client.searchJobs({
-          keywords: keywords || settings?.search_keywords?.join(' ') || '',
-          location: location || settings?.search_location || '',
-        })
+    // Preferensi pengguna
+    const blacklistCompanies = (settings?.blacklist_companies ?? []).map((c: string) => c.toLowerCase())
+    const blacklistWords = (settings?.blacklist_words ?? []).map((w: string) => w.toLowerCase())
+    const workTypes: string[] = settings?.work_type_filter ?? []
+    const levels: string[] = settings?.experience_level_filter ?? []
 
-        if (response.success && response.data?.jobs) {
-          // Filter by user's preferences
-          let jobs = response.data.jobs as JobPosting[]
+    result.jobs = result.jobs.filter((j) => {
+      if (blacklistCompanies.includes((j.company ?? '').toLowerCase())) return false
+      const text = `${j.title} ${j.description}`.toLowerCase()
+      if (blacklistWords.some((w: string) => text.includes(w))) return false
+      if (workTypes.length && j.work_type && !workTypes.includes(j.work_type)) return false
+      if (levels.length && j.experience_level && !levels.includes(j.experience_level)) return false
+      return true
+    })
+    result.total = result.jobs.length
 
-          // Apply blacklist filters
-          if (settings?.blacklist_companies?.length > 0) {
-            const blacklist = settings.blacklist_companies.map((c: string) =>
-              c.toLowerCase()
-            )
-            jobs = jobs.filter(
-              (j) => !blacklist.includes(j.company?.toLowerCase())
-            )
-          }
+    const ingest = params.persist === false ? null : await ingestJobs(supabase, result.jobs)
 
-          if (settings?.blacklist_words?.length > 0) {
-            const badWords = settings.blacklist_words.map((w: string) =>
-              w.toLowerCase()
-            )
-            jobs = jobs.filter((j) => {
-              const text = `${j.title} ${j.description}`.toLowerCase()
-              return !badWords.some((word: string) => text.includes(word))
-            })
-          }
-
-          // Filter by work type
-          if (settings?.work_type_filter?.length > 0) {
-            jobs = jobs.filter((j) =>
-              settings.work_type_filter.includes(j.work_type)
-            )
-          }
-
-          // Filter by experience level
-          if (settings?.experience_level_filter?.length > 0) {
-            jobs = jobs.filter((j) =>
-              settings.experience_level_filter.includes(j.experience_level)
-            )
-          }
-
-          allResults.push({ platform: platformName, jobs })
-        }
-      } catch (error) {
-        console.error(`Search failed for ${platformName}:`, error)
-      }
-    }
-
-    // Log the search action
     await this.logAction(userId, 'scan', 'multiple', '', '', 'success', {
       keywords,
       location,
-      platforms: platformsToSearch,
-      results_count: allResults.reduce((sum, r) => sum + r.jobs.length, 0),
+      platforms: result.query.platforms,
+      results_count: result.total,
+      stats: result.stats.map((s) => ({ platform: s.platform, fetched: s.fetched, kept: s.afterFilter, errors: s.errors.length })),
+      ingest: ingest ? { inserted: ingest.inserted, duplicates: ingest.duplicates, failed: ingest.failed } : null,
     })
 
-    return allResults
+    return { ...result, ingest }
   }
 
   async logAction(

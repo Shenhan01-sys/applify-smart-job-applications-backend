@@ -23,6 +23,8 @@ export class RateLimitService {
     ['workable', { platform: 'workable', maxRequestsPerHour: 100, maxRequestsPerDay: 500 }],
     ['jobstreet', { platform: 'jobstreet', maxRequestsPerHour: 20, maxRequestsPerDay: 50 }],
     ['kalibrr', { platform: 'kalibrr', maxRequestsPerHour: 20, maxRequestsPerDay: 50 }],
+    ['glints', { platform: 'glints', maxRequestsPerHour: 20, maxRequestsPerDay: 50 }],
+    ['smartrecruiters', { platform: 'smartrecruiters', maxRequestsPerHour: 100, maxRequestsPerDay: 500 }],
   ])
 
   // Platform rate limiting
@@ -127,29 +129,30 @@ export class RateLimitService {
     remaining: number
     resetAt: Date
   }>> {
-    const results = []
+    // One count per platform, run in parallel. Run one after another, the nine round trips made this the
+    // slowest authenticated route in E2E (median 1.55 s, p95 2.35 s).
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+    const counted = await Promise.all(
+      [...this.platformLimits].map(async ([platform, config]) => {
+        const { count, error } = await supabase
+          .from('application_logs')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('platform', platform)
+          .gte('created_at', oneHourAgo)
+        return { platform, config, count, error }
+      })
+    )
 
-    for (const [platform, config] of this.platformLimits) {
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
-      const { count, error } = await supabase
-        .from('application_logs')
-        .select('*', { count: 'exact', head: true })
-        .eq('user_id', userId)
-        .eq('platform', platform)
-        .gte('created_at', oneHourAgo)
-
-      if (!error) {
-        results.push({
-          platform,
-          limit: config.maxRequestsPerHour,
-          used: count || 0,
-          remaining: Math.max(0, config.maxRequestsPerHour - (count || 0)),
-          resetAt: new Date(Date.now() + 60 * 60 * 1000),
-        })
-      }
-    }
-
-    return results
+    return counted
+      .filter((c) => !c.error)
+      .map(({ platform, config, count }) => ({
+        platform,
+        limit: config.maxRequestsPerHour,
+        used: count || 0,
+        remaining: Math.max(0, config.maxRequestsPerHour - (count || 0)),
+        resetAt: new Date(Date.now() + 60 * 60 * 1000),
+      }))
   }
 }
 

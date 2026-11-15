@@ -1,0 +1,43 @@
+{
+  "_readme": [
+    "Daftar papan karier perusahaan (slug) untuk sumber ATS yang butuh parameter company.",
+    "Kandidat dipilih dari perusahaan yang terlihat membuka lowongan di Indonesia (hasil pencarian web 2026-10-01).",
+    "Slug belum diverifikasi live dari sandbox pengembang (jaringan diblokir) -> jalankan `npm run smoke:portals`",
+    "untuk memastikan tiap papan menjawab 200; papan yang gagal akan tercatat di proof-aggregation.json.",
+    "Tambah/hapus entri bebas. Format: { slug, name, source } — source = URL tempat slug ditemukan."
+  ],
+  "greenhouse": [
+    { "slug": "acommerce", "name": "aCommerce", "source": "https://job-boards.greenhouse.io/acommerce" },
+    { "slug": "inmobi", "name": "InMobi", "source": "https://job-boards.greenhouse.io/inmobi/jobs/8055061" },
+    { "slug": "datadog", "name": "Datadog", "source": "https://job-boards.greenhouse.io/datadog/jobs/7463727" },
+    { "slug": "axon", "name": "Axon", "source": "https://job-boards.greenhouse.io/axon/jobs/7805976003" },
+    { "slug": "mixpanel", "name": "Mixpanel", "source": "https://job-boards.greenhouse.io/mixpanel/jobs/8080833" }
+  ],
+  "lever": [
+    { "slug": "GoToGroup", "name": "GoTo Group", "source": "https://jobs.lever.co/GoToGroup" },
+    { "slug": "amarbank", "name": "Amar Bank", "source": "https://jobs.lever.co/amarbank" },
+    { "slug": "insiderone", "name": "Insider One", "source": "https://jobs.lever.co/insiderone" },
+    { "slug": "payjoy", "name": "PayJoy", "source": "https://jobs.lever.co/payjoy?location=Jakarta" },
+    { "slug": "binance", "name": "Binance", "source": "https://jobs.lever.co/binance?location=Indonesia%2C+Jakarta" },
+    { "slug": "crypto", "name": "Crypto.com", "source": "https://jobs.lever.co/crypto?location=Jakarta,+Indonesia" }
+  ],
+  "ashby": [
+    { "slug": "airwallex", "name": "Airwallex", "source": "https://jobs.ashbyhq.com/airwallex" },
+    { "slug": "kong", "name": "Kong", "source": "https://jobs.ashbyhq.com/kong" },
+    { "slug": "bjakcareer", "name": "Bjak", "source": "https://jobs.ashbyhq.com/bjakcareer" }
+  ],
+  "workable": [
+    { "slug": "amartha", "name": "Amartha", "source": "https://apply.workable.com/amartha/" },
+    { "slug": "decathlon-indonesia", "name": "Decathlon Indonesia", "source": "https://apply.workable.com/decathlon-indonesia/j/3B3CF2F4DF/" },
+    { "slug": "midplaza", "name": "Midplaza Holding", "source": "https://apply.workable.com/midplaza/" }
+  ],
+  "smartrecruiters": [
+    { "slug": "Grab", "name": "Grab", "source": "https://careers.smartrecruiters.com/Grab?search=Indonesia" },
+    { "slug": "Cermaticom", "name": "Cermati.com", "source": "https://jobs.smartrecruiters.com/Cermaticom/743999992326840-seo-officer" },
+    { "slug": "MCPayment", "name": "MCPayment", "source": "https://jobs.smartrecruiters.com/MCPayment/743999740452897-devops-engineer-jakarta-office-" },
+    { "slug": "PusatInovasiGlobal", "name": "Pusat Inovasi Global", "source": "https://jobs.smartrecruiters.com/PusatInovasiGlobal/743999710971575-ios-engineers" },
+    { "slug": "VeoliaEnvironnementSA", "name": "Veolia", "source": "https://jobs.smartrecruiters.com/VeoliaEnvironnementSA/744000145229486-sales-engineer-based-in-jakarta-indonesia-" },
+    { "slug": "WallStreetEnglish5", "name": "Wall Street English", "source": "https://jobs.smartrecruiters.com/WallStreetEnglish5/743999775460805-sales-executive-personal-consultant-" },
+    { "slug": "Qraved", "name": "Qraved", "source": "https://careers.smartrecruiters.com/Qraved" }
+  ]
+}

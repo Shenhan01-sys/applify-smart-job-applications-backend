@@ -4,6 +4,10 @@ import { chromium } from 'playwright'
 export class LinkedInMCPClient extends BaseMCPClient {
   name = 'linkedin'
   baseUrl = 'https://www.linkedin.com'
+  displayName = 'LinkedIn'
+  // Butuh sesi browser login -> tidak ikut agregasi default (opt-in lewat `platforms`).
+  kind = 'browser' as const
+  requiresCompany = false
   private browser: any = null
   private context: any = null
 
@@ -90,7 +94,8 @@ export class LinkedInMCPClient extends BaseMCPClient {
           location: j.location || 'Remote',
           description: '',
           url: j.url,
-          work_type: j.location?.toLowerCase().includes('remote') ? 'remote' : 'onsite',
+          work_type: j.location?.toLowerCase().includes('remote') ? 'remote' : 'on-site',
+          platform: 'linkedin',
           raw_data: j,
         }))
 

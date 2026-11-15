@@ -116,23 +116,53 @@ export async function automationRoutes(
     return data
   })
 
-  // Search jobs across platforms
+  // Cari & agregasi lowongan lintas sumber (klien MCP) -> ranking relevansi -> simpan ke tabel jobs.
+  // Body: { keywords?, location? ('Indonesia' default, 'any' = tanpa filter), platforms?: string[],
+  //         companies?: { [platform]: string[] }, persist?: boolean (default true), limit?: number }
   app.post('/search', async (request, reply) => {
     const userId = (request as any).user?.id
     if (!userId) {
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
-    const { keywords, location, platforms } = request.body as any
+    const body = (request.body ?? {}) as any
+    const platforms = Array.isArray(body.platforms)
+      ? body.platforms.map((p: any) => String(p).toLowerCase())
+      : undefined
+    const limit = Number(body.limit)
 
-    const results = await automationService.searchJobs({
-      userId,
-      keywords,
-      location,
-      platforms,
-    })
+    try {
+      const result = await automationService.searchJobs({
+        userId,
+        keywords: typeof body.keywords === 'string' ? body.keywords : undefined,
+        location: typeof body.location === 'string' ? body.location : undefined,
+        platforms,
+        companies: body.companies && typeof body.companies === 'object' ? body.companies : undefined,
+        persist: body.persist !== false,
+        limitPerSource: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 100) : undefined,
+      })
 
-    return { results, total_jobs: results.reduce((sum: number, r: any) => sum + r.jobs.length, 0) }
+      // Bentuk lama ({ results: [{platform, jobs}], total_jobs }) tetap disertakan demi kompatibilitas.
+      const results = result.stats.map((s) => ({
+        platform: s.platform,
+        jobs: result.jobs.filter((j) => j.platform === s.platform),
+        errors: s.errors,
+      }))
+
+      return {
+        jobs: result.jobs,
+        total: result.total,
+        results,
+        total_jobs: result.total,
+        stats: result.stats,
+        ingest: result.ingest,
+        query: result.query,
+        durationMs: result.durationMs,
+      }
+    } catch (err: any) {
+      request.log.error(err)
+      return reply.status(500).send({ error: err?.message ?? 'Search failed' })
+    }
   })
 
   // Add job to queue

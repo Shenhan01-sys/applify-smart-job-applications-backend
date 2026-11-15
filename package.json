@@ -8,16 +8,20 @@
     "build": "tsc",
     "start": "node dist/api/index.js",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "mcp:jobs": "tsx mcp/server.ts",
+    "mcp:jobs:http": "tsx mcp/server.ts --http",
+    "smoke:portals": "tsx mcp/smoke-portals.ts",
+    "test:portals": "tsx --test \"mcp/__tests__/*.test.ts\""
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",
     "@fastify/env": "^5.0.0",
     "@fastify/swagger": "^9.0.0",
     "@fastify/swagger-ui": "^5.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.49.0",
     "axios": "^1.8.0",
-    "bullmq": "^5.0.0",
     "cheerio": "^1.0.0",
     "crypto-js": "^4.2.0",
     "dotenv": "^16.0.0",

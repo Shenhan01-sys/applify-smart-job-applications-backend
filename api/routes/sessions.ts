@@ -2,15 +2,27 @@ import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import CryptoJS from 'crypto-js'
 import { supabase } from '../index.js'
 
-const ENCRYPTION_KEY = process.env.SESSION_ENCRYPTION_KEY || 'applify-default-key-change-me'
+const LEGACY_DEFAULT_KEY = 'applify-default-key-change-me'
+const ENCRYPTION_KEY = process.env.SESSION_ENCRYPTION_KEY || LEGACY_DEFAULT_KEY
 
 function encrypt(data: any): string {
   return CryptoJS.AES.encrypt(JSON.stringify(data), ENCRYPTION_KEY).toString()
 }
 
-function decrypt(encrypted: string): any {
-  const bytes = CryptoJS.AES.decrypt(encrypted, ENCRYPTION_KEY)
+function decryptWith(encrypted: string, key: string): any {
+  const bytes = CryptoJS.AES.decrypt(encrypted, key)
   return JSON.parse(bytes.toString(CryptoJS.enc.Utf8))
+}
+
+function decrypt(encrypted: string): any {
+  try {
+    return decryptWith(encrypted, ENCRYPTION_KEY)
+  } catch (err) {
+    // Sesi lama terenkripsi dengan kunci default: sebelum perbaikan urutan dotenv (2026-10-01),
+    // modul ini membaca process.env sebelum .env dimuat sehingga selalu memakai kunci default.
+    if (ENCRYPTION_KEY !== LEGACY_DEFAULT_KEY) return decryptWith(encrypted, LEGACY_DEFAULT_KEY)
+    throw err
+  }
 }
 
 export async function sessionRoutes(

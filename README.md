@@ -2,6 +2,12 @@
 
 Automation backend for Applify - MCP servers, ATS APIs, AI pipeline, and job queue.
 
+> **Queue: DATABASE-AS-QUEUE (tidak butuh Redis/BullMQ).** Sejak 2026-08-03,
+> `services/queue.service.ts` menulis job langsung ke tabel `automation_queue`
+> (Supabase), dan proses pekerjaan ditangani oleh **Worker terpisah**
+> (`worker/` via `claim_automation_jobs`). Backend kini **start tanpa Redis**.
+> `REDIS_URL` tidak lagi diperlukan (deprecated).
+
 ## Architecture
 
 ```
@@ -11,20 +17,29 @@ api/                      # Fastify API server
     platforms.ts          # Job platforms CRUD
     sessions.ts           # Encrypted platform sessions
     ai.ts                 # AI generation endpoints
+    queue.ts              # Queue status / enqueue (DB-as-queue)
   middleware/
     auth.ts               # JWT auth middleware
-mcp/                      # Model Context Protocol servers
+mcp/                      # Klien sumber lowongan + Applify Jobs MCP server
   shared/
-    types.ts              # Base types and interfaces
-  greenhouse/             # Greenhouse ATS MCP
-  lever/                  # Lever ATS MCP
-  ashby/                  # Ashby ATS MCP
-  workable/               # Workable ATS MCP
+    types.ts              # BaseMCPClient, JobPosting, SearchParams, SourceKind
+    utils.ts              # htmlToText, filter lokasi/kata kunci, skor relevansi
+  greenhouse/ lever/ ashby/ workable/ smartrecruiters/   # ATS global (API publik per perusahaan)
+  jobstreet/ glints/ kalibrr/                            # Portal lowongan Indonesia (endpoint pencarian publik)
+  linkedin/               # Butuh sesi browser (opt-in)
+  server.ts               # Applify Jobs MCP server (stdio / Streamable HTTP)
+  smoke-portals.ts        # Smoke test live + bukti JSON di project/uat/aggregation/
+  __tests__/              # Uji normalizer, agregasi, ingest (offline)
+config/
+  job-boards.json         # Daftar papan karier (slug) per sumber ATS
 services/                 # Business logic
-  mcp-registry.ts         # MCP client registry
-  automation.service.ts   # Main automation orchestrator
+  mcp-registry.ts         # Registry klien sumber + papan default
+  job-aggregation.service.ts # Agregasi lintas sumber, dedupe, ranking relevansi
+  job-ingest.service.ts   # Simpan hasil ke tabel jobs (dedupe external_url)
+  automation.service.ts   # Orkestrasi pencarian + preferensi pengguna
   ai-pipeline.service.ts  # OpenRouter AI integration
   form-autofill.service.ts # Form field auto-filling
+  queue.service.ts        # Database-as-queue (no Redis)
 ```
 
 ## Quick Start
@@ -44,6 +59,13 @@ npm run build
 
 # Production
 npm start
+
+# Agregasi lowongan multi-portal
+npm run test:portals                 # uji offline (normalizer, agregasi, ingest)
+npm run smoke:portals                # uji live semua sumber -> project/uat/aggregation/proof-aggregation-latest.json
+npm run smoke:portals -- --via-mcp   # + uji jalur MCP (spawn server stdio, panggil tool)
+npm run mcp:jobs                     # Applify Jobs MCP server via stdio (untuk agen AI)
+npm run mcp:jobs:http                # Applify Jobs MCP server via Streamable HTTP (untuk worker)
 ```
 
 ## Environment Variables
@@ -56,14 +78,17 @@ npm start
 | `FRONTEND_URL` | No | CORS allowed origin |
 | `SESSION_ENCRYPTION_KEY` | Yes | 32-char key for session encryption |
 | `OPENROUTER_API_KEY` | No | For AI features (optional) |
-| `REDIS_URL` | No | For BullMQ queue (optional) |
+| `REDIS_URL` | No | Deprecated — queue memakai DB-as-queue, tanpa Redis |
+| `APPLIFY_JOBS_MCP_PORT` | No | Port Applify Jobs MCP server mode HTTP (default 8090) |
+| `JOB_BOARDS_CONFIG` | No | Path alternatif untuk `config/job-boards.json` |
+| `GLINTS_BROWSER_FALLBACK` | No | `false` untuk mematikan fallback Playwright saat API Glints diblok WAF |
 
 ## API Endpoints
 
 ### Automation
 - `GET /api/automation/settings` - Get user automation settings
 - `PUT /api/automation/settings` - Update settings
-- `POST /api/automation/search` - Search jobs across platforms
+- `POST /api/automation/search` - Agregasi lowongan lintas sumber. Body: `{ keywords?, location? ('Indonesia' default, 'any'), platforms?, companies?: {platform: slug[]}, persist? (default true), limit? }`. Respons: `{ jobs, total, results, total_jobs, stats, ingest, query, durationMs }`
 - `GET /api/automation/logs` - Get application logs
 - `GET /api/automation/queue` - Get queue status
 - `POST /api/automation/queue` - Add job to queue
@@ -87,15 +112,30 @@ npm start
 
 ## Supported Job Platforms
 
-| Platform | Type | Auth | Status |
-|----------|------|------|--------|
-| Greenhouse | API | None | Ready |
-| Lever | API | None | Ready |
-| Ashby | API | None | Ready |
-| Workable | API | None | Ready |
-| LinkedIn | Browser | Session | In Progress |
-| JobStreet | Browser | Session | In Progress |
-| Kalibrr | Scraper | None | In Progress |
+| Sumber | Jenis | Akses | Butuh `company` | Catatan |
+|--------|-------|-------|-----------------|---------|
+| Greenhouse | ATS | Board API publik | Ya | `boards-api.greenhouse.io` |
+| Lever | ATS | Postings API publik | Ya | `api.lever.co/v0/postings` |
+| Ashby | ATS | Posting API publik | Ya | `api.ashbyhq.com/posting-api` |
+| Workable | ATS | Widget API publik | Ya | `apply.workable.com/api/v1/widget` |
+| SmartRecruiters | ATS | Posting API publik | Ya | Formulir lamaran publik tanpa login |
+| JobStreet (SEEK) | Portal | JobSearch API v5 | Tidak | `id.jobstreet.com/api/jobsearch/v5` |
+| Glints | Portal | GraphQL `searchJobsV3` | Tidak | Fallback Playwright bila diblok WAF |
+| Kalibrr | Portal | `kjs/job_board/search` | Tidak | |
+| LinkedIn | Browser | Sesi login | Tidak | Opt-in lewat `platforms`; worker memakai linkedin-mcp-server |
+
+Papan default untuk sumber ATS ada di `config/job-boards.json`. Sumber yang gagal tidak
+menggagalkan pencarian: error dicatat per sumber di `stats[].errors`.
+
+## Applify Jobs MCP Server
+
+Semua klien di atas juga diekspos sebagai server Model Context Protocol (`mcp/server.ts`)
+dengan tool `list_platforms`, `search_jobs`, `search_all_platforms`, dan `get_job_details`.
+
+- **stdio** (`npm run mcp:jobs`): untuk agen AI desktop. Contoh konfigurasi klien MCP:
+  `{ "command": "npx", "args": ["tsx", "mcp/server.ts"], "cwd": "<path>/project/backend" }`
+- **Streamable HTTP** (`npm run mcp:jobs:http`): endpoint `http://localhost:8090/mcp`
+  (stateless), health check `GET /health`. Dipakai worker lewat `APPLIFY_JOBS_MCP_URL`.
 
 ## Authentication
 

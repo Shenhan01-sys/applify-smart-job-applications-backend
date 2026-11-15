@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { supabase } from '../index.js'
+import { queueService } from '../../services/queue.service.js'
 
 interface ApprovalRequest {
   id: string
@@ -82,6 +83,7 @@ export async function approvalRoutes(
 
     const {
       job_id,
+      application_id,
       job_title,
       company,
       platform,
@@ -98,6 +100,7 @@ export async function approvalRoutes(
       .insert({
         user_id: userId,
         job_id,
+        application_id: application_id ?? null,
         job_title,
         company,
         platform,
@@ -151,27 +154,56 @@ export async function approvalRoutes(
       return reply.status(410).send({ error: 'Approval request has expired' })
     }
 
+    // Worker `apply` membutuhkan job_id (baris jobs dengan external_url) untuk membuka formulir.
+    if (!requestData.job_id) {
+      return reply.status(422).send({ error: 'Approval request has no job_id; cannot queue submission' })
+    }
+
+    // Cover letter hasil edit pengguna di layar review = versi yang disetujui.
+    const body = (request.body ?? {}) as { cover_letter?: unknown }
+    const editedCoverLetter =
+      typeof body.cover_letter === 'string' && body.cover_letter.trim() ? body.cover_letter : undefined
+
     // Update status to approved
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from('approval_requests')
       .update({
         status: 'approved',
         reviewed_at: new Date().toISOString(),
+        ...(editedCoverLetter ? { cover_letter: editedCoverLetter } : {}),
       })
       .eq('id', id)
-      .select()
 
     if (error) {
       return reply.status(500).send({ error: error.message })
     }
 
-    // Add to apply queue
-    // await queueService.addApplyJob(userId, {
-    //   approval_request_id: id,
-    //   ...requestData
-    // })
+    if (editedCoverLetter && requestData.application_id) {
+      await supabase
+        .from('ai_applications')
+        .update({ cover_letter: editedCoverLetter })
+        .eq('id', requestData.application_id)
+        .eq('user_id', userId)
+    }
 
-    return { success: true, message: 'Application approved and queued for submission' }
+    // Persetujuan pengguna = izin kirim untuk lamaran ini (HITL). Worker tetap memerlukan
+    // ALLOW_REAL_SUBMIT=true sebelum benar-benar menekan tombol kirim.
+    try {
+      const queued = await queueService.addApplyJob(userId, {
+        job_id: requestData.job_id,
+        application_id: requestData.application_id ?? null,
+        approval_request_id: id,
+        approved: true,
+      })
+      return { success: true, message: 'Application approved and queued for submission', queue_job_id: queued.id }
+    } catch (err: any) {
+      // Jangan biarkan status "approved" tanpa pekerjaan di antrean.
+      await supabase
+        .from('approval_requests')
+        .update({ status: 'pending', reviewed_at: null })
+        .eq('id', id)
+      return reply.status(500).send({ error: `Failed to queue submission (approval reverted to pending): ${err.message}` })
+    }
   })
 
   // Reject application

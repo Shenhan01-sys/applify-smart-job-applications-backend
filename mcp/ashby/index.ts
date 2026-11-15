@@ -1,97 +1,62 @@
-import { BaseMCPClient, JobPosting, MCPResponse } from '../shared/types.js'
+import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
+import { guessExperienceLevel, htmlToText, matchesKeywords, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
+
+/**
+ * Ashby public Job Posting API (terdokumentasi, tanpa API key). Menggantikan
+ * endpoint GraphQL internal (non-user-graphql) yang dipakai versi sebelumnya.
+ *   GET https://api.ashbyhq.com/posting-api/job-board/{board}?includeCompensation=true
+ *   -> { jobs: [ { id, title, location, secondaryLocations[{location}], department,
+ *                  isRemote, workplaceType, employmentType, descriptionPlain,
+ *                  descriptionHtml, publishedAt, jobUrl, applyUrl } ] }
+ */
+export function normalizeAshbyJob(job: any, board: string, companyName?: string): JobPosting | null {
+  if (!job || typeof job !== 'object' || !job.title) return null
+  const locs = [job.location, ...(Array.isArray(job.secondaryLocations) ? job.secondaryLocations.map((s: any) => s?.location) : [])]
+    .filter((l: any) => typeof l === 'string' && l.trim())
+  const country = job.address?.postalAddress?.addressCountry
+  if (country && !locs.some((l: string) => l.includes(country))) locs.push(country)
+  const location = locs.join(', ') || (job.isRemote ? 'Remote' : 'Unknown')
+  const description = job.descriptionPlain || htmlToText(job.descriptionHtml)
+  return {
+    id: String(job.id),
+    title: String(job.title).trim(),
+    company: companyName || board,
+    location,
+    description,
+    url: job.jobUrl || job.applyUrl,
+    apply_url: job.applyUrl || job.jobUrl,
+    posted_at: job.publishedAt,
+    experience_level: guessExperienceLevel(job.title, description),
+    job_type: normalizeJobType(job.employmentType),
+    work_type: normalizeWorkType(job.workplaceType, job.isRemote === true && !job.workplaceType ? 'remote' : ''),
+    platform: 'ashby',
+    board,
+    raw_data: { id: job.id, department: job.department ?? null },
+  }
+}
 
 export class AshbyMCPClient extends BaseMCPClient {
   name = 'ashby'
-  baseUrl = 'https://jobs.ashbyhq.com/api/non-user-graphql'
+  baseUrl = 'https://api.ashbyhq.com/posting-api/job-board'
+  displayName = 'Ashby'
+  kind = 'ats' as const
+  requiresCompany = true
 
-  async searchJobs(params: {
-    keywords?: string
-    location?: string
-    company?: string
-    page?: number
-    limit?: number
-  }): Promise<MCPResponse> {
+  async searchJobs(params: SearchParams): Promise<MCPResponse> {
+    const { company, keywords } = params
+    if (!company) return { success: false, error: 'ashby: parameter company (slug papan) wajib diisi' }
     try {
-      const { company, keywords, location } = params
-
-      if (!company) {
-        return {
-          success: false,
-          error: 'Company identifier is required for Ashby API',
-        }
-      }
-
-      const query = `
-        query {
-          jobBoardWithToken(token: "${company}") {
-            jobPostings {
-              id
-              title
-              locationName
-              departmentName
-              description
-              employmentType
-              publishedAt
-              isRemote
-              applyUrl
-            }
-          }
-        }
-      `
-
-      const response = await fetch(this.baseUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
-      })
-
-      const data: any = await response.json()
-
-      let jobs: JobPosting[] =
-        data.data?.jobBoardWithToken?.jobPostings.map((job: any) => ({
-          id: job.id,
-          title: job.title,
-          company: job.departmentName || company,
-          location: job.locationName || (job.isRemote ? 'Remote' : 'Unknown'),
-          description: job.description,
-          url: job.applyUrl,
-          posted_at: job.publishedAt,
-          experience_level: 'mid',
-          job_type: job.employmentType || 'full-time',
-          work_type: job.isRemote ? 'remote' : 'onsite',
-          raw_data: job,
-        })) || []
-
-      if (keywords) {
-        const keywordLower = keywords.toLowerCase()
-        jobs = jobs.filter(
-          (j) =>
-            j.title.toLowerCase().includes(keywordLower) ||
-            j.description.toLowerCase().includes(keywordLower)
-        )
-      }
-
-      if (location) {
-        const locationLower = location.toLowerCase()
-        jobs = jobs.filter((j) =>
-          j.location.toLowerCase().includes(locationLower)
-        )
-      }
-
+      const data = await this.fetch(`${this.baseUrl}/${encodeURIComponent(company)}?includeCompensation=true`)
+      const jobs = (Array.isArray(data?.jobs) ? data.jobs : [])
+        .map((j: any) => normalizeAshbyJob(j, company))
+        .filter((j: JobPosting | null): j is JobPosting => !!j && matchesKeywords(j, keywords))
       return { success: true, data: { jobs, total: jobs.length } }
     } catch (error: any) {
-      return { success: false, error: error.message }
+      return { success: false, error: `ashby(${company}): ${error.message}` }
     }
   }
 
-  async getJobDetails(jobId: string): Promise<MCPResponse> {
-    try {
-      return {
-        success: false,
-        error: 'Ashby requires company context for job details',
-      }
-    } catch (error: any) {
-      return { success: false, error: error.message }
-    }
+  async getJobDetails(_jobId: string): Promise<MCPResponse> {
+    return { success: false, error: 'ashby: detail sudah disertakan pada hasil pencarian papan' }
   }
 }

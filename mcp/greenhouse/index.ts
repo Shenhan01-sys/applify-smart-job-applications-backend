@@ -1,103 +1,62 @@
-import { BaseMCPClient, JobPosting, MCPResponse } from '../shared/types.js'
+import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
+import { guessExperienceLevel, htmlToText, matchesKeywords, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
+
+/**
+ * Greenhouse Job Board API (publik, tanpa API key).
+ *   GET https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true
+ *   -> { jobs: [ { id, title, location{name}, absolute_url, updated_at, content(HTML ter-escape) } ], meta }
+ * Formulir lamaran Greenhouse (job-boards.greenhouse.io/{board}/jobs/{id}) bisa diisi tanpa login.
+ */
+export function normalizeGreenhouseJob(job: any, board: string, companyName?: string): JobPosting | null {
+  if (!job || typeof job !== 'object' || !job.title) return null
+  const description = htmlToText(job.content)
+  const location = job.location?.name || 'Unknown'
+  return {
+    id: String(job.id),
+    title: String(job.title).trim(),
+    company: companyName || board,
+    location,
+    description,
+    url: job.absolute_url,
+    apply_url: job.absolute_url,
+    posted_at: job.updated_at,
+    experience_level: guessExperienceLevel(job.title, description),
+    job_type: normalizeJobType(description.slice(0, 400)),
+    work_type: normalizeWorkType(location),
+    platform: 'greenhouse',
+    board,
+    raw_data: { id: job.id, board },
+  }
+}
 
 export class GreenhouseMCPClient extends BaseMCPClient {
   name = 'greenhouse'
   baseUrl = 'https://boards-api.greenhouse.io/v1'
+  displayName = 'Greenhouse'
+  kind = 'ats' as const
+  requiresCompany = true
 
-  async searchJobs(params: {
-    keywords?: string
-    location?: string
-    company?: string
-    page?: number
-    limit?: number
-  }): Promise<MCPResponse> {
+  async searchJobs(params: SearchParams): Promise<MCPResponse> {
+    const { company, keywords } = params
+    if (!company) return { success: false, error: 'greenhouse: parameter company (slug papan) wajib diisi' }
     try {
-      const { company, keywords, location } = params
-
-      if (!company) {
-        return {
-          success: false,
-          error: 'Company identifier is required for Greenhouse API',
-        }
-      }
-
-      const url = `${this.baseUrl}/boards/${company}/jobs?content=true`
-      const data = await this.fetch(url)
-
-      let jobs: JobPosting[] = data.jobs.map((job: any) => ({
-        id: job.id.toString(),
-        title: job.title,
-        company: data.name || company,
-        location: job.location?.name || 'Remote',
-        description: job.content,
-        url: job.absolute_url,
-        posted_at: job.updated_at,
-        experience_level: this.extractExperienceLevel(job.title, job.content),
-        job_type: this.extractJobType(job.title, job.content),
-        work_type: this.extractWorkType(job.location?.name),
-        raw_data: job,
-      }))
-
-      // Filter by keywords if provided
-      if (keywords) {
-        const keywordLower = keywords.toLowerCase()
-        jobs = jobs.filter(
-          (j) =>
-            j.title.toLowerCase().includes(keywordLower) ||
-            j.description.toLowerCase().includes(keywordLower)
-        )
-      }
-
-      // Filter by location if provided
-      if (location) {
-        const locationLower = location.toLowerCase()
-        jobs = jobs.filter((j) =>
-          j.location.toLowerCase().includes(locationLower)
-        )
-      }
-
+      const data = await this.fetch(`${this.baseUrl}/boards/${encodeURIComponent(company)}/jobs?content=true`)
+      const jobs = (Array.isArray(data?.jobs) ? data.jobs : [])
+        .map((j: any) => normalizeGreenhouseJob(j, company, data?.name))
+        .filter((j: JobPosting | null): j is JobPosting => !!j && matchesKeywords(j, keywords))
       return { success: true, data: { jobs, total: jobs.length } }
     } catch (error: any) {
-      return { success: false, error: error.message }
+      return { success: false, error: `greenhouse(${company}): ${error.message}` }
     }
   }
 
-  async getJobDetails(jobId: string): Promise<MCPResponse> {
+  async getJobDetails(jobId: string, company?: string): Promise<MCPResponse> {
+    if (!company) return { success: false, error: 'greenhouse: company wajib untuk detail' }
     try {
-      // Greenhouse doesn't have a direct single job API
-      // We need company context - this is a simplified version
-      return {
-        success: false,
-        error: 'Greenhouse requires company context for job details',
-      }
+      const job = await this.fetch(`${this.baseUrl}/boards/${encodeURIComponent(company)}/jobs/${encodeURIComponent(jobId)}`)
+      return { success: true, data: normalizeGreenhouseJob(job, company) }
     } catch (error: any) {
-      return { success: false, error: error.message }
+      return { success: false, error: `greenhouse: ${error.message}` }
     }
-  }
-
-  private extractExperienceLevel(title: string, content: string): string {
-    const text = `${title} ${content}`.toLowerCase()
-    if (text.includes('senior') || text.includes('sr.')) return 'senior'
-    if (text.includes('lead') || text.includes('principal')) return 'lead'
-    if (text.includes('junior') || text.includes('jr.')) return 'junior'
-    if (text.includes('intern')) return 'intern'
-    return 'mid'
-  }
-
-  private extractJobType(title: string, content: string): string {
-    const text = `${title} ${content}`.toLowerCase()
-    if (text.includes('full-time') || text.includes('full time')) return 'full-time'
-    if (text.includes('part-time') || text.includes('part time')) return 'part-time'
-    if (text.includes('contract')) return 'contract'
-    if (text.includes('internship')) return 'internship'
-    return 'full-time'
-  }
-
-  private extractWorkType(location: string): string {
-    if (!location) return 'onsite'
-    const loc = location.toLowerCase()
-    if (loc.includes('remote')) return 'remote'
-    if (loc.includes('hybrid')) return 'hybrid'
-    return 'onsite'
   }
 }

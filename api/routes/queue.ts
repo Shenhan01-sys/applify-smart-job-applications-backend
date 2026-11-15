@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
-import { queueService } from '../../services/queue.service.js'
+import { queueService, UnsupportedJobTypeError } from '../../services/queue.service.js'
 
 export async function queueRoutes(
   app: FastifyInstance,
@@ -70,6 +70,9 @@ export async function queueRoutes(
       const job = await queueService.addAnalyzeJob(userId, jobDescription, userSkills)
       return { success: true, jobId: job.id }
     } catch (error: any) {
+      if (error instanceof UnsupportedJobTypeError) {
+        return reply.status(501).send({ error: error.message })
+      }
       return reply.status(500).send({ error: error.message })
     }
   })

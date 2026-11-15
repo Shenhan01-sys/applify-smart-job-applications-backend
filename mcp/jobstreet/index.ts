@@ -1,112 +1,91 @@
-import { BaseMCPClient, JobPosting, MCPResponse } from '../shared/types.js'
-import { chromium } from 'playwright'
+import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
+import { guessExperienceLevel, htmlToText, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
+
+/**
+ * JobStreet Indonesia (SEEK Group) — portal lowongan terbesar di Indonesia.
+ *
+ * Versi lama klien ini men-scrape halaman dengan Playwright + selector CSS yang
+ * sudah tidak cocok dengan situs. Diganti ke SEEK v5 JobSearch API yang dipakai
+ * front-end JobStreet sendiri (publik, tanpa token):
+ *   GET https://id.jobstreet.com/api/jobsearch/v5/search
+ *       ?siteKey=ID-Main&keywords=&where=&pageSize=&page=
+ *   -> { data: [ { id, title, advertiser{description}, companyName,
+ *                  locations[{label}], listingDate, teaser, bulletPoints,
+ *                  workTypes[], workArrangements{data[{label{text}}]} } ], totalCount }
+ * URL detail Indonesia memakai prefix locale /id/: https://id.jobstreet.com/id/job/<id>.
+ * Referensi pola: provider jobstreet pada career-ops (MIT, diverifikasi live 2026-08-28).
+ *
+ * Otomasi lamaran: butuh akun JobStreet (SEEK) -> worker memakai sesi pengguna, HITL.
+ */
+export const JOBSTREET_API = 'https://id.jobstreet.com/api/jobsearch/v5/search'
+const ORIGIN = 'https://id.jobstreet.com'
+
+export function normalizeJobStreetItem(item: any): JobPosting | null {
+  if (!item || typeof item !== 'object') return null
+  const title = typeof item.title === 'string' ? item.title.trim() : ''
+  const id = item.id != null ? String(item.id).trim() : ''
+  if (!title || !id) return null
+
+  const company = (item.advertiser?.description || item.companyName || '').trim() || 'Unknown'
+  const location = (item.locations?.[0]?.label || item.location || '').trim() || 'Indonesia'
+  const bullets = Array.isArray(item.bulletPoints) ? item.bulletPoints.join('\n') : ''
+  const description = htmlToText([item.teaser, bullets].filter(Boolean).join('\n'))
+  const arrangement = Array.isArray(item.workArrangements?.data)
+    ? item.workArrangements.data.map((d: any) => d?.label?.text ?? '').join(' ')
+    : ''
+  const workTypes = Array.isArray(item.workTypes) ? item.workTypes.join(' ') : ''
+
+  return {
+    id,
+    title,
+    company,
+    location,
+    description,
+    url: `${ORIGIN}/id/job/${encodeURIComponent(id)}`,
+    posted_at: item.listingDate || undefined,
+    experience_level: guessExperienceLevel(title, description),
+    job_type: normalizeJobType(workTypes),
+    work_type: normalizeWorkType(arrangement, location),
+    salary_range: item.salaryLabel || undefined,
+    platform: 'jobstreet',
+    raw_data: { id, roleId: item.roleId ?? null, workTypes: item.workTypes ?? [] },
+  }
+}
 
 export class JobStreetMCPClient extends BaseMCPClient {
   name = 'jobstreet'
-  baseUrl = 'https://www.jobstreet.co.id'
-  private browser: any = null
-  private context: any = null
+  baseUrl = JOBSTREET_API
+  displayName = 'JobStreet'
+  kind = 'board' as const
+  requiresCompany = false
 
-  async initBrowser(headless = true) {
-    this.browser = await chromium.launch({
-      headless,
-      args: ['--no-sandbox'],
-    })
-
-    this.context = await this.browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      viewport: { width: 1920, height: 1080 },
-    })
-  }
-
-  async closeBrowser() {
-    if (this.context) {
-      await this.context.close()
-      this.context = null
-    }
-    if (this.browser) {
-      await this.browser.close()
-      this.browser = null
-    }
-  }
-
-  async searchJobs(params: {
-    keywords?: string
-    location?: string
-    company?: string
-    page?: number
-    limit?: number
-  }): Promise<MCPResponse> {
-    if (!this.context) {
-      await this.initBrowser()
-    }
-
+  async searchJobs(params: SearchParams): Promise<MCPResponse> {
     try {
-      const page = await this.context.newPage()
-      const { keywords = '' } = params
-
-      // Navigate to jobstreet
-      await page.goto(`${this.baseUrl}/en/`, { waitUntil: 'networkidle' })
-
-      // Search for jobs
-      const searchInput = await page.waitForSelector('#searchKeywordsField', { timeout: 10000 })
-      if (searchInput) {
-        await searchInput.fill(keywords)
-        await searchInput.press('Enter')
+      const url = new URL(JOBSTREET_API)
+      url.searchParams.set('siteKey', 'ID-Main')
+      if (params.keywords) url.searchParams.set('keywords', params.keywords)
+      // "Indonesia" bukan filter kota yang dikenali SEEK — biarkan kosong (sudah ID-Main).
+      if (params.location && !/^indonesia$/i.test(params.location.trim())) {
+        url.searchParams.set('where', params.location)
       }
+      url.searchParams.set('pageSize', String(Math.min(Math.max(params.limit ?? 30, 1), 100)))
+      url.searchParams.set('page', String(Math.max(params.page ?? 1, 1)))
+      url.searchParams.set('locale', 'id-ID')
 
-      // Wait for results
-      await page.waitForSelector('[data-automation="jobList"]', { timeout: 10000 })
-
-      // Extract job listings
-      const jobs = await page.evaluate(() => {
-        const articles = document.querySelectorAll('article')
-        return Array.from(articles).slice(0, 20).map((article: any, index: number) => {
-          const titleEl = article.querySelector('h1 a')
-          const companyEl = article.querySelector('[data-automation="jobTitle"]')
-          const locationEl = article.querySelector('[data-automation="jobLocation"]')
-          const timeEl = article.querySelector('time')
-
-          return {
-            id: `js-${index}`,
-            title: titleEl?.textContent?.trim() || '',
-            company: companyEl?.textContent?.trim() || '',
-            location: locationEl?.textContent?.trim() || '',
-            postedAt: timeEl?.getAttribute('datetime') || '',
-            url: titleEl?.getAttribute('href') || '',
-          }
-        })
+      const data = await this.fetch(url.href, {
+        headers: { 'Accept-Language': 'id-ID,id;q=0.9,en;q=0.8', Referer: `${ORIGIN}/id/jobs` },
       })
-
-      await page.close()
-
-      const jobPostings: JobPosting[] = jobs
-        .filter((j: any) => j.title)
-        .map((j: any) => ({
-          id: j.id,
-          title: j.title,
-          company: j.company || 'Unknown',
-          location: j.location || 'Indonesia',
-          description: '',
-          url: j.url.startsWith('http') ? j.url : `${this.baseUrl}${j.url}`,
-          posted_at: j.postedAt,
-          work_type: 'onsite',
-          raw_data: j,
-        }))
-
-      return {
-        success: true,
-        data: { jobs: jobPostings, total: jobPostings.length },
+      if (!data || !Array.isArray(data.data)) {
+        throw new Error(`respons SEEK v5 tidak berisi array data (keys: ${Object.keys(data ?? {}).join(',')})`)
       }
+      const jobs = data.data.map(normalizeJobStreetItem).filter(Boolean) as JobPosting[]
+      return { success: true, data: { jobs, total: jobs.length, totalAvailable: data.totalCount ?? null } }
     } catch (error: any) {
-      return { success: false, error: error.message }
+      return { success: false, error: `jobstreet: ${error.message}` }
     }
   }
 
-  async getJobDetails(jobId: string): Promise<MCPResponse> {
-    return {
-      success: false,
-      error: 'JobStreet job details require browser navigation',
-    }
+  async getJobDetails(_jobId: string): Promise<MCPResponse> {
+    return { success: false, error: 'jobstreet: detail lengkap dibuka lewat URL lowongan (butuh browser)' }
   }
 }

@@ -1,93 +1,70 @@
-import { BaseMCPClient, JobPosting, MCPResponse } from '../shared/types.js'
+import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
+import { guessExperienceLevel, htmlToText, matchesKeywords, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
+
+/**
+ * Lever Postings API (publik, tanpa API key).
+ *   GET https://api.lever.co/v0/postings/{board}?mode=json
+ *   -> [ { id, text, categories{location,commitment,team,department}, descriptionPlain,
+ *          description, lists[{text,content}], hostedUrl, applyUrl, createdAt, workplaceType } ]
+ * Formulir lamaran Lever (jobs.lever.co/{board}/{id}/apply) bisa diisi tanpa login.
+ */
+export function normalizeLeverPosting(job: any, board: string, companyName?: string): JobPosting | null {
+  if (!job || typeof job !== 'object' || !job.text) return null
+  const lists = Array.isArray(job.lists)
+    ? job.lists.map((l: any) => `${l?.text ?? ''}\n${htmlToText(l?.content)}`).join('\n')
+    : ''
+  const description = [job.descriptionPlain || htmlToText(job.description), lists].filter(Boolean).join('\n').trim()
+  const location = job.categories?.location || (Array.isArray(job.categories?.allLocations) ? job.categories.allLocations.join(', ') : '') || 'Unknown'
+  const requirements = (Array.isArray(job.lists) ? job.lists : [])
+    .filter((l: any) => /requirement|qualification|kualifikasi|persyaratan/i.test(l?.text ?? ''))
+    .flatMap((l: any) => htmlToText(l.content).split('\n').map((s: string) => s.trim()).filter(Boolean))
+  return {
+    id: String(job.id),
+    title: String(job.text).trim(),
+    company: companyName || board,
+    location,
+    description,
+    url: job.hostedUrl || job.applyUrl,
+    apply_url: job.applyUrl || job.hostedUrl,
+    posted_at: job.createdAt ? new Date(job.createdAt).toISOString() : undefined,
+    experience_level: guessExperienceLevel(job.text, description),
+    job_type: normalizeJobType(job.categories?.commitment),
+    work_type: normalizeWorkType(job.workplaceType, location),
+    requirements,
+    platform: 'lever',
+    board,
+    raw_data: { id: job.id, team: job.categories?.team ?? null },
+  }
+}
 
 export class LeverMCPClient extends BaseMCPClient {
   name = 'lever'
   baseUrl = 'https://api.lever.co/v0/postings'
+  displayName = 'Lever'
+  kind = 'ats' as const
+  requiresCompany = true
 
-  async searchJobs(params: {
-    keywords?: string
-    location?: string
-    company?: string
-    page?: number
-    limit?: number
-  }): Promise<MCPResponse> {
+  async searchJobs(params: SearchParams): Promise<MCPResponse> {
+    const { company, keywords } = params
+    if (!company) return { success: false, error: 'lever: parameter company (slug papan) wajib diisi' }
     try {
-      const { company, keywords, location } = params
-
-      if (!company) {
-        return {
-          success: false,
-          error: 'Company identifier is required for Lever API',
-        }
-      }
-
-      const url = `${this.baseUrl}/${company}?mode=json`
-      const data = await this.fetch(url)
-
-      let jobs: JobPosting[] = data.map((job: any) => ({
-        id: job.id,
-        title: job.text,
-        company: job.categories?.team || company,
-        location: job.categories?.location || 'Remote',
-        description: job.description,
-        url: job.applyUrl || job.hostedUrl,
-        posted_at: job.createdAt,
-        experience_level: this.extractExperienceLevel(job.text, job.description),
-        job_type: job.categories?.commitment || 'full-time',
-        work_type: this.extractWorkType(job.categories?.location),
-        requirements: job.lists?.find((l: any) => l.text?.toLowerCase().includes('requirement'))?.content
-          ?.split('\n')
-          .filter((r: string) => r.trim()) || [],
-        raw_data: job,
-      }))
-
-      if (keywords) {
-        const keywordLower = keywords.toLowerCase()
-        jobs = jobs.filter(
-          (j) =>
-            j.title.toLowerCase().includes(keywordLower) ||
-            j.description.toLowerCase().includes(keywordLower)
-        )
-      }
-
-      if (location) {
-        const locationLower = location.toLowerCase()
-        jobs = jobs.filter((j) =>
-          j.location.toLowerCase().includes(locationLower)
-        )
-      }
-
+      const data = await this.fetch(`${this.baseUrl}/${encodeURIComponent(company)}?mode=json`)
+      const jobs = (Array.isArray(data) ? data : [])
+        .map((j: any) => normalizeLeverPosting(j, company))
+        .filter((j: JobPosting | null): j is JobPosting => !!j && matchesKeywords(j, keywords))
       return { success: true, data: { jobs, total: jobs.length } }
     } catch (error: any) {
-      return { success: false, error: error.message }
+      return { success: false, error: `lever(${company}): ${error.message}` }
     }
   }
 
-  async getJobDetails(jobId: string): Promise<MCPResponse> {
+  async getJobDetails(jobId: string, company?: string): Promise<MCPResponse> {
+    if (!company) return { success: false, error: 'lever: company wajib untuk detail' }
     try {
-      return {
-        success: false,
-        error: 'Lever requires company context for job details',
-      }
+      const job = await this.fetch(`${this.baseUrl}/${encodeURIComponent(company)}/${encodeURIComponent(jobId)}?mode=json`)
+      return { success: true, data: normalizeLeverPosting(job, company) }
     } catch (error: any) {
-      return { success: false, error: error.message }
+      return { success: false, error: `lever: ${error.message}` }
     }
-  }
-
-  private extractExperienceLevel(title: string, content: string): string {
-    const text = `${title} ${content}`.toLowerCase()
-    if (text.includes('senior') || text.includes('sr.')) return 'senior'
-    if (text.includes('lead') || text.includes('principal')) return 'lead'
-    if (text.includes('junior') || text.includes('jr.')) return 'junior'
-    if (text.includes('intern')) return 'intern'
-    return 'mid'
-  }
-
-  private extractWorkType(location: string): string {
-    if (!location) return 'onsite'
-    const loc = location.toLowerCase()
-    if (loc.includes('remote')) return 'remote'
-    if (loc.includes('hybrid')) return 'hybrid'
-    return 'onsite'
   }
 }

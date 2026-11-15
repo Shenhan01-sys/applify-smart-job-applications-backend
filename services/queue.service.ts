@@ -1,181 +1,121 @@
-import { Queue, Worker } from 'bullmq'
-import { Redis } from 'ioredis'
 import { supabase } from '../api/index.js'
-import { automationService } from './automation.service.js'
-import { aiPipelineService } from './ai-pipeline.service.js'
 
-const redisConnection = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: false,
-})
+/**
+ * Queue Service — DATABASE-AS-QUEUE (tanpa Redis / BullMQ).
+ *
+ * ALASAN (Phase 2, 2026-08-03):
+ *  - Sebelumnya file ini menginstansiasi BullMQ + ioredis SAAT MODULE DIMUAT
+ *    (`new Redis('redis://localhost:6379')`), sehingga backend tidak bisa start
+ *    tanpa Redis lokal dan ioredis hanya numpang transitif lewat bullmq (rapuh).
+ *  - Pipeline otomasi yang AKTIF memakai database-as-queue via worker
+ *    (`claim_automation_jobs`, lihat `worker/src/worker.ts`). Jalur BullMQ ini
+ *    mubazir dan memaksa Redis.
+ *  - Solusi: enqueue job langsung ke tabel `automation_queue` (Supabase).
+ *    API yang dipakai `api/routes/queue.ts` TETAP SAMA (addScanJob/addApplyJob/
+ *    addAnalyzeJob/getQueueStatus) sehingga tidak ada kode lain yang berubah.
+ *
+ * 2026-10-03: job_type diselaraskan dengan dispatcher worker (`worker/src/worker.ts`):
+ * search | apply | email_apply | company_insight. Sebelumnya `scan_jobs` dan `analyze`
+ * ditolak worker sebagai "unknown job_type".
+ */
 
-// Job queues
-export const scanQueue = new Queue('job-scan', { connection: redisConnection })
-export const applyQueue = new Queue('job-apply', { connection: redisConnection })
-export const analyzeQueue = new Queue('job-analyze', { connection: redisConnection })
+const JOB = {
+  search: 'search',
+  apply: 'apply',
+  emailApply: 'email_apply',
+  companyInsight: 'company_insight',
+} as const;
 
-// Queue Service
+/** Job type yang tidak punya handler di worker. */
+export class UnsupportedJobTypeError extends Error {}
+
 export class QueueService {
-  async addScanJob(userId: string, params: {
-    keywords?: string
-    location?: string
-    platforms?: string[]
-  }) {
-    return scanQueue.add('scan', {
-      userId,
-      ...params,
-    }, {
-      priority: 1,
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-    })
+  /**
+   * @returns {Promise<{ id: string }>} id dari baris automation_queue yang dibuat.
+   */
+  async addScanJob(
+    userId: string,
+    params: { keywords?: string; location?: string; platforms?: string[] }
+  ) {
+    const { data, error } = await supabase
+      .from('automation_queue')
+      .insert({
+        user_id: userId,
+        job_type: JOB.search,
+        payload: params ?? {},
+        status: 'pending',
+      })
+      .select('id')
+      .single();
+
+    if (error) throw new Error(`addScanJob failed: ${error.message}`);
+    return { id: data.id };
   }
 
   async addApplyJob(userId: string, jobData: any) {
-    return applyQueue.add('apply', {
-      userId,
-      ...jobData,
-    }, {
-      priority: 2,
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 10000 },
-    })
-  }
-
-  async addAnalyzeJob(userId: string, jobDescription: string, userSkills: string[]) {
-    return analyzeQueue.add('analyze', {
-      userId,
-      jobDescription,
-      userSkills,
-    }, {
-      priority: 3,
-      attempts: 2,
-    })
-  }
-
-  async getQueueStatus(userId: string) {
-    const [scanJobs, applyJobs, analyzeJobs] = await Promise.all([
-      scanQueue.getJobs(['waiting', 'active', 'completed', 'failed']),
-      applyQueue.getJobs(['waiting', 'active', 'completed', 'failed']),
-      analyzeQueue.getJobs(['waiting', 'active', 'completed', 'failed']),
-    ])
-
-    const filterByUserAndStatus = (jobs: any[], status: string) =>
-      jobs.filter((j) => j.data?.userId === userId && (j as any).status === status)
-
-    return {
-      scan: {
-        waiting: filterByUserAndStatus(scanJobs, 'waiting').length,
-        active: filterByUserAndStatus(scanJobs, 'active').length,
-        completed: filterByUserAndStatus(scanJobs, 'completed').length,
-        failed: filterByUserAndStatus(scanJobs, 'failed').length,
-      },
-      apply: {
-        waiting: filterByUserAndStatus(applyJobs, 'waiting').length,
-        active: filterByUserAndStatus(applyJobs, 'active').length,
-        completed: filterByUserAndStatus(applyJobs, 'completed').length,
-        failed: filterByUserAndStatus(applyJobs, 'failed').length,
-      },
-      analyze: {
-        waiting: filterByUserAndStatus(analyzeJobs, 'waiting').length,
-        active: filterByUserAndStatus(analyzeJobs, 'active').length,
-        completed: filterByUserAndStatus(analyzeJobs, 'completed').length,
-        failed: filterByUserAndStatus(analyzeJobs, 'failed').length,
-      },
-    }
-  }
-}
-
-// Workers
-export function initializeWorkers() {
-  // Scan worker
-  new Worker('job-scan', async (job) => {
-    const { userId, keywords, location, platforms } = job.data
-
-    // Update Supabase queue status
-    await supabase.from('automation_queue').update({
-      status: 'processing',
-      processed_at: new Date().toISOString(),
-    }).eq('user_id', userId).eq('job_type', 'scan_jobs')
-
-    try {
-      const results = await automationService.searchJobs({
-        userId,
-        keywords,
-        location,
-        platforms,
+    const { data, error } = await supabase
+      .from('automation_queue')
+      .insert({
+        user_id: userId,
+        job_type: JOB.apply,
+        payload: jobData ?? {},
+        status: 'pending',
       })
+      .select('id')
+      .single();
 
-      // Save results to applications table for review
-      for (const platformResult of results) {
-        for (const jobPosting of platformResult.jobs) {
-          await supabase.from('jobs').upsert({
-            platform: platformResult.platform,
-            title: jobPosting.title,
-            company: jobPosting.company,
-            location: jobPosting.location,
-            description: jobPosting.description,
-            url: jobPosting.url,
-            posted_at: jobPosting.posted_at,
-            experience_level: jobPosting.experience_level,
-            job_type: jobPosting.job_type,
-            work_type: jobPosting.work_type,
-            raw_data: jobPosting.raw_data,
-          }, { onConflict: 'url' })
-        }
-      }
+    if (error) throw new Error(`addApplyJob failed: ${error.message}`);
+    return { id: data.id };
+  }
 
-      // Update status
-      await supabase.from('automation_queue').update({
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-      }).eq('user_id', userId).eq('job_type', 'scan_jobs')
+  /**
+   * Worker tidak punya handler `analyze`; analisis kecocokan dijalankan sinkron lewat
+   * POST /api/ai/analyze-match. Menolak di sini lebih jujur daripada membuat baris antrean
+   * yang pasti gagal.
+   */
+  async addAnalyzeJob(_userId: string, _jobDescription: string, _userSkills: string[]): Promise<{ id: string }> {
+    throw new UnsupportedJobTypeError('analyze jobs are not processed by the worker; use POST /api/ai/analyze-match');
+  }
 
-      return { success: true, count: results.reduce((sum: number, r: any) => sum + r.jobs.length, 0) }
-    } catch (error: any) {
-      await supabase.from('automation_queue').update({
-        status: 'failed',
-        error_message: error.message,
-      }).eq('user_id', userId).eq('job_type', 'scan_jobs')
+  /**
+   * Ringkasan status antrian per job-type worker. `scan` dipertahankan sebagai alias `search`.
+   */
+  async getQueueStatus(userId: string) {
+    const { data, error } = await supabase
+      .from('automation_queue')
+      .select('job_type, status')
+      .eq('user_id', userId);
 
-      throw error
-    }
-  }, { connection: redisConnection, concurrency: 3 })
+    if (error) throw new Error(`getQueueStatus failed: ${error.message}`);
 
-  // Analyze worker
-  new Worker('job-analyze', async (job) => {
-    const { userId, jobDescription, userSkills } = job.data
+    const count = (rows: any[], type: string, status: string) =>
+      rows.filter((r) => r.job_type === type && r.status === status).length;
 
-    try {
-      const analysis = await aiPipelineService.analyzeJobMatch(jobDescription, userSkills)
+    const group = (type: string) => ({
+      waiting: count(data, type, 'pending'),
+      active: count(data, type, 'processing'),
+      completed: count(data, type, 'completed'),
+      failed: count(data, type, 'failed'),
+    });
 
-      // Log the analysis
-      await automationService.logAction(
-        userId,
-        'analyze',
-        'ai',
-        '',
-        '',
-        'success',
-        analysis
-      )
-
-      return analysis
-    } catch (error: any) {
-      await automationService.logAction(
-        userId,
-        'analyze',
-        'ai',
-        '',
-        '',
-        'failed',
-        { error: error.message }
-      )
-      throw error
-    }
-  }, { connection: redisConnection, concurrency: 5 })
-
-  console.log('Queue workers initialized')
+    const search = group(JOB.search);
+    return {
+      search,
+      scan: search,
+      apply: group(JOB.apply),
+      email_apply: group(JOB.emailApply),
+      company_insight: group(JOB.companyInsight),
+    };
+  }
 }
 
-export const queueService = new QueueService()
+/**
+ * Dipanggil bila ada pemanggil lama. Proses pekerjaan queue ditangani oleh
+ * Worker TERPISAH (`worker/src/worker.ts`) via claim_automation_jobs, jadi
+ * tidak perlu in-process worker di sini.
+ */
+export function initializeWorkers(): void {
+  console.log('[queue.service] Workers dijalankan oleh proses Worker eksternal (DB-as-queue).');
+}
+
+export const queueService = new QueueService();

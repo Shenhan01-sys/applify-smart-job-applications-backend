@@ -1,13 +1,10 @@
 import { FastifyRequest, FastifyReply, HookHandlerDoneFunction } from 'fastify'
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.SUPABASE_URL!
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
-
 export async function authMiddleware(
   request: FastifyRequest,
   reply: FastifyReply,
-) {
+): Promise<void> {
   const authHeader = request.headers.authorization
 
   if (!authHeader?.startsWith('Bearer ')) {
@@ -17,6 +14,8 @@ export async function authMiddleware(
   const token = authHeader.substring(7)
 
   try {
+    const supabaseUrl = process.env.SUPABASE_URL!
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
     const supabase = createClient(supabaseUrl, supabaseKey)
     const { data: { user }, error } = await supabase.auth.getUser(token)
 
