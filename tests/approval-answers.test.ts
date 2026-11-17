@@ -10,8 +10,12 @@ import {
   sanitizeClientAnswers,
 } from '../services/approval-answers.service.ts'
 
-// AI is always replaced: no OpenRouter or Groq request leaves the machine in these tests.
-const realGenerateAnswer = aiPipelineService.generateAnswer.bind(aiPipelineService)
+// AI is always replaced: no OpenRouter or Groq request leaves the machine in these tests. Outside a test
+// that installs its own mock, a call to the real AI throws instead of going to the network.
+const blockRealAI = async () => {
+  throw new Error('real AI call blocked in tests')
+}
+;(aiPipelineService as any).generateAnswer = blockRealAI
 let aiCalls = 0
 const mockAI = (impl: () => Promise<string>) => {
   aiCalls = 0
@@ -21,7 +25,7 @@ const mockAI = (impl: () => Promise<string>) => {
   }
 }
 afterEach(() => {
-  ;(aiPipelineService as any).generateAnswer = realGenerateAnswer
+  ;(aiPipelineService as any).generateAnswer = blockRealAI
 })
 
 const fullSettings = {
@@ -174,7 +178,10 @@ test('sanitizeClientAnswers: bentuk salah dibuang, nilai dibatasi, needs_review 
 
 test('AI yang menggantung tidak menahan pengajuan: lewat batas waktu, jawaban dikosongkan dan ditandai', async () => {
   const slow = async (field: any, ctx: any) => {
-    if (field.type === 'textarea') await new Promise((r) => setTimeout(r, 300))
+    if (field.type === 'textarea') {
+      await new Promise((r) => setTimeout(r, 300))
+      return { field, value: 'terlambat', confidence: 0.75, source: 'ai' as const, needsReview: true }
+    }
     return formAutofillService.fillField(field, ctx)
   }
   mockAI(async () => 'terlambat')
