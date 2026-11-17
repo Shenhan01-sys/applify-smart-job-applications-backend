@@ -1,0 +1,5 @@
+TypeError: Cannot read properties of undefined (reading 'charCodeAt')
+    at iFree (file:///C:/Users/hansg/HansProject/SolveItAnd0GAndBinanceProject/project/backend/seed_100_users.mjs:223:41)
+    at seedForUser (file:///C:/Users/hansg/HansProject/SolveItAnd0GAndBinanceProject/project/backend/seed_100_users.mjs:215:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async file:///C:/Users/hansg/HansProject/SolveItAnd0GAndBinanceProject/project/backend/seed_100_users.mjs:246:5
