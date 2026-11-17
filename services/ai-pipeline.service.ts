@@ -283,7 +283,8 @@ Instructions:
 
 Write the cover letter now (just the body, no header/footer):`
 
-    // Use free model for Free tier, Claude for Pro tier
+    // Every plan uses the same chain here: OPENROUTER_MODEL (default a free model), the free fallbacks, then
+    // Groq. Only the Edge Function (drafts) and the worker (form planning) pick DeepSeek V4 for Pro.
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
     const result = await this.callAI({
