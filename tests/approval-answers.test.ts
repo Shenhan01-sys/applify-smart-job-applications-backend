@@ -171,3 +171,19 @@ test('sanitizeClientAnswers: bentuk salah dibuang, nilai dibatasi, needs_review 
   assert.equal(out[1].needs_review, true)
   assert.equal(out[1].source, 'default')
 })
+
+test('AI yang menggantung tidak menahan pengajuan: lewat batas waktu, jawaban dikosongkan dan ditandai', async () => {
+  const slow = async (field: any, ctx: any) => {
+    if (field.type === 'textarea') await new Promise((r) => setTimeout(r, 300))
+    return formAutofillService.fillField(field, ctx)
+  }
+  mockAI(async () => 'terlambat')
+  const started = Date.now()
+  const rows = await buildApprovalAnswers({ settings: fullSettings, profile, job }, slow, 30)
+  assert.ok(Date.now() - started < 250, 'tidak menunggu filler yang lambat')
+  const why = byQuestion(rows, 'Mengapa tertarik')
+  assert.equal(why.answer, '')
+  assert.equal(why.needs_review, true)
+  assert.equal(why.confidence, 0)
+  assert.equal(byQuestion(rows, 'Nama lengkap').answer, 'Budi Uji', 'pertanyaan lain tetap terjawab')
+})

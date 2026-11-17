@@ -96,7 +96,23 @@ export interface AnswerInput {
  *   needs_review = needsReview dari filler, ATAU keyakinan tidak tinggi (<= 0,8), ATAU jawaban kosong,
  *                  ATAU jawaban dari AI, ATAU data sumbernya belum diisi pengguna.
  */
-export async function buildApprovalAnswers(input: AnswerInput, filler: Filler = (f, c) => formAutofillService.fillField(f, c)): Promise<ApprovalAnswer[]> {
+// The AI question can wait on a whole model chain (OpenRouter free models, then Groq). Creating the approval
+// must not hang on it: after this long the answer is left as "no data, check it yourself".
+const AI_ANSWER_TIMEOUT_MS = Number(process.env.APPROVAL_ANSWER_TIMEOUT_MS || 25_000)
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`answer timed out after ${ms} ms`)), ms)
+  })
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+}
+
+export async function buildApprovalAnswers(
+  input: AnswerInput,
+  filler: Filler = (f, c) => formAutofillService.fillField(f, c),
+  timeoutMs: number = AI_ANSWER_TIMEOUT_MS
+): Promise<ApprovalAnswer[]> {
   const { settings, profile, job } = input
   const ctx: FormContext = {
     jobTitle: job.title,
@@ -116,7 +132,7 @@ export async function buildApprovalAnswers(input: AnswerInput, filler: Filler = 
     }
     let res: FillResult
     try {
-      res = await filler(q.field, ctx)
+      res = await withTimeout(filler(q.field, ctx), timeoutMs)
     } catch (e) {
       out.push({ question: q.display, answer: '', confidence: 0, needs_review: true, source: 'default' })
       continue
