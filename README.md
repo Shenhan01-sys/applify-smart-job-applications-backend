@@ -115,6 +115,22 @@ match_score    = round(100 x bobot cocok / bobot maksimum)
 - `POST /api/automation/queue` - Add job to queue
 
 ### AI
+Semua rute `/api/ai/*` memanggil model AI, jadi semuanya dijaga sebelum pipeline dipanggil
+(`services/ai-guard.service.ts`): login wajib, lalu batas laju per pengguna, lalu kuota draf bulanan dari RPC
+`get_quota_status` (RPC dan pembaca hasil yang sama dengan Edge Function `generate-application`).
+
+| Status | `code` | Arti |
+|--------|--------|------|
+| 401 | - | Tanpa login |
+| 429 | `quota_exhausted` | Kuota draf bulan ini habis. Body memuat `quota: { quota, used, remaining, allowed }` |
+| 429 | `rate_limited` | Lewat `AI_RATE_LIMIT_PER_MINUTE` (bawaan 10) atau `AI_RATE_LIMIT_PER_HOUR` (bawaan 60). Body memuat `retryAfterSec`, header `Retry-After` ikut dikirim |
+| 503 | `quota_check_failed` / `rate_limit_check_failed` | Kuota atau batas laju tidak dapat diperiksa (galat database): ditolak, tidak diloloskan |
+
+Body galat selalu `{ success: false, error: "<pesan Indonesia>", code, ... }`. Satu surat yang berhasil dibuat lewat
+`/api/ai/cover-letter` dicatat sebagai `application_logs.action = 'ai_draft'`; migrasi
+`database/migrations/2026-11-18_ai_draft_quota_backend.sql` (belum dijalankan) membuat kuota bulanan ikut
+menghitungnya. Tanpa migrasi, rute tetap menolak pengguna yang kuotanya habis dan membatasi laju.
+
 - `POST /api/ai/cover-letter` - Generate cover letter
 - `POST /api/ai/answer` - Generate answer for question
 - `POST /api/ai/extract-skills` - Extract skills from JD

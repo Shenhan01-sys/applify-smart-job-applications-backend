@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { formAutofillService } from '../../services/form-autofill.service.js'
+import { AiAccessError, aiGuardService, type AiGuardService } from '../../services/ai-guard.service.js'
 
 /**
  * Pemetaan galat generasi: 422 CV tidak valid (tidak dinilai), 502 semua model menjawab tetapi ditolak penjaga
@@ -16,10 +17,45 @@ function sendAiError(reply: any, error: any) {
   })
 }
 
+export interface AiRoutesOptions extends FastifyPluginOptions {
+  /** Hanya tes yang mengisi ini (penjaga dengan database tiruan). */
+  guard?: Pick<AiGuardService, 'check' | 'recordDraft'>
+}
+
 export async function aiRoutes(
   app: FastifyInstance,
-  _opts: FastifyPluginOptions
+  opts: AiRoutesOptions
 ) {
+  const guard = opts.guard ?? aiGuardService
+
+  // Setiap rute /api/ai/* memanggil model AI, jadi semuanya lewat penjaga yang sama SEBELUM pipeline dipanggil:
+  // login wajib, lalu batas laju per pengguna, lalu kuota draf bulanan (get_quota_status).
+  // 429 = batas tercapai (code rate_limited atau quota_exhausted), 503 = batas tidak dapat diperiksa.
+  app.addHook('preHandler', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) {
+      return reply.status(401).send({ success: false, error: 'Unauthorized' })
+    }
+    try {
+      const { quota } = await guard.check(userId, request.routeOptions?.url ?? request.url)
+      ;(request as any).aiQuota = quota
+    } catch (error: any) {
+      if (error instanceof AiAccessError) {
+        if (error.extra.retryAfterSec) reply.header('Retry-After', String(error.extra.retryAfterSec))
+        return reply.status(error.statusCode).send({
+          success: false,
+          error: error.message,
+          code: error.code,
+          ...(error.extra.retryAfterSec ? { retryAfterSec: error.extra.retryAfterSec } : {}),
+          ...(error.extra.quota ? { quota: error.extra.quota } : {}),
+        })
+      }
+      request.log.error(error)
+      return reply.status(503).send({ success: false, error: 'Pemeriksaan kuota AI gagal. Coba lagi nanti.', code: 'quota_check_failed' })
+    }
+    return undefined
+  })
+
   // Generate cover letter
   app.post('/cover-letter', async (request, reply) => {
     const { jobTitle, company, jobDescription, userProfile, tone, language } = request.body as any
@@ -32,8 +68,11 @@ export async function aiRoutes(
         userProfile,
         tone,
         language,
-        userId: (request as any).user?.id || 'anonymous',
+        userId: (request as any).user?.id,
       })
+
+      // Satu surat lamaran yang berhasil = satu draf pada kuota bulanan (sama dengan satuan Edge Function).
+      await guard.recordDraft((request as any).user.id, '/cover-letter')
 
       // `language`: bahasa yang dipakai (bawaan Indonesia; Inggris bila lowongan berbahasa Inggris atau diminta).
       // `warnings`: angka atau klaim yang tidak ada di profil; tampilkan sebelum pengguna menyetujui.
@@ -112,7 +151,7 @@ export async function aiRoutes(
         jobDescription,
         userProfile,
         language,
-        userId: (request as any).user?.id || 'anonymous',
+        userId: (request as any).user?.id,
       })
 
       // Peringatan dasar fakta (angka, proyek, sertifikasi, perusahaan yang tidak ada di profil) ikut dikirim,
@@ -134,7 +173,7 @@ export async function aiRoutes(
         company,
         jobDescription,
         requireEducation: requireEducation === false ? false : undefined,
-        userId: (request as any).user?.id || 'anonymous',
+        userId: (request as any).user?.id,
       })
 
       return { success: true, evaluation, model: aiPipelineService.lastModelUsed }

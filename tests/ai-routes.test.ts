@@ -7,6 +7,8 @@ import { aiRoutes } from '../api/routes/ai.ts'
 /**
  * HTTP-level check of /api/ai/cv, /api/ai/cv/evaluate and /api/ai/cover-letter with the pipeline replaced:
  * no model is called. Verifies what the UI receives: warnings, language, and explicit errors.
+ * Login and the quota/rate-limit guard are covered in ai-guard.test.ts; here a signed-in user and a guard
+ * that lets everything through stand in for them.
  */
 let app: FastifyInstance
 const original = {
@@ -17,7 +19,11 @@ const original = {
 
 beforeEach(async () => {
   app = Fastify()
-  await app.register(aiRoutes, { prefix: '/api/ai' })
+  app.addHook('preHandler', async (req) => {
+    ;(req as any).user = { id: 'u1' }
+  })
+  const guard = { check: async () => ({ quota: { quota: 10, used: 0, remaining: 10, allowed: true } }), recordDraft: async () => {} }
+  await app.register(aiRoutes, { prefix: '/api/ai', guard })
 })
 afterEach(async () => {
   Object.assign(aiPipelineService, original)
