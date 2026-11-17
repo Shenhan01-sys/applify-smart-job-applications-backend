@@ -1,5 +1,21 @@
-import { BaseMCPClient, JobPosting, MCPResponse } from '../shared/types.js'
+import { BaseMCPClient, BROWSER_LIKE_USER_AGENT, JobPosting, MCPResponse } from '../shared/types.js'
 import { chromium } from 'playwright'
+
+/**
+ * Browser options for LinkedIn. Applify does not disguise its automation: no User-Agent rotation and no
+ * flag that hides the automation marker (--disable-blink-features=AutomationControlled). One fixed,
+ * ordinary desktop Chrome UA, the same one the other portal clients use (BROWSER_LIKE_USER_AGENT).
+ * '--no-sandbox' stays because containers (Docker, EC2) cannot run Chromium's sandbox as root.
+ */
+export const LINKEDIN_LAUNCH_ARGS: string[] = ['--no-sandbox']
+
+export function linkedinContextOptions(storageState?: string) {
+  return {
+    userAgent: BROWSER_LIKE_USER_AGENT,
+    viewport: { width: 1280, height: 720 },
+    ...(storageState ? { storageState } : {}),
+  }
+}
 
 export class LinkedInMCPClient extends BaseMCPClient {
   name = 'linkedin'
@@ -12,19 +28,8 @@ export class LinkedInMCPClient extends BaseMCPClient {
   private context: any = null
 
   async initBrowser(headless = true, userDataDir?: string) {
-    this.browser = await chromium.launch({
-      headless,
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-      ],
-    })
-
-    this.context = await this.browser.newContext({
-      userAgent: this.getRandomUserAgent(),
-      viewport: { width: 1280, height: 720 },
-      ...(userDataDir ? { storageState: userDataDir } : {}),
-    })
+    this.browser = await chromium.launch({ headless, args: LINKEDIN_LAUNCH_ARGS })
+    this.context = await this.browser.newContext(linkedinContextOptions(userDataDir))
   }
 
   async closeBrowser() {
@@ -139,14 +144,5 @@ export class LinkedInMCPClient extends BaseMCPClient {
     } catch (error: any) {
       return { success: false, error: error.message }
     }
-  }
-
-  private getRandomUserAgent(): string {
-    const agents = [
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    ]
-    return agents[Math.floor(Math.random() * agents.length)]
   }
 }
