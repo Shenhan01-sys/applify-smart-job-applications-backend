@@ -4,6 +4,8 @@
  * Tidak ada yang dikirim; pengguna tetap harus menyetujui versi yang tampil di layar.
  */
 
+import { checkGrounding, sanitizeLetter, type OutputWarning } from './ai-output-guard.js'
+
 export const DEFAULT_REGENERATE_INSTRUCTIONS = 'Make it more concise and highlight relevant experience'
 const MAX_INSTRUCTIONS = 500
 
@@ -41,16 +43,20 @@ export function cleanInstructions(raw: unknown): string {
   return (text || DEFAULT_REGENERATE_INSTRUCTIONS).slice(0, MAX_INSTRUCTIONS)
 }
 
-/** Strip code fences some models wrap around the letter; keep the body as written. */
+/**
+ * Clean the model's reply: code fences, <think> reasoning blocks, a "Here is the letter:" preamble and markdown
+ * bold are removed; the body itself is kept as written. (The pipeline already vets replies; this also covers a
+ * different AI implementation passed in.)
+ */
 export function cleanLetter(raw: string): string {
-  return raw.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/, '').trim()
+  return sanitizeLetter(raw).text
 }
 
 export async function regenerateApprovalCoverLetter(
   db: RegenerateDb,
   ai: RegenerateAI,
   args: { userId: string; approvalId: string; instructions?: unknown; now?: Date }
-): Promise<{ coverLetter: string; model: string | null }> {
+): Promise<{ coverLetter: string; model: string | null; warnings: OutputWarning[] }> {
   const now = args.now ?? new Date()
   const { data: row, error } = await db
     .from('approval_requests')
@@ -93,5 +99,8 @@ export async function regenerateApprovalCoverLetter(
     .eq('status', 'pending')
   if (upErr) throw new Error(`could not save regenerated cover letter: ${upErr.message}`)
 
-  return { coverLetter, model: ai.lastModelUsed ?? null }
+  // The rewrite may not add facts. Numbers and percentages that the original letter did not contain are returned
+  // as warnings for the approval screen (the user decides; nothing is silently trusted).
+  const warnings = checkGrounding(coverLetter, { text: String(row.cover_letter ?? '') }, { sections: false })
+  return { coverLetter, model: ai.lastModelUsed ?? null, warnings }
 }

@@ -104,3 +104,34 @@ test('AI membalas kosong: ditolak, surat lama tidak ditimpa', async () => {
   await assert.rejects(regenerateApprovalCoverLetter(db, ai, { userId: 'u1', approvalId: 'a1', now: NOW }), EmptyDraftError)
   assert.equal(db.rows('approval_requests')[0].cover_letter, 'Surat lama yang panjang.')
 })
+
+test('blok <think>, kalimat pengantar, dan tebal markdown dari model dibuang sebelum disimpan', async () => {
+  const db = seed()
+  const { ai } = fakeAI('<think>Thinking Process: ...</think>\nHere is the letter:\n**Dengan hormat**, saya melamar posisi ini.')
+  const out = await regenerateApprovalCoverLetter(db, ai, { userId: 'u1', approvalId: 'a1', now: NOW })
+  assert.equal(out.coverLetter, 'Dengan hormat, saya melamar posisi ini.')
+  assert.equal(db.rows('approval_requests')[0].cover_letter, 'Dengan hormat, saya melamar posisi ini.')
+})
+
+test('jawaban hanya <think> tanpa penutup = surat kosong: EmptyDraftError (502), surat lama tidak diganti', async () => {
+  const db = seed()
+  const { ai } = fakeAI('<think>\nThinking Process:\n1. ...')
+  await assert.rejects(
+    regenerateApprovalCoverLetter(db, ai, { userId: 'u1', approvalId: 'a1', now: NOW }),
+    (e: any) => e instanceof EmptyDraftError && e.statusCode === 502
+  )
+  assert.equal(db.rows('approval_requests')[0].cover_letter, 'Surat lama yang panjang.')
+})
+
+test('angka yang tidak ada di surat asli dikembalikan sebagai peringatan; tanpa angka baru = tanpa peringatan', async () => {
+  const original = 'Saya punya pengalaman 5 tahun dan menurunkan biaya sebesar 20 % di tempat kerja.'
+  const added = fakeAI('Dengan 5 tahun pengalaman saya menurunkan biaya 20 % dan menaikkan penjualan 45 %.')
+  const out = await regenerateApprovalCoverLetter(seed({ cover_letter: original }), added.ai, { userId: 'u1', approvalId: 'a1', now: NOW })
+  assert.equal(out.warnings.length, 1)
+  assert.equal(out.warnings[0].kind, 'unsupported_percentage')
+  assert.deepEqual(out.warnings[0].values, ['45%'])
+
+  const same = fakeAI('Dengan 5 tahun pengalaman saya menurunkan biaya 20 %.')
+  const clean = await regenerateApprovalCoverLetter(seed({ cover_letter: original }), same.ai, { userId: 'u1', approvalId: 'a1', now: NOW })
+  assert.deepEqual(clean.warnings, [])
+})

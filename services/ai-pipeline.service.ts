@@ -1,5 +1,24 @@
 import axios from 'axios'
 import { tracingService } from './tracing.service.js'
+import {
+  GROUNDING_RULES,
+  acceptCoverLetter,
+  acceptCv,
+  acceptEvaluation,
+  buildGroundingSource,
+  checkGrounding,
+  detectLanguage,
+  languageInstruction,
+  sanitizeCv,
+  selectLanguage,
+  stripReasoning,
+  validateCoverLetter,
+  validateCv,
+  type AcceptOutcome,
+  type OutputLanguage,
+  type OutputWarning,
+  type ProfileLike,
+} from './ai-output-guard.js'
 
 const getOpenRouterKey = () => process.env.OPENROUTER_API_KEY
 const getGroqKey = () => process.env.GROQ_API_KEY
@@ -86,6 +105,38 @@ interface AIGenerationParams {
   messages: Array<{ role: string; content: string }>
   temperature?: number
   max_tokens?: number
+  /**
+   * Penjaga mutu keluaran. Dipanggil untuk setiap jawaban model; jawaban yang ditolak (rantai pikir, CV terpotong,
+   * huruf asing, ...) tidak dikembalikan: rantai model lanjut ke model berikutnya. Tanpa accept, jawaban hanya
+   * dibersihkan dari blok penalaran dan harus tidak kosong.
+   */
+  accept?: (raw: string) => AcceptOutcome
+}
+
+/** Semua model di rantai menjawab, tetapi tidak satu pun jawabannya lolos pemeriksaan mutu. Tidak ada yang disimpan. */
+export class OutputRejectedError extends Error {
+  readonly statusCode = 502
+  readonly code = 'output_rejected'
+  constructor(readonly reasons: string[], attempts: number) {
+    super(`AI output rejected by quality checks after ${attempts} attempt(s): ${[...new Set(reasons)].join(', ')}. Nothing was saved.`)
+  }
+}
+
+/** CV yang diminta dinilai ternyata tidak valid (rantai pikir, terpotong, dst.): penilai menolak memberi skor. */
+export class InvalidCvError extends Error {
+  readonly statusCode = 422
+  readonly code = 'invalid_cv'
+  constructor(readonly reasons: string[], readonly details: string[]) {
+    super(`CV tidak valid, tidak dinilai: ${details.join('; ') || reasons.join(', ')}`)
+  }
+}
+
+export interface GeneratedDocument {
+  text: string
+  /** Peringatan lunak: angka, proyek, atau perusahaan yang tidak ada di profil; bahasa tidak sesuai. */
+  warnings: OutputWarning[]
+  language: OutputLanguage
+  model: string | null
 }
 
 interface CoverLetterParams {
@@ -100,6 +151,8 @@ interface CoverLetterParams {
     summary: string
   }
   tone?: 'professional' | 'casual' | 'enthusiastic'
+  /** 'id' | 'en' | 'auto'. Bawaan: Bahasa Indonesia, kecuali deskripsi lowongan jelas berbahasa Inggris. */
+  language?: string
 }
 
 interface AnswerQuestionParams {
@@ -110,11 +163,69 @@ interface AnswerQuestionParams {
   userProfile: any
 }
 
+type CvProfile = ProfileLike & {
+  firstName: string
+  lastName: string
+  yearsOfExperience: string
+  skills: string[]
+  summary: string
+  workExperiences?: Array<{ role_title: string; company_name: string; start_date: string; end_date?: string; description?: string }>
+  education?: Array<{ degree: string; field_of_study: string; institution: string; start_year?: number; end_year?: number }>
+  /** Hanya bila profil memang memuatnya. CV tidak boleh memuat proyek atau sertifikasi di luar daftar ini. */
+  projects?: string[]
+  certifications?: string[]
+}
+
+// Judul seksi CV per bahasa. Semuanya dikenali validator (services/ai-output-guard.ts).
+const CV_HEADINGS: Record<OutputLanguage, Record<'summary' | 'competencies' | 'experience' | 'projects' | 'education' | 'certifications' | 'skills', string>> = {
+  en: {
+    summary: 'PROFESSIONAL SUMMARY', competencies: 'CORE COMPETENCIES', experience: 'PROFESSIONAL EXPERIENCE',
+    projects: 'KEY PROJECTS', education: 'EDUCATION', certifications: 'CERTIFICATIONS & ACHIEVEMENTS', skills: 'TECHNICAL SKILLS',
+  },
+  id: {
+    summary: 'RINGKASAN PROFESIONAL', competencies: 'KOMPETENSI INTI', experience: 'PENGALAMAN PROFESIONAL',
+    projects: 'PROYEK UTAMA', education: 'PENDIDIKAN', certifications: 'SERTIFIKASI DAN CAPAIAN', skills: 'KETERAMPILAN TEKNIS',
+  },
+}
+
+interface CallState {
+  rejections: string[]
+  attempts: number
+  soft: { text: string; model: string } | null
+}
+
 export class AIPipelineService {
   /** Provider/model that answered the most recent call (diagnostics and test metrics). */
   lastModelUsed: string | null = null
 
   private async callAI(params: AIGenerationParams): Promise<string> {
+    return (await this.callAIDetailed(params)).text
+  }
+
+  /** Terapkan penjaga mutu pada satu jawaban. Mengembalikan teks bersih, atau null bila ditolak (dicatat di state). */
+  private vet(params: AIGenerationParams, label: string, content: string, state: CallState): string | null {
+    const verdict: AcceptOutcome = params.accept
+      ? params.accept(content)
+      : (() => {
+          const r = stripReasoning(content)
+          return r.text
+            ? ({ ok: true, text: r.text, warnings: [], repaired: r.removed ? ['reasoning_removed'] : [] } as AcceptOutcome)
+            : ({ ok: false, reasons: ['empty'] } as AcceptOutcome)
+        })()
+    if (verdict.ok === true) {
+      if (verdict.repaired.length > 0) console.warn(`[AI] Output from ${label} repaired: ${verdict.repaired.join(', ')}`)
+      return verdict.text
+    }
+    const rejected = verdict as Extract<AcceptOutcome, { ok: false }>
+    console.warn(`[AI] Output from ${label} rejected (${rejected.reasons.join(', ')}); trying next model...`)
+    state.rejections.push(...rejected.reasons)
+    state.attempts++
+    if (rejected.fallbackText && !state.soft) state.soft = { text: rejected.fallbackText, model: label }
+    return null
+  }
+
+  private async callAIDetailed(params: AIGenerationParams): Promise<{ text: string; model: string }> {
+    const state: CallState = { rejections: [], attempts: 0, soft: null }
     const chain = Date.now() < openRouterCappedUntil
       ? []
       : await getModelChain(params.model || process.env.OPENROUTER_MODEL)
@@ -169,11 +280,17 @@ export class AIPipelineService {
           lastError = new Error(`Empty completion from ${model}`)
           continue
         }
+        // Quality gate: a 200 with chain-of-thought, a truncated CV or stray foreign script is NOT a success.
+        const vetted = this.vet(params, `openrouter:${model}`, content, state)
+        if (vetted === null) {
+          lastError = new Error(`Output from ${model} rejected by quality checks`)
+          continue
+        }
         if (i > 0) {
           console.log(`[AI] Succeeded on fallback model ${model} (after ${i} retry)`)
         }
         this.lastModelUsed = `openrouter:${model}`
-        return content
+        return { text: vetted, model: `openrouter:${model}` }
       } catch (error: any) {
         const msg = error.message || ''
         const status = error.response?.status
@@ -195,10 +312,22 @@ export class AIPipelineService {
     // All OpenRouter models exhausted → try Groq backup provider
     if (getGroqKey()) {
       console.warn(`[AI] All OpenRouter models exhausted. Trying Groq backup provider...`)
-      const groqResult = await this.callGroq(params)
+      const groqResult = await this.callGroq(params, state)
       if (groqResult !== null) {
         return groqResult
       }
+    }
+
+    // No model produced a fully acceptable answer. A "soft" failure (for example wrong language) still beats
+    // nothing: use the first such answer and let the caller attach the warning.
+    if (state.soft) {
+      console.warn(`[AI] No model satisfied every check; using ${state.soft.model} output with a warning`)
+      this.lastModelUsed = state.soft.model
+      return { text: state.soft.text, model: state.soft.model }
+    }
+    // Models did answer, but every answer failed the quality gate: explicit error, nothing is saved.
+    if (state.rejections.length > 0) {
+      throw new OutputRejectedError(state.rejections, state.attempts)
     }
 
     throw new Error(`AI generation failed after ${chain.length} OpenRouter + Groq model attempts. Last: ${lastError?.message || 'unknown'}`)
@@ -206,7 +335,7 @@ export class AIPipelineService {
 
   // Groq backup provider — OpenAI-compatible API at api.groq.com.
   // Returns null if all Groq models fail (so caller can throw combined error).
-  private async callGroq(params: AIGenerationParams): Promise<string | null> {
+  private async callGroq(params: AIGenerationParams, state: CallState): Promise<{ text: string; model: string } | null> {
     const groqKey = getGroqKey()
     if (!groqKey) return null
 
@@ -246,9 +375,11 @@ export class AIPipelineService {
           console.warn(`[AI] Empty completion from Groq ${model}, trying next Groq model...`)
           continue
         }
+        const vetted = this.vet(params, `groq:${model}`, content, state)
+        if (vetted === null) continue
         console.log(`[AI] Succeeded on Groq model ${model} (backup provider)`)
         this.lastModelUsed = `groq:${model}`
-        return content
+        return { text: vetted, model: `groq:${model}` }
       } catch (error: any) {
         console.error(`[AI] Groq error on ${model}: ${(error.message || '').substring(0, 80)}`)
         await new Promise((r) => setTimeout(r, 1500))
@@ -258,9 +389,12 @@ export class AIPipelineService {
     return null
   }
 
-  async generateCoverLetter(params: CoverLetterParams & { userId?: string }): Promise<string> {
+  async generateCoverLetter(params: CoverLetterParams & { userId?: string }): Promise<GeneratedDocument> {
     const { jobTitle, company, jobDescription, userProfile, tone = 'professional', userId } = params
     const startTime = Date.now()
+
+    // Bahasa: permintaan eksplisit menang; selain itu Indonesia, kecuali lowongan jelas berbahasa Inggris.
+    const language = selectLanguage({ requested: params.language, jobText: `${jobTitle}\n${jobDescription}` })
 
     const prompt = `Write a compelling cover letter for a ${jobTitle} position at ${company}.
 
@@ -274,12 +408,16 @@ Candidate Profile:
 - Background: ${userProfile.summary}
 
 Instructions:
+- Language: ${languageInstruction(language)}
 - Tone: ${tone}
 - Length: 200-300 words
-- Highlight relevant skills and experience
+- Highlight relevant skills and experience that appear in the candidate profile
 - Show enthusiasm for the company and role
 - Include a strong call to action
 - Do NOT use generic templates - make it personalized
+
+Grounding rules (strict):
+${GROUNDING_RULES.map((r) => `- ${r}`).join('\n')}
 
 Write the cover letter now (just the body, no header/footer):`
 
@@ -287,11 +425,13 @@ Write the cover letter now (just the body, no header/footer):`
     // Groq. Only the Edge Function (drafts) and the worker (form planning) pick DeepSeek V4 for Pro.
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
-    const result = await this.callAI({
+    const allowedContext = [userProfile.firstName, userProfile.lastName, company, jobTitle, jobDescription, userProfile.summary].join(' ')
+    const result = await this.callAIDetailed({
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.8,
       max_tokens: 1500,
+      accept: (raw) => acceptCoverLetter(raw, { language, allowedContext }),
     })
 
     // Trace the generation
@@ -300,11 +440,17 @@ Write the cover letter now (just the body, no header/footer):`
       type: 'cover_letter',
       model,
       prompt,
-      output: result,
+      output: result.text,
       duration: Date.now() - startTime,
     })
 
-    return result
+    // Soft checks on the accepted text: wrong language, and numbers/percentages the profile does not support.
+    const check = validateCoverLetter(result.text, { language, allowedContext })
+    const warnings = [
+      ...check.warnings,
+      ...checkGrounding(result.text, buildGroundingSource(userProfile), { sections: false }),
+    ]
+    return { text: result.text, warnings, language, model: result.model }
   }
 
   /**
@@ -322,15 +468,19 @@ Write the cover letter now (just the body, no header/footer):`
     const { original, instructions, jobTitle, company, jobDescription, userId } = params
     const startTime = Date.now()
 
+    // Surat tulis ulang harus tetap berbahasa sama dengan surat asli (bila bahasanya jelas terdeteksi).
+    const originalLang = detectLanguage(original).lang
+    const language: OutputLanguage | undefined = originalLang === 'unknown' ? undefined : originalLang
+
     const prompt = `Rewrite the cover letter below for a ${jobTitle} position at ${company}.
 
 Candidate's instructions for the rewrite:
 ${instructions}
 
 Rules:
-- Keep every fact that is in the original letter. Do NOT invent employers, degrees, skills, numbers or dates.
-- Keep the same language as the original letter.
-- Output only the letter body (no header, footer, subject line or commentary).
+- Keep every fact that is in the original letter. Do NOT invent employers, degrees, skills, numbers, percentages or dates.
+- Keep the same language as the original letter${language ? ` (${language === 'en' ? 'English' : 'Bahasa Indonesia'})` : ''}.
+- Output only the letter body (no header, footer, subject line or commentary). Do not output your reasoning or <think> tags.
 
 Job Description:
 ${jobDescription || '(not available)'}
@@ -340,11 +490,13 @@ ${original}`
 
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
+    const allowedContext = [original, company, jobTitle, jobDescription].join(' ')
     const result = await this.callAI({
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
       max_tokens: 1500,
+      accept: (raw) => acceptCoverLetter(raw, { language, allowedContext }),
     })
 
     await tracingService.traceAIGeneration({
@@ -462,27 +614,20 @@ RECOMMENDATION: [1-2 sentence recommendation]`
   // ─── CV / Resume Generation ───────────────────────────────────────────────
 
   async generateCV(params: {
-    userProfile: {
-      firstName: string
-      lastName: string
-      currentTitle?: string
-      email?: string
-      phone?: string
-      location?: string
-      linkedinUrl?: string
-      yearsOfExperience: string
-      skills: string[]
-      summary: string
-      workExperiences?: Array<{ role_title: string; company_name: string; start_date: string; end_date?: string; description?: string }>
-      education?: Array<{ degree: string; field_of_study: string; institution: string; start_year?: number; end_year?: number }>
-    }
+    userProfile: CvProfile
     jobTitle: string
     company: string
     jobDescription: string
+    /** 'id' | 'en' | 'auto'. Bawaan: Bahasa Indonesia, kecuali deskripsi lowongan jelas berbahasa Inggris. */
+    language?: string
     userId?: string
-  }): Promise<string> {
+  }): Promise<GeneratedDocument> {
     const { userProfile, jobTitle, company, jobDescription, userId } = params
     const startTime = Date.now()
+
+    const language = selectLanguage({ requested: params.language, jobText: `${jobTitle}\n${jobDescription}` })
+    const H = CV_HEADINGS[language]
+    const notProvided = language === 'id' ? 'Tidak tersedia' : 'Not provided'
 
     const expLines = (userProfile.workExperiences || [])
       .map(e => `  - ${e.role_title} at ${e.company_name} (${e.start_date}${e.end_date ? ' - ' + e.end_date : ' - present'})${e.description ? ': ' + e.description : ''}`)
@@ -492,9 +637,12 @@ RECOMMENDATION: [1-2 sentence recommendation]`
       .map(e => `  - ${e.degree} in ${e.field_of_study} at ${e.institution} (${e.start_year || ''}-${e.end_year || ''})`)
       .join('\n')
 
-    const prompt = `You are an expert CV/resume writer specializing in ATS-optimized resumes.
+    const projectLines = (userProfile.projects || []).map(p => `  - ${p}`).join('\n')
+    const certLines = (userProfile.certifications || []).map(c => `  - ${c}`).join('\n')
 
-TASK: Create a professional, ATS-friendly CV/resume for the following candidate, tailored to the target job.
+    const prompt = `You are an expert CV/resume writer specializing in ATS-friendly resumes.
+
+TASK: Create a professional, ATS-friendly CV/resume for the candidate below, tailored to the target job, using ONLY the facts in the candidate profile. This CV may be sent to a real employer, so it must be truthful.
 
 === TARGET JOB ===
 Title: ${jobTitle}
@@ -502,95 +650,86 @@ Company: ${company}
 Job Description:
 ${jobDescription}
 
-=== CANDIDATE PROFILE ===
+=== CANDIDATE PROFILE (the ONLY source of facts) ===
 Name: ${userProfile.firstName} ${userProfile.lastName}
-Current Title: ${userProfile.currentTitle || 'N/A'}
-Email: ${userProfile.email || 'candidate@email.com'}
-Phone: ${userProfile.phone || '+62-xxx-xxx-xxxx'}
-Location: ${userProfile.location || 'Indonesia'}
-LinkedIn: ${userProfile.linkedinUrl || 'linkedin.com/in/candidate'}
+Current Title: ${userProfile.currentTitle || '(not provided)'}
+Email: ${userProfile.email || '(not provided)'}
+Phone: ${userProfile.phone || '(not provided)'}
+Location: ${userProfile.location || '(not provided)'}
+LinkedIn: ${userProfile.linkedinUrl || '(not provided)'}
 Years of Experience: ${userProfile.yearsOfExperience}
 Skills: ${userProfile.skills.join(', ')}
 Summary: ${userProfile.summary}
 
 Work Experience:
-${expLines || '  (See summary above)'}
+${expLines || '  (not provided)'}
 
 Education:
-${eduLines || '  (Not specified)'}
+${eduLines || '  (not provided)'}
+
+Projects:
+${projectLines || '  (none provided)'}
+
+Certifications & Achievements:
+${certLines || '  (none provided)'}
+
+=== LANGUAGE ===
+${languageInstruction(language)}
+Use exactly these section headings, in capital letters, each on its own line: ${H.summary}; ${H.competencies}; ${H.experience}; ${H.projects}; ${H.education}; ${H.certifications}; ${H.skills}.
+
+=== GROUNDING RULES (strict, they override every other instruction) ===
+${GROUNDING_RULES.map((r) => `- ${r}`).join('\n')}
+- Do not add a skill, tool, responsibility or achievement just because the job description asks for it. Use job keywords only where the candidate's profile supports them.
+- The ${H.projects} and ${H.certifications} sections: include them ONLY if the profile above lists projects or certifications. Otherwise leave those two sections out completely.
+- Contact line: include only the contact items that are provided above. Never write placeholder or sample contact data.
+- If a core section has no data in the profile, keep its heading and write "${notProvided}" under it.
 
 === REQUIREMENTS ===
-1. ATS-OPTIMIZED: Use standard section headings, no tables/columns/text boxes, no graphics
-2. KEYWORD-OPTIMIZED: Naturally incorporate keywords from the job description
-3. ACTION VERBS: Start bullet points with strong action verbs (Led, Developed, Implemented, Achieved, etc.)
-4. QUANTIFIABLE: Include metrics, percentages, and numbers where possible
-5. TAILORED: Highlight experience most relevant to ${jobTitle} at ${company}
-6. PROFESSIONAL: Clean, single-column, easy to parse
-7. DENSE & COMPLETE: This CV MUST be substantial and information-rich. Aim for a FULL one page minimum (and two pages if the candidate has enough experience). Do NOT leave sections thin. Every section should be well-developed with concrete detail. Never fabricate skills, roles, or metrics the candidate does not have.
+1. ATS-FRIENDLY: standard headings, plain text only, no tables, columns, text boxes or graphics, no markdown (no ** and no # characters).
+2. KEYWORDS: where truthful, reuse wording from the job description for skills the candidate really has.
+3. ACTION VERBS: start each bullet with a strong action verb.
+4. TAILORED: put the experience and skills most relevant to ${jobTitle} at ${company} first.
+5. HONEST LENGTH: the length follows the profile. A short, accurate CV is better than a padded one. Do not repeat the same bullet across roles.
 
-=== OUTPUT FORMAT (plain text, ATS-friendly) ===
-Use this EXACT structure:
+=== OUTPUT FORMAT (plain text) ===
+FULL NAME
+Contact line
 
-[FULL NAME]
-[Phone] | [Email] | [Location] | [LinkedIn]
+${H.summary}
+3-5 sentences: years of experience, current role, core skills and alignment with the target job, all taken from the profile.
 
-PROFESSIONAL SUMMARY
-[5-6 sentences. Detailed summary covering: years of experience, seniority level, core domain expertise, signature achievements with numbers, key technical stack, and clear alignment with the target role. Be specific and dense — no fluff.]
+${H.competencies}
+Comma-separated list of the candidate's real skills, most relevant to the job first.
 
-CORE COMPETENCIES
-[Comma-separated list of 15-22 relevant skills/keywords drawn from the job description and the candidate's actual profile]
+${H.experience}
+Job Title | Company | Location | Start Date - End Date
+  - Action-verb bullet that restates or reasonably summarizes what the profile says about this role (no numbers unless in the profile)
 
-PROFESSIONAL EXPERIENCE
-[Job Title] | [Company] | [Location] | [Start Date - End Date]
-  - [Action verb bullet point with quantifiable achievement + context, 25-40 words]
-  - [Action verb bullet point with quantifiable achievement + context, 25-40 words]
-  - [Action verb bullet point with quantifiable achievement + context, 25-40 words]
-  - [Action verb bullet point with quantifiable achievement + context, 25-40 words]
-  - [Action verb bullet point with quantifiable achievement + context, 25-40 words]
+${H.projects}
+  - Project name: one sentence (only when the profile lists projects)
 
-[Previous Job Title] | [Company] | [Location] | [Start Date - End Date]
-  - [Action verb bullet point with quantifiable achievement + context, 20-35 words]
-  - [Action verb bullet point with quantifiable achievement + context, 20-35 words]
-  - [Action verb bullet point with quantifiable achievement + context, 20-35 words]
-  - [Action verb bullet point with quantifiable achievement + context, 20-35 words]
+${H.education}
+Degree in Field of Study | Institution | Years
 
-[Earlier Job Title] | [Company] | [Location] | [Start Date - End Date]
-  - [Action verb bullet point with quantifiable achievement]
-  - [Action verb bullet point with quantifiable achievement]
-  - [Action verb bullet point with quantifiable achievement]
+${H.certifications}
+  - Certification or achievement (only when the profile lists them)
 
-KEY PROJECTS
-  - [Project name]: [1-2 sentence description with technologies used and measurable impact]
-  - [Project name]: [1-2 sentence description with technologies used and measurable impact]
-
-EDUCATION
-[Degree] in [Field of Study] | [Institution] | [Graduation Year]
-
-CERTIFICATIONS & ACHIEVEMENTS
-  - [Relevant certification or achievement]
-  - [Relevant certification or achievement]
-  - [Relevant certification or achievement]
-
-TECHNICAL SKILLS
-[Group technical skills by category: Languages, Frameworks, Databases, Tools/Cloud, Methodologies]
-
-=== IMPORTANT ===
-- Generate REALISTIC but professional content strictly based on the candidate's actual profile. Do NOT exaggerate seniority, invent skills, or claim experience the candidate does not have.
-- Expand sparse work history into plausible, role-appropriate achievements using the candidate's real title and skills — stay within reason.
-- Each recent job should have 4-5 detailed bullet points; earlier jobs 3 bullets.
-- Keep the entire CV to approximately 600-850 words so it fills ONE full page, or at most TWO pages for very experienced candidates (10+ years, 4+ roles). Avoid padding — do not exceed 2 pages. Only produce less if the candidate genuinely has very little experience — and say so in the evaluation.
-- Do NOT include any meta-commentary, just the CV content.
-- Use real dates (month year format) for experience.
+${H.skills}
+The candidate's skills grouped by category (Languages, Frameworks, Databases, Tools/Cloud, Methodologies); omit empty categories.
 
 Generate the CV now:`
 
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
-    const result = await this.callAI({
+    const source = buildGroundingSource(userProfile)
+    const allowedContext = [source.text, company, jobTitle, jobDescription].join(' ')
+    const requireEducation = (userProfile.education || []).length > 0
+    const result = await this.callAIDetailed({
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
       max_tokens: 2800,
+      accept: (raw) => acceptCv(raw, { allowedContext, requireEducation }),
     })
 
     await tracingService.traceAIGeneration({
@@ -598,11 +737,14 @@ Generate the CV now:`
       type: 'cv_generation',
       model,
       prompt,
-      output: result,
+      output: result.text,
       duration: Date.now() - startTime,
     })
 
-    return result
+    // Nothing here is silently saved as fact: numbers, projects, certifications and employers that the profile
+    // does not support come back as warnings for the UI / approval flow.
+    const warnings = checkGrounding(result.text, source, { sections: true })
+    return { text: result.text, warnings, language, model: result.model }
   }
 
   // ─── CV Evaluation & Scoring ──────────────────────────────────────────────
@@ -612,6 +754,8 @@ Generate the CV now:`
     jobTitle: string
     company: string
     jobDescription: string
+    /** false untuk CV tanpa seksi Pendidikan yang memang sah (profil tanpa data pendidikan). Bawaan true. */
+    requireEducation?: boolean
     userId?: string
   }): Promise<{
     overallScore: number
@@ -626,8 +770,16 @@ Generate the CV now:`
     lengthAssessment: string
     summary: string
   }> {
-    const { cvText, jobTitle, company, jobDescription, userId } = params
+    const { jobTitle, company, jobDescription, userId } = params
     const startTime = Date.now()
+
+    // Penilai tidak boleh memberi skor pada CV yang bukan CV (rantai pikir model, terpotong, huruf asing, placeholder).
+    // Dulu 7 dari 23 CV rantai pikir tetap mendapat skor 70 atau lebih. CV yang hanya perlu dibersihkan (blok
+    // <think>, kalimat pengantar, penanda markdown) dinilai dalam bentuk bersihnya.
+    const cleaned = sanitizeCv(params.cvText ?? '')
+    const cvCheck = validateCv(cleaned.text, { allowedContext: `${company} ${jobTitle} ${jobDescription}`, requireEducation: params.requireEducation })
+    if (!cvCheck.valid) throw new InvalidCvError(cvCheck.reasons, cvCheck.details)
+    const cvText = cleaned.text
 
     const prompt = `You are an expert ATS (Applicant Tracking System) analyzer and resume reviewer.
 
@@ -681,15 +833,19 @@ RECOMMENDATIONS:
 
 LENGTH_ASSESSMENT: [Assess whether the CV fills a full page (1 page minimum) or extends to 2 pages. Explain in 1-2 sentences WHY — e.g. sufficient experience and detail for 2 pages, or limited history so 1 page is appropriate and rational. Do not exaggerate.]
 
-SUMMARY: [2-3 sentence overall assessment of the CV's effectiveness for this specific job]`
+SUMMARY: [2-3 sentence overall assessment of the CV's effectiveness for this specific job]
+
+Output ONLY the evaluation in the format above. Do not output your reasoning or <think> tags.`
 
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
+    // A reply without readable scores is rejected (next model) instead of silently becoming "50 / Review needed.".
     const response = await this.callAI({
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
       max_tokens: 1500,
+      accept: acceptEvaluation,
     })
 
     await tracingService.traceAIGeneration({
@@ -701,11 +857,12 @@ SUMMARY: [2-3 sentence overall assessment of the CV's effectiveness for this spe
       duration: Date.now() - startTime,
     })
 
-    const overallScore = parseInt(response.match(/OVERALL_SCORE:\s*(\d+)/)?.[1] || '50')
-    const atsCompatibilityScore = parseInt(response.match(/ATS_COMPATIBILITY_SCORE:\s*(\d+)/)?.[1] || '50')
-    const keywordMatchScore = parseInt(response.match(/KEYWORD_MATCH_SCORE:\s*(\d+)/)?.[1] || '50')
-    const contentQualityScore = parseInt(response.match(/CONTENT_QUALITY_SCORE:\s*(\d+)/)?.[1] || '50')
-    const formattingScore = parseInt(response.match(/FORMATTING_SCORE:\s*(\d+)/)?.[1] || '50')
+    const score = (re: RegExp) => Math.min(100, Math.max(0, parseInt(response.match(re)?.[1] || '50')))
+    const overallScore = score(/OVERALL_SCORE:\s*(\d+)/)
+    const atsCompatibilityScore = score(/ATS_COMPATIBILITY_SCORE:\s*(\d+)/)
+    const keywordMatchScore = score(/KEYWORD_MATCH_SCORE:\s*(\d+)/)
+    const contentQualityScore = score(/CONTENT_QUALITY_SCORE:\s*(\d+)/)
+    const formattingScore = score(/FORMATTING_SCORE:\s*(\d+)/)
 
     const strengthsBlock = response.match(/STRENGTHS:\s*\n([\s\S]*?)(?=\n\n|\nWEAKNESSES:)/)?.[1] || ''
     const weaknessesBlock = response.match(/WEAKNESSES:\s*\n([\s\S]*?)(?=\n\n|\nMISSING_KEYWORDS:)/)?.[1] || ''

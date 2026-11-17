@@ -290,12 +290,13 @@ export async function approvalRoutes(
     const { instructions } = (request.body ?? {}) as { instructions?: unknown }
 
     try {
-      const { coverLetter, model } = await regenerateApprovalCoverLetter(supabase, aiPipelineService, {
+      const { coverLetter, model, warnings } = await regenerateApprovalCoverLetter(supabase, aiPipelineService, {
         userId,
         approvalId: id,
         instructions,
       })
-      return { success: true, cover_letter: coverLetter, model }
+      // warnings: numbers added by the rewrite that the original letter did not have (shown on the approval screen).
+      return { success: true, cover_letter: coverLetter, model, warnings }
     } catch (error: any) {
       // 404 unknown request, 410 expired, 502 AI gave nothing; anything else is a server fault.
       const status = typeof error?.statusCode === 'number' ? error.statusCode : 500
