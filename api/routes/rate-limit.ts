@@ -22,8 +22,8 @@ export async function rateLimitRoutes(
         platforms: platformLimits,
         quota: {
           tier: userQuota.tier,
-          daily_limit: userQuota.tier === 'pro' ? 20 : 10,
-          daily_used: (userQuota.tier === 'pro' ? 20 : 10) - userQuota.remaining,
+          daily_limit: userQuota.limit,
+          daily_used: userQuota.used,
           daily_remaining: userQuota.remaining,
           resets_at: userQuota.resetsAt,
         },
