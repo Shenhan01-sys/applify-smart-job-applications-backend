@@ -1,0 +1,49 @@
+Rizky Ayu
++62-812-3456-7890 | user067@example.com | Pontianak | https://linkedin.com/in/rizky-ayu-f918d0
+
+PROFESSIONAL SUMMARY
+As a seasoned Financial Analyst with 2 years of experience, I bring a strong foundation in financial modeling, forecasting, and valuation. I have developed a keen eye for detail and a proficiency in Excel, SQL, and PowerPoint. My expertise lies in analyzing financial performance, identifying trends, and providing actionable insights to drive business growth. With a solid understanding of financial reporting and a strong analytical mindset, I am well-equipped to excel in a Financial Analyst role at Astra International.
+
+CORE COMPETENCIES
+Financial Modeling, Excel, SQL, Forecasting, Valuation, Reporting, PowerPoint, Financial Analysis, Financial Planning, Financial Reporting, Data Analysis
+
+PROFESSIONAL EXPERIENCE
+
+Financial Analyst | Astra International | Pontianak | 2024-04-01 - present
+  - Led a team of analysts in developing a comprehensive financial model to forecast revenue and expenses for a major project, resulting in a 15% increase in accuracy and a 20% reduction in project costs.
+  - Developed and implemented a financial reporting framework to provide real-time insights into key performance indicators, resulting in a 30% reduction in reporting time and a 25% increase in data accuracy.
+  - Analyzed financial performance and identified areas for cost savings, resulting in a 12% reduction in operating expenses over a 6-month period.
+  - Collaborated with cross-functional teams to develop and implement a financial planning strategy, resulting in a 10% increase in sales revenue over a 12-month period.
+  - Implemented a data analytics tool to improve financial forecasting, resulting in a 25% improvement in forecasting accuracy.
+
+Financial Analyst | Perusahaan Keuangan A | Pontianak | 2016-10-01 - present
+  - Developed and implemented a financial forecasting model to predict revenue and expenses, resulting in a 20% improvement in forecasting accuracy and a 10% reduction in project costs.
+  - Analyzed financial performance and identified areas for cost savings, resulting in a 15% reduction in operating expenses over a 12-month period.
+  - Collaborated with cross-functional teams to develop and implement a financial planning strategy, resulting in a 10% increase in sales revenue over a 12-month period.
+  - Implemented a data analytics tool to improve financial reporting, resulting in a 25% reduction in reporting time and a 20% increase in data accuracy.
+  - Developed and presented financial reports to senior management, resulting in a 30% increase in confidence in financial decision-making.
+
+Junior Financial Analyst | Perusahaan Keuangan B | Pontianak | 2021-01-01 - 2021-12-31
+  - Assisted in developing a financial model to forecast revenue and expenses for a major project, resulting in a 10% increase in accuracy and a 5% reduction in project costs.
+  - Analyzed financial performance and identified areas for cost savings, resulting in a 5% reduction in operating expenses over a 6-month period.
+  - Collaborated with cross-functional teams to develop and implement a financial planning strategy, resulting in a 5% increase in sales revenue over a 12-month period.
+  - Implemented a data analytics tool to improve financial forecasting, resulting in a 10% improvement in forecasting accuracy.
+  - Developed and presented financial reports to senior management, resulting in a 20% increase in confidence in financial decision-making.
+
+KEY PROJECTS
+
+  - Financial Forecasting Model: Developed a comprehensive financial forecasting model to predict revenue and expenses, resulting in a 20% improvement in forecasting accuracy and a 10% reduction in project costs.
+  - Financial Reporting Framework: Developed and implemented a financial reporting framework to provide real-time insights into key performance indicators, resulting in a 30% reduction in reporting time and a 25% increase in data accuracy.
+
+EDUCATION
+Manajemen Keuangan in Manajemen Keuangan | Universitas Padjadjaran | 2016
+
+CERTIFICATIONS & ACHIEVEMENTS
+
+TECHNICAL SKILLS
+
+Languages: Indonesian, English
+Frameworks: Excel, SQL, PowerPoint
+Databases: Microsoft SQL Server
+Tools/Cloud: Microsoft Office 365, Google Cloud
+Methodologies: Financial Modeling, Financial Forecasting, Financial Planning, Financial Reporting, Data Analysis

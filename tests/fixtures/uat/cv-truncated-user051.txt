@@ -1,0 +1,13 @@
+Citra Salsa  
++62-812-3456-7890 | user051@example.com | Semarang | https://linkedin.com/in/citra-salsa-ab4c9c  
+
+PROFESSIONAL SUMMARY  
+Full‑Stack Developer with 7 years of progressive experience building end‑to‑end web solutions in fast‑paced tech environments. Expert in JavaScript, React, and Node.js, I have led cross‑functional teams to deliver scalable, high‑performance applications that drive revenue growth and enhance user experience. In my current role, I architected an e‑commerce platform that handled 10,000 concurrent users and boosted sales by 25 %. I specialize in RESTful API design, microservice architecture, and containerized deployments, consistently improving system reliability by 30 % through automated CI/CD pipelines. My commitment to clean code, rigorous testing, and agile delivery aligns directly with Bukalapak’s mission to build robust, data‑driven features across frontend and backend.
+
+CORE COMPETENCIES  
+JavaScript, React, Node.js, Express.js, REST API, Docker, HTML5, CSS3, Git, Agile Scrum, Test‑Driven Development, Microservices, CI/CD, API Design, Performance Optimization, Database Modeling, MongoDB, Unit Testing, Code Review, Continuous Integration, Cross‑Functional Collaboration, Technical Leadership
+
+PROFESSIONAL EXPERIENCE  
+
+Full‑Stack Developer | Perusahaan Teknologi A | Semarang | Dec 2018 – Present  
+- Designed and launched a microservice‑based e‑commerce platform

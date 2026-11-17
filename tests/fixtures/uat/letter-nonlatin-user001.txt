@@ -1,0 +1,9 @@
+Dengan bangga saya sampaikan ketertarikan saya untuk bergabung sebagai Frontend Engineer di Tokopedia. Selama 11 tahun berkarier di Bogor, saya telah menata antarmuka web yang tidak hanya menarik secara visual, tetapi juga dioptimalkan untuk performa tinggi, melayani jutaan pengguna secara real‑time.
+
+Di proyek terakhir saya, saya membangun sistem katalog produk menggunakan React 18, TypeScript, dan Tailwind CSS, berintegrasi dengan REST dan GraphQL. Saya memanfaatkan React Query untuk cache data dan Suspense untuk lazy loading, sehingga waktu render pertama turun 40 % dan CPU usage berkurang 25 %. Kemampuan saya dalam mengimplementasi design system internal—misalnya men خوبی reusable component library—memastikan konsistensi UI dan mempercepat iterasi produk.
+
+Selain keahlian teknis, saya memiliki pengalaman mengelola tim lintas fungsi, mengadakan code review, dan mengadopsi CI/CD pipelines yang meminimalisir bug di produksi. Saya juga aktif menyumbangkan artikel di komunitas JavaScript Indonesia, menunjukkan komitmen saya pada inovasi dan berbagi pengetahuan.
+
+Tokopedia adalah platform e‑commerce terbesar di Indonesia, dan saya terinspirasi oleh komitmen perusahaan untuk memudahkan transaksi digital bagi semua kalangan. Saya percaya bahwa keahlian saya dalam membangun UI yang scalable dan responsive akan mendukung visi Tokopedia untuk meningkatkan pengalaman pengguna secara konsisten.
+
+Saya sangat berharap dapat berdiskusi lebih lanjut tentang bagaimana kontribusi saya dapat langsung berdampakjt bagi tim Frontend di Tokopedia. Bersama, kita dapat menciptakan antarmuka web yang tidak hanya cepat, tetapi juga intuitif bagi jutaan pelanggan. Terima kasih atas pertimbangan Anda.

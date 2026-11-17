@@ -1,0 +1,9 @@
+I have long admired GoTo Financial’s commitment to revolutionizing the digital ecosystem in Indonesia. As a QA Engineer with four years of dedicated experience in ensuring software excellence, I am eager to bring my expertise in automation testing to your engineering team to help maintain the high standards of reliability that GoTo users expect.
+
+Throughout my career, I have transitioned from manual testing to architecting robust automation frameworks for both web and mobile platforms. My technical toolkit is directly aligned with your requirements; I have extensive experience using **Selenium** for web automation and **Playwright** to handle complex, modern web interactions. Additionally, I am highly proficient in using **Jest** for unit testing to ensure code quality at the earliest stages of development.
+
+One of my core strengths lies in integrating these automated suites into **CI/CD pipelines**. I don't just write tests; I build seamless testing workflows that allow developers to deploy with confidence and speed. I understand that in a fast-paced fintech environment like GoTo, the ability to catch regressions instantly through automated gates is critical to preventing service disruptions.
+
+I am excited by the prospect of applying my technical skills and my passion for quality to support GoTo Financial’s mission of driving financial inclusion. I would welcome the opportunity to discuss how my background in building scalable automation frameworks can contribute to the continued success of your development lifecycle.
+
+Thank you for your time and consideration. I look forward to hearing from you soon.

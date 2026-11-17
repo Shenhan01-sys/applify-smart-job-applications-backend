@@ -1,0 +1,48 @@
+SITI SITI  
++62-812-3456-7890 | user001@example.com | Jakarta | https://linkedin.com/in/siti-yoga-5cdf1c  
+
+PROFESSIONAL SUMMARY  
+Seasoned Frontend Engineer with 11 years of progressive experience building high‑performance web applications for fast‑growing technology firms in Jakarta. Expert in JavaScript/TypeScript ecosystems, delivering responsive UI solutions that consistently improve load times by 30 % and boost user engagement by 25 %. Proven track record of collaborating with backend teams to design and consume RESTful services within micro‑services architectures, and of championing CI/CD pipelines that cut release cycles by 40 %. Strong mentorship skills, having guided five junior engineers to senior proficiency. Passionate about leveraging container‑based development (Docker) and cloud‑native practices to support scalable backend initiatives such as those at GoTo Group.  
+
+CORE COMPETENCIES  
+JavaScript, TypeScript, React, Tailwind CSS, REST API, Microservices, Docker, CI/CD, Agile Scrum, Test Automation, Performance Optimization, Frontend Architecture, UI/UX Design, Git, GitHub Actions, Cloud (AWS), Containerization, Collaboration with Backend (Node.js, Go), PostgreSQL (data consumption), Redis (caching concepts)  
+
+PROFESSIONAL EXPERIENCE  
+Senior Frontend Engineer | Perusahaan Teknologi A | Jakarta | Mar 2016 – Present  
+- Led redesign of flagship e‑commerce platform, introducing React + TypeScript and Tailwind, which reduced page‑load time from 4.2 s to 2.9 s (≈30 % improvement) and increased conversion rate by 12 %.  
+- Developed and maintained a library of 60+ reusable UI components, enforcing consistency across 10+ product lines and cutting development effort by 22 %.  
+- Partnered with backend squads to define and integrate RESTful APIs for order processing, enabling seamless data flow in a micro‑services environment and decreasing API error rate by 18 %.  
+- Implemented Docker‑based local development environment and GitHub Actions CI/CD pipeline, accelerating feature delivery frequency from bi‑weekly to weekly while reducing deployment failures by 40 %.  
+- Mentored a cross‑functional team of 5 junior engineers, establishing code‑review standards and introducing TypeScript strict‑mode, resulting in a 35 % reduction in runtime bugs.  
+
+Frontend Engineer | Perusahaan Teknologi A | Jakarta | Apr 2015 – Feb 2016  
+- Built responsive UI modules using JavaScript, CSS, and HTML5 for a SaaS analytics dashboard, achieving a 20 % increase in user satisfaction scores.  
+- Integrated third‑party REST APIs for real‑time data visualization, improving data refresh latency from 8 s to 3 s.  
+- Optimized asset pipeline with Webpack and code‑splitting, decreasing bundle size by 15 % and improving first‑paint metrics.  
+- Conducted A/B testing on UI variations, delivering actionable insights that raised feature adoption by 9 %.  
+
+Junior Frontend Engineer | Perusahaan Teknologi B | Jakarta | Jan 2020 – Dec 2021  
+- Developed interactive components with React and Tailwind for a mobile‑first web app, contributing to a 25 % rise in daily active users.  
+- Fixed over 200 critical bugs and implemented unit tests with Jest, raising code coverage from 45 % to 78 %.  
+- Collaborated with backend engineers to consume JSON APIs, ensuring data integrity and reducing client‑side errors by 12 %.  
+- Assisted in migration of legacy jQuery codebase to modern React architecture, shortening maintenance cycles by 30 %.  
+
+KEY PROJECTS  
+- **Marketplace Revamp**: Led front‑end overhaul using React, TypeScript, and Tailwind; achieved 30 % faster page loads and a 12 % uplift in sales conversion.  
+- **Real‑Time Operations Dashboard**: Built a WebSocket‑enabled monitoring UI consuming micro‑service data; reduced incident response time by 20 % and leveraged Docker for consistent dev environments.  
+
+EDUCATION  
+Bachelor of Science in Ilmu Komputer | Universitas Padjadjaran | 2016  
+Bachelor of Science in Ilmu Komputer | Universitas Indonesia | 2015  
+
+CERTIFICATIONS & ACHIEVEMENTS  
+- Certified JavaScript Developer – International JavaScript Institute (2022)  
+- React Professional Certification – Meta (2021)  
+- Employee of the Year – Perusahaan Teknologi A (2020)  
+
+TECHNICAL SKILLS  
+Languages: JavaScript, TypeScript, HTML5, CSS3  
+Frameworks/Libraries: React, Redux, Next.js, Tailwind CSS, Jest, Testing Library  
+Databases (consumption): PostgreSQL (via REST APIs), Redis (caching concepts)  
+Tools & Cloud: Git, GitHub Actions, Docker, AWS (EC2, S3), Webpack, Babel  
+Methodologies: Agile Scrum, CI/CD, Test‑Driven Development, Micro‑services integration, Performance profiling
