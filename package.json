@@ -12,7 +12,8 @@
     "mcp:jobs": "tsx mcp/server.ts",
     "mcp:jobs:http": "tsx mcp/server.ts --http",
     "smoke:portals": "tsx mcp/smoke-portals.ts",
-    "test:portals": "tsx --test \"mcp/__tests__/*.test.ts\""
+    "test:portals": "tsx --test \"mcp/__tests__/*.test.ts\"",
+    "test": "tsx --test \"tests/*.test.ts\" \"mcp/__tests__/*.test.ts\""
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

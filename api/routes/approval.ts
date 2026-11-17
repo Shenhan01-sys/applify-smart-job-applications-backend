@@ -164,8 +164,9 @@ export async function approvalRoutes(
     const editedCoverLetter =
       typeof body.cover_letter === 'string' && body.cover_letter.trim() ? body.cover_letter : undefined
 
-    // Update status to approved
-    const { error } = await supabase
+    // Update status to approved. Guarded on status 'pending' so a double click (or two tabs) approves,
+    // and queues, exactly once.
+    const { data: updated, error } = await supabase
       .from('approval_requests')
       .update({
         status: 'approved',
@@ -173,9 +174,15 @@ export async function approvalRoutes(
         ...(editedCoverLetter ? { cover_letter: editedCoverLetter } : {}),
       })
       .eq('id', id)
+      .eq('user_id', userId)
+      .eq('status', 'pending')
+      .select('id')
 
     if (error) {
       return reply.status(500).send({ error: error.message })
+    }
+    if (!updated || updated.length === 0) {
+      return reply.status(409).send({ error: 'Approval request was already processed' })
     }
 
     if (editedCoverLetter && requestData.application_id) {
@@ -189,12 +196,8 @@ export async function approvalRoutes(
     // Persetujuan pengguna = izin kirim untuk lamaran ini (HITL). Worker tetap memerlukan
     // ALLOW_REAL_SUBMIT=true sebelum benar-benar menekan tombol kirim.
     try {
-      const queued = await queueService.addApplyJob(userId, {
-        job_id: requestData.job_id,
-        application_id: requestData.application_id ?? null,
-        approval_request_id: id,
-        approved: true,
-      })
+      // addApprovedApplyJob re-reads the row: `approved: true` is written by the server, from the database.
+      const queued = await queueService.addApprovedApplyJob(userId, id)
       return { success: true, message: 'Application approved and queued for submission', queue_job_id: queued.id }
     } catch (err: any) {
       // Jangan biarkan status "approved" tanpa pekerjaan di antrean.

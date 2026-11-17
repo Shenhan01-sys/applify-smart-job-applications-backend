@@ -1,0 +1,143 @@
+/**
+ * Tiny in-memory stand-in for the Supabase query builder, for unit tests only.
+ * Supports the calls the worker and backend make: select/insert/update/delete, eq/neq/gt/gte/lt/lte/in/is/
+ * contains filters, order/limit, single/maybeSingle, and head+count selects. No network is ever used.
+ */
+type Row = Record<string, any>;
+type Result = { data: any; error: { message: string; code?: string } | null; count?: number | null };
+
+function isSubset(sub: any, sup: any): boolean {
+  if (sub === null || typeof sub !== "object") return sub === sup;
+  if (sup === null || typeof sup !== "object") return false;
+  return Object.entries(sub).every(([k, v]) => isSubset(v, sup[k]));
+}
+
+export class FakeDb {
+  tables: Record<string, Row[]>;
+  /** Every write, in order: { table, op, payload } — for assertions. */
+  writes: Array<{ table: string; op: "insert" | "update" | "delete"; payload?: any }> = [];
+  private errors = new Map<string, { message: string }>();
+  private seq = 0;
+
+  constructor(seed: Record<string, Row[]> = {}) {
+    this.tables = {};
+    for (const [t, rows] of Object.entries(seed)) this.tables[t] = rows.map((r) => ({ ...r }));
+  }
+
+  /** Make every `table.op` call fail with this message (op: select|insert|update|delete). */
+  failOn(table: string, op: "select" | "insert" | "update" | "delete", message = "boom") {
+    this.errors.set(`${table}.${op}`, { message });
+  }
+
+  rows(table: string): Row[] {
+    return (this.tables[table] ??= []);
+  }
+
+  nextId(): string {
+    return `id-${++this.seq}`;
+  }
+
+  errorFor(table: string, op: string) {
+    return this.errors.get(`${table}.${op}`) ?? null;
+  }
+
+  from(table: string) {
+    return new Query(this, table);
+  }
+}
+
+class Query implements PromiseLike<Result> {
+  private op: "select" | "insert" | "update" | "delete" = "select";
+  private payload: any = null;
+  private filters: Array<(r: Row) => boolean> = [];
+  private orderBy: { col: string; asc: boolean } | null = null;
+  private max: number | null = null;
+  private returning = false;
+  private head = false;
+  private wantCount = false;
+  private mode: "many" | "single" | "maybeSingle" = "many";
+
+  constructor(private db: FakeDb, private table: string) {}
+
+  select(_cols?: string, opts?: { count?: string; head?: boolean }) {
+    if (this.op === "select") {
+      this.head = Boolean(opts?.head);
+      this.wantCount = Boolean(opts?.count);
+    } else {
+      this.returning = true;
+    }
+    return this;
+  }
+  insert(payload: Row | Row[]) { this.op = "insert"; this.payload = payload; return this; }
+  update(payload: Row) { this.op = "update"; this.payload = payload; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  eq(col: string, val: any) { this.filters.push((r) => r[col] === val); return this; }
+  neq(col: string, val: any) { this.filters.push((r) => r[col] !== val); return this; }
+  gt(col: string, val: any) { this.filters.push((r) => r[col] != null && r[col] > val); return this; }
+  gte(col: string, val: any) { this.filters.push((r) => r[col] != null && r[col] >= val); return this; }
+  lt(col: string, val: any) { this.filters.push((r) => r[col] != null && r[col] < val); return this; }
+  lte(col: string, val: any) { this.filters.push((r) => r[col] != null && r[col] <= val); return this; }
+  in(col: string, vals: any[]) { this.filters.push((r) => vals.includes(r[col])); return this; }
+  is(col: string, val: any) { this.filters.push((r) => (val === null ? r[col] == null : r[col] === val)); return this; }
+  contains(col: string, obj: any) { this.filters.push((r) => isSubset(obj, r[col])); return this; }
+  order(col: string, opts?: { ascending?: boolean }) { this.orderBy = { col, asc: opts?.ascending !== false }; return this; }
+  limit(n: number) { this.max = n; return this; }
+  single() { this.mode = "single"; return this; }
+  maybeSingle() { this.mode = "maybeSingle"; return this; }
+
+  private run(): Result {
+    const err = this.db.errorFor(this.table, this.op);
+    if (err) return { data: null, error: { message: err.message } };
+    const all = this.db.rows(this.table);
+
+    if (this.op === "insert") {
+      const list = Array.isArray(this.payload) ? this.payload : [this.payload];
+      const made = list.map((r: Row) => ({ id: this.db.nextId(), created_at: new Date().toISOString(), ...r }));
+      all.push(...made);
+      this.db.writes.push({ table: this.table, op: "insert", payload: this.payload });
+      return this.returning ? this.shape(made) : { data: null, error: null };
+    }
+
+    const hit = all.filter((r) => this.filters.every((f) => f(r)));
+
+    if (this.op === "update") {
+      for (const r of hit) Object.assign(r, this.payload);
+      this.db.writes.push({ table: this.table, op: "update", payload: this.payload });
+      return this.returning ? this.shape(hit) : { data: null, error: null };
+    }
+    if (this.op === "delete") {
+      this.db.tables[this.table] = all.filter((r) => !hit.includes(r));
+      this.db.writes.push({ table: this.table, op: "delete" });
+      return this.returning ? this.shape(hit) : { data: null, error: null };
+    }
+
+    let out = [...hit];
+    if (this.orderBy) {
+      const { col, asc } = this.orderBy;
+      out.sort((a, b) => (a[col] < b[col] ? -1 : a[col] > b[col] ? 1 : 0) * (asc ? 1 : -1));
+    }
+    if (this.max != null) out = out.slice(0, this.max);
+    if (this.head) return { data: null, error: null, count: hit.length };
+    const res = this.shape(out);
+    return this.wantCount ? { ...res, count: hit.length } : res;
+  }
+
+  private shape(rows: Row[]): Result {
+    if (this.mode === "many") return { data: rows.map((r) => ({ ...r })), error: null };
+    if (rows.length > 1 && this.mode === "single") return { data: null, error: { message: "multiple rows", code: "PGRST116" } };
+    if (rows.length === 0) {
+      return this.mode === "single"
+        ? { data: null, error: { message: "no rows", code: "PGRST116" } }
+        : { data: null, error: null };
+    }
+    return { data: { ...rows[0] }, error: null };
+  }
+
+  then<T1 = Result, T2 = never>(
+    onfulfilled?: ((value: Result) => T1 | PromiseLike<T1>) | null,
+    onrejected?: ((reason: any) => T2 | PromiseLike<T2>) | null
+  ): PromiseLike<T1 | T2> {
+    return Promise.resolve(this.run()).then(onfulfilled, onrejected);
+  }
+}

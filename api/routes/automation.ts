@@ -1,6 +1,8 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { supabase } from '../index.js'
 import { automationService } from '../../services/automation.service.js'
+import { queueService } from '../../services/queue.service.js'
+import { ApprovalRequiredError } from '../../services/queue-guard.js'
 
 export async function automationRoutes(
   app: FastifyInstance,
@@ -174,21 +176,15 @@ export async function automationRoutes(
 
     const { job_type, payload, priority = 0 } = request.body as any
 
-    const { data, error } = await supabase
-      .from('automation_queue')
-      .insert({
-        user_id: userId,
-        job_type,
-        payload,
-        priority,
-        status: 'pending',
-      })
-      .select()
-
-    if (error) {
+    // Same guard as /api/queue/apply: the client cannot set `approved`, and email_apply needs a
+    // verified approval row.
+    try {
+      return await queueService.addGenericJob(userId, job_type, payload, priority)
+    } catch (error: any) {
+      if (error instanceof ApprovalRequiredError) {
+        return reply.status(error.statusCode).send({ error: error.message, code: error.code })
+      }
       return reply.status(500).send({ error: error.message })
     }
-
-    return data?.[0]
   })
 }
