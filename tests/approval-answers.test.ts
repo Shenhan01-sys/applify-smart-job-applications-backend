@@ -1,0 +1,173 @@
+import { test, afterEach } from 'node:test'
+import assert from 'node:assert/strict'
+import { FakeDb } from './helpers/fakeDb.ts'
+import { aiPipelineService } from '../services/ai-pipeline.service.ts'
+import { formAutofillService } from '../services/form-autofill.service.ts'
+import {
+  buildApprovalAnswers,
+  confidenceLevel,
+  prepareApprovalAnswers,
+  sanitizeClientAnswers,
+} from '../services/approval-answers.service.ts'
+
+// AI is always replaced: no OpenRouter or Groq request leaves the machine in these tests.
+const realGenerateAnswer = aiPipelineService.generateAnswer.bind(aiPipelineService)
+let aiCalls = 0
+const mockAI = (impl: () => Promise<string>) => {
+  aiCalls = 0
+  ;(aiPipelineService as any).generateAnswer = async () => {
+    aiCalls++
+    return impl()
+  }
+}
+afterEach(() => {
+  ;(aiPipelineService as any).generateAnswer = realGenerateAnswer
+})
+
+const fullSettings = {
+  first_name: 'Budi',
+  last_name: 'Uji',
+  phone_number: '+628111111111',
+  current_city: 'Yogyakarta',
+  years_of_experience: '3',
+  desired_salary: 9000000,
+  notice_period: 30,
+  require_visa: 'No',
+  linkedin_url: 'https://linkedin.example/in/budi',
+}
+const job = { title: 'Backend Engineer', company: 'Contoh PT', description: 'Bangun API.' }
+const profile = { email: 'budi@contoh.test', skills: ['TypeScript'] }
+
+const byQuestion = (rows: Awaited<ReturnType<typeof buildApprovalAnswers>>, part: string) => {
+  const r = rows.find((x) => x.question.includes(part))
+  assert.ok(r, `pertanyaan "${part}" tidak ditemukan`)
+  return r!
+}
+
+test('confidenceLevel: >0,8 tinggi; 0,5 sampai 0,8 sedang; <0,5 rendah', () => {
+  assert.equal(confidenceLevel(0.99), 'high')
+  assert.equal(confidenceLevel(0.81), 'high')
+  assert.equal(confidenceLevel(0.8), 'medium')
+  assert.equal(confidenceLevel(0.75), 'medium')
+  assert.equal(confidenceLevel(0.5), 'medium')
+  assert.equal(confidenceLevel(0.49), 'low')
+  assert.equal(confidenceLevel(0), 'low')
+  assert.equal(confidenceLevel(Number.NaN), 'low')
+})
+
+test('data lengkap: jawaban aturan tetap berkeyakinan tinggi dan tidak ditandai; jawaban AI ditandai', async () => {
+  mockAI(async () => 'Saya tertarik karena stack-nya cocok.')
+  const rows = await buildApprovalAnswers({ settings: fullSettings, profile, job })
+  assert.equal(rows.length, 10)
+
+  const name = byQuestion(rows, 'Nama lengkap')
+  assert.equal(name.answer, 'Budi Uji')
+  assert.equal(name.source, 'rule')
+  assert.ok(name.confidence > 0.8)
+  assert.equal(name.needs_review, false)
+
+  assert.equal(byQuestion(rows, 'Email').answer, 'budi@contoh.test')
+  assert.equal(byQuestion(rows, 'Kota domisili').answer, 'Yogyakarta')
+  assert.equal(byQuestion(rows, 'Butuh sponsor visa').answer, 'No')
+
+  const why = byQuestion(rows, 'Mengapa tertarik')
+  assert.equal(why.source, 'ai')
+  assert.equal(why.confidence, 0.75)
+  assert.equal(why.needs_review, true, 'jawaban AI selalu ditandai untuk dicek')
+  assert.equal(aiCalls, 1, 'hanya satu pertanyaan yang memanggil AI')
+})
+
+test('AI selalu ditandai walau pengguna mematikan pause_at_failed_question', async () => {
+  mockAI(async () => 'Jawaban AI.')
+  const rows = await buildApprovalAnswers({
+    settings: { ...fullSettings, pause_at_failed_question: false },
+    profile,
+    job,
+  })
+  assert.equal(byQuestion(rows, 'Mengapa tertarik').needs_review, true)
+})
+
+test('data sumber kosong: jawaban dikosongkan, keyakinan 0, wajib dicek (tidak ada nilai bawaan palsu)', async () => {
+  mockAI(async () => 'x')
+  const rows = await buildApprovalAnswers({ settings: {}, profile: { email: null }, job })
+  for (const part of ['Nama lengkap', 'Email', 'Nomor telepon', 'Kota domisili', 'Total pengalaman', 'Ekspektasi gaji', 'notice', 'sponsor visa', 'LinkedIn']) {
+    const r = byQuestion(rows, part)
+    assert.equal(r.answer, '', part)
+    assert.equal(r.confidence, 0, part)
+    assert.equal(r.needs_review, true, part)
+  }
+})
+
+test('kota kosong tidak lagi diisi dari kata terakhir judul lowongan', async () => {
+  const res = await formAutofillService.fillField(
+    { type: 'text', label: 'Current city' },
+    { jobTitle: 'Senior Backend Engineer', company: 'X', jobDescription: '', userSettings: {}, userProfile: {} }
+  )
+  assert.equal(res.value, '')
+  assert.equal(res.confidence, 0)
+})
+
+test('AI gagal: pertanyaan itu jatuh ke jawaban bawaan berkeyakinan rendah, bukan error', async () => {
+  mockAI(async () => {
+    throw new Error('semua model gagal')
+  })
+  const rows = await buildApprovalAnswers({ settings: fullSettings, profile, job })
+  const why = byQuestion(rows, 'Mengapa tertarik')
+  assert.equal(why.source, 'default')
+  assert.equal(why.confidence, 0.3)
+  assert.equal(why.needs_review, true)
+  assert.equal(confidenceLevel(why.confidence), 'low')
+})
+
+test('use_ai=false: AI tidak dipanggil', async () => {
+  mockAI(async () => 'x')
+  await buildApprovalAnswers({ settings: { ...fullSettings, use_ai: false }, profile, job })
+  assert.equal(aiCalls, 0)
+})
+
+test('nama perusahaan di label tidak memicu aturan kata kunci (GoPay, Real Estate)', async () => {
+  mockAI(async () => 'AI')
+  for (const company of ['GoPay', 'Real Estate Group']) {
+    const rows = await buildApprovalAnswers({ settings: fullSettings, profile, job: { ...job, company } })
+    assert.equal(byQuestion(rows, 'Mengapa tertarik').source, 'ai', company)
+  }
+})
+
+test('filler yang melempar: jawaban kosong dan ditandai, daftar tetap lengkap', async () => {
+  const rows = await buildApprovalAnswers({ settings: fullSettings, profile, job }, async () => {
+    throw new Error('boom')
+  })
+  assert.equal(rows.length, 10)
+  assert.ok(rows.every((r) => r.needs_review && r.answer === ''))
+})
+
+test('prepareApprovalAnswers: baca pengaturan dari database dan tidak pernah melempar', async () => {
+  mockAI(async () => 'AI')
+  const db = new FakeDb({
+    user_automation_settings: [{ user_id: 'u1', ...fullSettings }],
+    user_skills: [{ user_id: 'u1', name: 'TypeScript' }],
+    jobs: [{ id: 'j1', description: 'Bangun API.' }],
+  })
+  const rows = await prepareApprovalAnswers(db, { userId: 'u1', email: 'budi@contoh.test', jobId: 'j1', jobTitle: 'BE', company: 'C' })
+  assert.equal(rows.length, 10)
+  assert.equal(byQuestion(rows, 'Nama lengkap').answer, 'Budi Uji')
+
+  const broken = { from: () => { throw new Error('db down') } }
+  assert.deepEqual(await prepareApprovalAnswers(broken as any, { userId: 'u1', jobTitle: 'BE', company: 'C' }), [])
+})
+
+test('sanitizeClientAnswers: bentuk salah dibuang, nilai dibatasi, needs_review default true', () => {
+  assert.deepEqual(sanitizeClientAnswers('x'), [])
+  const out = sanitizeClientAnswers([
+    { question: 'Q1', answer: 'A', confidence: 7, needs_review: false, source: 'rule' },
+    { question: 'Q2', answer: 'B', confidence: 'abc' },
+    { nope: 1 },
+    null,
+  ])
+  assert.equal(out.length, 2)
+  assert.equal(out[0].confidence, 1)
+  assert.equal(out[0].needs_review, false)
+  assert.equal(out[1].confidence, 0)
+  assert.equal(out[1].needs_review, true)
+  assert.equal(out[1].source, 'default')
+})

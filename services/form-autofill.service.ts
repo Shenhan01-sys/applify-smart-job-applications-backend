@@ -114,10 +114,11 @@ export class FormAutofillService {
 
     // Location
     if (label.includes('city') && !label.includes('current')) {
-      return { value: settings.current_city || context.jobTitle.split(' ').pop() || '', confidence: 0.85 }
+      return { value: settings.current_city || '', confidence: settings.current_city ? 0.85 : 0 }
     }
     if (label.includes('current city') || label.includes('location')) {
-      return { value: settings.current_city || context.jobTitle.split(' ').pop() || '', confidence: 0.85 }
+      // Dulu kota diambil dari kata terakhir judul lowongan bila data kosong; itu mengarang jawaban.
+      return { value: settings.current_city || '', confidence: settings.current_city ? 0.85 : 0 }
     }
     if (label.includes('state') || label.includes('province')) {
       return { value: settings.state || '', confidence: 0.95 }

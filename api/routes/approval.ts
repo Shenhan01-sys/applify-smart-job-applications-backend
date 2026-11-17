@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { supabase } from '../index.js'
 import { queueService } from '../../services/queue.service.js'
+import { prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 
 interface ApprovalRequest {
   id: string
@@ -95,6 +96,21 @@ export async function approvalRoutes(
     // Default expiry: 1 hour from now
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
 
+    // Jawaban formulir beserta skor keyakinan datang dari jalur pengisian yang nyata (FormAutofillService),
+    // dihitung di server dari Pengaturan Otomasi pengguna. `answers` kiriman klien hanya dipakai bila ada
+    // dan bentuknya benar; kalau tidak, server menyiapkannya sendiri.
+    const clientAnswers = sanitizeClientAnswers(answers)
+    const preparedAnswers =
+      clientAnswers.length > 0
+        ? clientAnswers
+        : await prepareApprovalAnswers(supabase, {
+            userId,
+            email: (request as any).user?.email,
+            jobId: job_id,
+            jobTitle: job_title,
+            company,
+          })
+
     const { data, error } = await supabase
       .from('approval_requests')
       .insert({
@@ -105,7 +121,7 @@ export async function approvalRoutes(
         company,
         platform,
         cover_letter,
-        answers,
+        answers: preparedAnswers,
         resume_url,
         status: 'pending',
         expires_at: expiresAt,
