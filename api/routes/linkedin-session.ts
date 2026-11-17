@@ -1,11 +1,24 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { sessionManagerService } from '../../services/session-manager.service.js'
-import { supabase } from '../index.js'
+import { SessionKeyConfigError, sessionKeyProblem } from '../../services/session-crypto.js'
+
+/** Hanya tes yang mengisi `db`; produksi memuat klien Supabase server saat pertama dipakai. */
+export interface LinkedinSessionRoutesOptions extends FastifyPluginOptions {
+  db?: { from(table: string): any }
+}
+
+/** 503: kunci enkripsi sesi tidak layak. Galat konfigurasi dicatat di log server, tanpa nilai kunci. */
+function replyConfigError(request: any, reply: any, problem: string) {
+  request.log.error(`[config] ${problem}`)
+  return reply.status(503).send({ error: problem, code: 'session_encryption_not_configured' })
+}
 
 export async function linkedinSessionRoutes(
   app: FastifyInstance,
-  _opts: FastifyPluginOptions
+  opts: LinkedinSessionRoutesOptions
 ) {
+  const getDb = async () => opts.db ?? (await import('../index.js')).supabase
+
   // Get LinkedIn session status
   app.get('/status', async (request, reply) => {
     const userId = (request as any).user?.id
@@ -43,6 +56,10 @@ export async function linkedinSessionRoutes(
     if (!cookies || !cookies.li_at) {
       return reply.status(400).send({ error: 'Missing required cookies (li_at)' })
     }
+
+    // Tanpa kunci enkripsi yang sah, cookie tidak diterima (tidak ada kunci bawaan).
+    const problem = sessionKeyProblem()
+    if (problem) return replyConfigError(request, reply, problem)
 
     try {
       const expiresAt = new Date()
@@ -106,6 +123,7 @@ export async function linkedinSessionRoutes(
         message: isValid ? 'Session is valid' : 'Session invalid or expired',
       }
     } catch (error: any) {
+      if (error instanceof SessionKeyConfigError) return replyConfigError(request, reply, error.message)
       return reply.status(500).send({ error: error.message })
     }
   })
@@ -119,6 +137,7 @@ export async function linkedinSessionRoutes(
 
     try {
       // Get existing session
+      const supabase = await getDb()
       const { data: existing } = await supabase
         .from('platform_sessions')
         .select('*')

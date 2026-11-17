@@ -18,6 +18,7 @@ import { linkedinSessionRoutes } from './routes/linkedin-session.js'
 import { oauthRoutes } from './routes/oauth.js'
 import { notificationRoutes } from './routes/notifications.js'
 import { authMiddleware } from './middleware/auth.js'
+import { sessionKeyProblem } from '../services/session-crypto.js'
 
 const app = Fastify({
   logger: {
@@ -101,6 +102,10 @@ const start = async () => {
     await app.listen({ port, host: '0.0.0.0' })
     app.log.info(`Server running on http://localhost:${port}`)
     app.log.info(`API docs available at http://localhost:${port}/docs`)
+    // Kunci enkripsi sesi platform: tanpa kunci yang sah (tidak ada kunci bawaan) rute sesi menjawab 503.
+    // Server tetap berjalan supaya fitur lain tidak ikut mati; galatnya dicatat sekali di sini dan di tiap permintaan.
+    const keyProblem = sessionKeyProblem()
+    if (keyProblem) app.log.error(`[config] ${keyProblem}`)
   } catch (err) {
     app.log.error(err)
     process.exit(1)

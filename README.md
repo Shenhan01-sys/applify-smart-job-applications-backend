@@ -76,7 +76,8 @@ npm run mcp:jobs:http                # Applify Jobs MCP server via Streamable HT
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Service role key (server-side only) |
 | `PORT` | No | Server port (default: 4000) |
 | `FRONTEND_URL` | No | CORS allowed origin |
-| `SESSION_ENCRYPTION_KEY` | Yes | 32-char key for session encryption |
+| `SESSION_ENCRYPTION_KEY` | Yes | Kunci enkripsi sesi platform (cookie LinkedIn dll.), minimal 32 karakter, mis. `openssl rand -base64 32`. Tidak ada kunci bawaan: kosong, pendek, atau nilai contoh `.env.example` = sesi tidak disimpan atau dibaca (503 `session_encryption_not_configured`) dan galat konfigurasi dicatat saat start |
+| `AI_RATE_LIMIT_PER_MINUTE` / `AI_RATE_LIMIT_PER_HOUR` | No | Batas permintaan `/api/ai/*` per pengguna (bawaan 10 dan 60) |
 | `OPENROUTER_API_KEY` | No | For AI features (optional) |
 | `REDIS_URL` | No | Deprecated — queue memakai DB-as-queue, tanpa Redis |
 | `APPLIFY_JOBS_MCP_PORT` | No | Port Applify Jobs MCP server mode HTTP (default 8090) |

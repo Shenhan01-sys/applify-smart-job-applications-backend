@@ -1,34 +1,36 @@
-import { FastifyInstance, FastifyPluginOptions } from 'fastify'
-import CryptoJS from 'crypto-js'
-import { supabase } from '../index.js'
+import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify'
+import {
+  SessionDecryptError,
+  SessionKeyConfigError,
+  decryptSession,
+  encryptSession,
+  sessionKeyProblem,
+} from '../../services/session-crypto.js'
 
-const LEGACY_DEFAULT_KEY = 'applify-default-key-change-me'
-const ENCRYPTION_KEY = process.env.SESSION_ENCRYPTION_KEY || LEGACY_DEFAULT_KEY
+/**
+ * Sesi platform (cookie LinkedIn dll.) disimpan terenkripsi di platform_sessions. Kunci hanya dari
+ * SESSION_ENCRYPTION_KEY dan tidak ada kunci bawaan (services/session-crypto.ts): tanpa kunci yang sah (kosong,
+ * kurang dari 32 karakter, atau nilai contoh .env.example) rute yang menyimpan atau membaca sesi menjawab
+ * 503 `session_encryption_not_configured` dan galatnya dicatat di log server. Daftar sesi (tanpa data) tetap jalan.
+ */
 
-function encrypt(data: any): string {
-  return CryptoJS.AES.encrypt(JSON.stringify(data), ENCRYPTION_KEY).toString()
+/** Hanya tes yang mengisi `db`; produksi memuat klien Supabase server saat pertama dipakai. */
+export interface SessionRoutesOptions extends FastifyPluginOptions {
+  db?: { from(table: string): any }
 }
 
-function decryptWith(encrypted: string, key: string): any {
-  const bytes = CryptoJS.AES.decrypt(encrypted, key)
-  return JSON.parse(bytes.toString(CryptoJS.enc.Utf8))
-}
-
-function decrypt(encrypted: string): any {
-  try {
-    return decryptWith(encrypted, ENCRYPTION_KEY)
-  } catch (err) {
-    // Sesi lama terenkripsi dengan kunci default: sebelum perbaikan urutan dotenv (2026-10-01),
-    // modul ini membaca process.env sebelum .env dimuat sehingga selalu memakai kunci default.
-    if (ENCRYPTION_KEY !== LEGACY_DEFAULT_KEY) return decryptWith(encrypted, LEGACY_DEFAULT_KEY)
-    throw err
-  }
+/** 503 untuk kunci yang tidak layak; galat konfigurasi masuk ke log server (tanpa nilai kunci). */
+function replyConfigError(request: FastifyRequest, reply: FastifyReply, problem: string) {
+  request.log.error(`[config] ${problem}`)
+  return reply.status(503).send({ error: problem, code: 'session_encryption_not_configured' })
 }
 
 export async function sessionRoutes(
   app: FastifyInstance,
-  _opts: FastifyPluginOptions
+  opts: SessionRoutesOptions
 ) {
+  const getDb = async () => opts.db ?? (await import('../index.js')).supabase
+
   // Get user's platform sessions
   app.get('/', async (request, reply) => {
     const userId = (request as any).user?.id
@@ -36,6 +38,7 @@ export async function sessionRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
+    const supabase = await getDb()
     const { data, error } = await supabase
       .from('platform_sessions')
       .select('id, platform, is_active, expires_at, last_used_at, created_at')
@@ -56,10 +59,24 @@ export async function sessionRoutes(
     }
 
     const { platform } = request.params as { platform: string }
-    const { session_data, expires_at } = request.body as any
+    const { session_data, expires_at } = (request.body ?? {}) as any
 
-    const encryptedData = encrypt(session_data)
+    // Tanpa kunci yang sah, tidak ada yang disimpan.
+    const problem = sessionKeyProblem()
+    if (problem) return replyConfigError(request, reply, problem)
+    if (!session_data || typeof session_data !== 'object') {
+      return reply.status(400).send({ error: 'session_data (object) is required' })
+    }
 
+    let encryptedData: string
+    try {
+      encryptedData = encryptSession(session_data)
+    } catch (err: any) {
+      if (err instanceof SessionKeyConfigError) return replyConfigError(request, reply, err.message)
+      throw err
+    }
+
+    const supabase = await getDb()
     const { data: existing } = await supabase
       .from('platform_sessions')
       .select('id')
@@ -110,6 +127,11 @@ export async function sessionRoutes(
 
     const { platform } = request.params as { platform: string }
 
+    // Tanpa kunci yang sah, tidak ada yang dibaca.
+    const problem = sessionKeyProblem()
+    if (problem) return replyConfigError(request, reply, problem)
+
+    const supabase = await getDb()
     const { data, error } = await supabase
       .from('platform_sessions')
       .select('session_data')
@@ -122,9 +144,14 @@ export async function sessionRoutes(
     }
 
     try {
-      const decrypted = decrypt(data.session_data.encrypted)
+      const decrypted = decryptSession(data.session_data?.encrypted)
       return { session_data: decrypted }
-    } catch (err) {
+    } catch (err: any) {
+      if (err instanceof SessionKeyConfigError) return replyConfigError(request, reply, err.message)
+      if (err instanceof SessionDecryptError) {
+        request.log.error(`[sessions] ${platform}: ${err.message}`)
+        return reply.status(422).send({ error: err.message, code: err.code })
+      }
       return reply.status(500).send({ error: 'Failed to decrypt session' })
     }
   })
@@ -138,6 +165,7 @@ export async function sessionRoutes(
 
     const { platform } = request.params as { platform: string }
 
+    const supabase = await getDb()
     const { error } = await supabase
       .from('platform_sessions')
       .update({ is_active: false })

@@ -1,8 +1,18 @@
-import { supabase } from '../api/index.js'
 import { LinkedInMCPClient } from '../mcp/linkedin/index.js'
+import { SessionDecryptError, decryptSession } from './session-crypto.js'
 
 export class SessionManagerService {
   private linkedinClient = new LinkedInMCPClient()
+
+  /**
+   * `client` hanya diisi di tes. Tanpa itu, klien Supabase milik server dimuat saat pertama dipakai
+   * (bukan saat modul di-import, supaya modul ini bisa di-import tanpa menyalakan server).
+   */
+  constructor(private readonly client?: { from(table: string): any }) {}
+
+  private async db(): Promise<{ from(table: string): any }> {
+    return this.client ?? ((await import('../api/index.js')).supabase as unknown as { from(table: string): any })
+  }
 
   /**
    * Check if user has a valid session for a platform
@@ -13,6 +23,7 @@ export class SessionManagerService {
     expiresAt?: string
     lastUsed?: string
   }> {
+    const supabase = await this.db()
     const { data, error } = await supabase
       .from('platform_sessions')
       .select('*')
@@ -37,9 +48,12 @@ export class SessionManagerService {
   }
 
   /**
-   * Get session data for LinkedIn browser initialization
+   * Data sesi LinkedIn yang sudah didekripsi, atau null bila tidak ada sesi atau sesinya tidak dapat dibaca.
+   * Melempar SessionKeyConfigError bila SESSION_ENCRYPTION_KEY tidak layak (kosong, pendek, atau nilai contoh):
+   * sesi tidak dibaca tanpa kunci yang sah, dan tidak ada kunci bawaan (session-crypto.ts).
    */
   async getLinkedInSession(userId: string): Promise<any> {
+    const supabase = await this.db()
     const { data, error } = await supabase
       .from('platform_sessions')
       .select('session_data')
@@ -52,11 +66,13 @@ export class SessionManagerService {
     }
 
     try {
-      // Decrypt session data (decryption handled by sessions route)
-      return data.session_data
+      return decryptSession(data.session_data?.encrypted)
     } catch (err) {
-      console.error('Failed to parse session data:', err)
-      return null
+      if (err instanceof SessionDecryptError) {
+        console.error('LinkedIn session cannot be decrypted with the current key:', err.message)
+        return null
+      }
+      throw err
     }
   }
 
@@ -68,8 +84,8 @@ export class SessionManagerService {
       // Initialize browser with session
       const client = new LinkedInMCPClient()
       // This would need to be implemented with actual browser context
-      // For now, return based on session data presence
-      return !!sessionData && Object.keys(sessionData).length > 0
+      // For now, return based on the decrypted session holding the LinkedIn login cookie
+      return !!sessionData?.cookies?.li_at
     } catch (error) {
       console.error('Session verification failed:', error)
       return false
@@ -103,6 +119,7 @@ Alternatively, our team can help setup persistent browser profiles.`,
    * Delete expired sessions
    */
   async cleanupExpiredSessions(): Promise<number> {
+    const supabase = await this.db()
     const { data, error } = await supabase
       .from('platform_sessions')
       .delete()
