@@ -101,6 +101,20 @@ test('aggregateJobs: filter lokasi & kata kunci, dedupe, ranking, error per papa
   assert.equal(r.jobs[0].title, 'Data Analyst')
   assert.deepEqual(r.jobs[0].matchedSkills, ['sql'])
   assert.ok(r.jobs.every((j) => j.relevance >= 0 && j.relevance <= 100))
+  // match_score (kolom jobs.match_score) = relevansi yang sama, bulat 0-100, karena ada kata kunci dan skill
+  assert.ok(r.jobs.every((j) => j.match_score === j.relevance && Number.isInteger(j.match_score)))
+})
+
+test('aggregateJobs: match_score null bila tidak ada kata kunci dan tidak ada skill; dari skill saja tetap dihitung', async () => {
+  const none = await aggregateJobs({ keywords: '', location: 'any', platforms: ['fakeboard'] })
+  assert.ok(none.jobs.length > 0)
+  assert.ok(none.jobs.every((j) => j.match_score === null))
+
+  const skillsOnly = await aggregateJobs({ keywords: '', location: 'any', platforms: ['fakeboard'], skills: ['SQL'] })
+  const analyst = skillsOnly.jobs.find((j) => j.title === 'Data Analyst')!
+  assert.equal(analyst.match_score, 100) // satu-satunya skill (SQL) ada di deskripsi
+  const intern = skillsOnly.jobs.find((j) => j.title === 'Data Analyst Intern')!
+  assert.equal(intern.match_score, 0) // ada dasar penilaian tetapi tidak ada yang cocok: 0, bukan null
 })
 
 test('aggregateJobs: batas per sumber & lokasi "any"', async () => {

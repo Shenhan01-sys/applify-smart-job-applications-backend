@@ -105,12 +105,13 @@ export function matchesLocation(jobLocation: string | undefined, wanted?: string
  *  - skill kandidat yang muncul di judul/deskripsi menambah bobot 2;
  * Skor = total bobot yang cocok / total bobot maksimum × 100.
  * Dapat dihitung ulang siapa pun dari data yang sama (tidak memakai LLM).
+ * Skor yang sama disimpan ke `jobs.match_score` (lihat matchScoreOf dan job-ingest.service.ts).
  */
 export function relevanceScore(
   job: { title?: string; description?: string },
   keywords?: string,
   skills: string[] = [],
-): { score: number; matchedKeywords: string[]; matchedSkills: string[] } {
+): { score: number; matchedKeywords: string[]; matchedSkills: string[]; maxWeight: number } {
   const title = normalizeText(job.title)
   const desc = normalizeText(job.description)
   const kw = [...new Set(tokenize(keywords))]
@@ -134,7 +135,20 @@ export function relevanceScore(
     }
   }
   const score = max === 0 ? 0 : Math.round((got / max) * 100)
-  return { score, matchedKeywords, matchedSkills }
+  // maxWeight = 0 berarti tidak ada token kueri maupun skill untuk dibandingkan: skor 0 di sini bukan
+  // "tidak cocok", melainkan "tidak ada dasar penilaian" (lihat matchScoreOf).
+  return { score, matchedKeywords, matchedSkills, maxWeight: max }
+}
+
+/**
+ * Nilai yang boleh ditulis ke kolom integer `jobs.match_score`.
+ *  - bulat dan terjepit ke 0..100;
+ *  - null bila tidak ada dasar penilaian (tidak ada kata kunci dan tidak ada skill): kolom dibiarkan kosong
+ *    supaya layar menampilkan "—", bukan "0%" yang seolah-olah berarti tidak cocok.
+ */
+export function matchScoreOf(r: { score: number; maxWeight: number }): number | null {
+  if (!(r.maxWeight > 0) || !Number.isFinite(r.score)) return null
+  return Math.min(100, Math.max(0, Math.round(r.score)))
 }
 
 /** Tebak tingkat pengalaman dari judul/deskripsi. */

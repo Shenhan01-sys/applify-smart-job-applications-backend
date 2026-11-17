@@ -83,6 +83,27 @@ npm run mcp:jobs:http                # Applify Jobs MCP server via Streamable HT
 | `JOB_BOARDS_CONFIG` | No | Path alternatif untuk `config/job-boards.json` |
 | `GLINTS_BROWSER_FALLBACK` | No | `false` untuk mematikan fallback Playwright saat API Glints diblok WAF |
 
+## Skor kecocokan (`jobs.match_score`)
+
+Setiap lowongan yang disimpan oleh `POST /api/automation/search` (dan oleh handler `search` di `worker/`) mendapat
+`jobs.match_score`, bilangan bulat 0-100, dari skor relevansi deterministik `relevanceScore`
+(`mcp/shared/utils.ts`). Tanpa LLM, dan siapa pun dapat menghitung ulangnya dari data yang sama.
+
+```
+bobot maksimum = 3 x (jumlah token kata kunci unik) + 2 x (jumlah skill profil unik)
+bobot cocok    = 3 per token yang ada di judul, atau 1 per token yang hanya ada di deskripsi,
+                 + 2 per skill profil yang ada di judul atau deskripsi
+match_score    = round(100 x bobot cocok / bobot maksimum)
+```
+
+- Kata kunci berasal dari pencarian (atau `user_automation_settings.search_keywords`), skill dari `user_skills`
+  milik pengguna yang mencari. Token kurang dari 2 huruf dan kata henti dibuang.
+- Tidak ada kata kunci dan tidak ada skill: `match_score` = `null` (tidak ada yang dibandingkan). Layar menampilkan
+  "—", bukan 0%.
+- `jobs` dipakai bersama semua pengguna, jadi kolom ini menyimpan skor untuk pengguna yang pencariannya pertama kali
+  menyimpan lowongan itu. Lowongan lama tidak ditimpa; yang `match_score`-nya masih kosong diisi. Skor untuk pengguna
+  yang sedang mencari selalu ada di respons (`jobs[].match_score`, `jobs[].relevance`).
+
 ## API Endpoints
 
 ### Automation

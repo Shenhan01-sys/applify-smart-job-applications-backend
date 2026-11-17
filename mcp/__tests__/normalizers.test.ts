@@ -8,7 +8,7 @@ import { normalizeGreenhouseJob } from '../greenhouse/index.js'
 import { normalizeLeverPosting } from '../lever/index.js'
 import { normalizeAshbyJob } from '../ashby/index.js'
 import { normalizeWorkableJob } from '../workable/index.js'
-import { htmlToText, matchesKeywords, matchesLocation, relevanceScore } from '../shared/utils.js'
+import { htmlToText, matchScoreOf, matchesKeywords, matchesLocation, relevanceScore } from '../shared/utils.js'
 
 /**
  * Uji normalisasi dengan fixture yang meniru bentuk respons asli tiap sumber
@@ -116,4 +116,24 @@ test('Filter & skor relevansi deterministik', () => {
   assert.equal(r.score, 80)
   assert.deepEqual(r.matchedSkills, ['sql'])
   assert.equal(htmlToText('<b>a</b>&nbsp;b'), 'a b')
+})
+
+test('Rumus match_score: bobot judul 3, deskripsi 1, skill 2; hasil bulat 0-100; null tanpa dasar penilaian', () => {
+  const job = { title: 'Senior Data Analyst', description: 'SQL, Python, Tableau dashboard untuk tim bisnis' }
+  // "data analyst" (2 token, keduanya di judul) = 6 dari 6; skill SQL cocok = 2, Excel tidak = 0 dari 4 -> 8/10
+  const a = relevanceScore(job, 'data analyst', ['SQL', 'Excel'])
+  assert.equal(a.maxWeight, 10)
+  assert.equal(matchScoreOf(a), 80)
+  // token hanya di deskripsi berbobot 1: "tableau" (deskripsi) 1 dari 3 -> 33
+  const b = relevanceScore(job, 'tableau')
+  assert.equal(b.maxWeight, 3)
+  assert.equal(matchScoreOf(b), 33)
+  // tanpa kata kunci dan tanpa skill: tidak ada yang dibandingkan -> null (bukan 0)
+  assert.equal(matchScoreOf(relevanceScore(job, '', [])), null)
+  // ada dasar tetapi tidak ada yang cocok -> 0
+  assert.equal(matchScoreOf(relevanceScore(job, 'akuntansi', [])), 0)
+  // jepitan
+  assert.equal(matchScoreOf({ score: 130, maxWeight: 4 }), 100)
+  assert.equal(matchScoreOf({ score: -3, maxWeight: 4 }), 0)
+  assert.equal(matchScoreOf({ score: Number.NaN, maxWeight: 4 }), null)
 })

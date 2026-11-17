@@ -1,6 +1,6 @@
 import { mcpRegistry, BoardEntry } from './mcp-registry.js'
 import { JobPosting } from '../mcp/shared/types.js'
-import { mapWithConcurrency, matchesKeywords, matchesLocation, relevanceScore } from '../mcp/shared/utils.js'
+import { mapWithConcurrency, matchScoreOf, matchesKeywords, matchesLocation, relevanceScore } from '../mcp/shared/utils.js'
 
 /**
  * Job Aggregation Service — mengagregasi lowongan lintas sumber (klien MCP),
@@ -31,6 +31,11 @@ export interface AggregateParams {
 export interface RankedJob extends JobPosting {
   platform: string
   relevance: number
+  /**
+   * Nilai untuk kolom `jobs.match_score`: relevance bulat 0-100, atau null bila pencarian tidak punya kata
+   * kunci dan pengguna tidak punya skill (tidak ada yang dibandingkan). Disimpan oleh job-ingest.service.ts.
+   */
+  match_score: number | null
   matchedKeywords: string[]
   matchedSkills: string[]
 }
@@ -124,7 +129,14 @@ export async function aggregateJobs(params: AggregateParams): Promise<AggregateR
       .filter((j) => client.kind !== 'ats' || matchesKeywords(j, keywords))
       .map((j) => {
         const r = relevanceScore(j, keywords, params.skills ?? [])
-        return { ...j, platform, relevance: r.score, matchedKeywords: r.matchedKeywords, matchedSkills: r.matchedSkills }
+        return {
+          ...j,
+          platform,
+          relevance: r.score,
+          match_score: matchScoreOf(r),
+          matchedKeywords: r.matchedKeywords,
+          matchedSkills: r.matchedSkills,
+        }
       })
       // Peringkat dulu, baru dipotong, supaya yang tersisa adalah lowongan paling relevan per sumber.
       .sort(byRelevanceThenDate)

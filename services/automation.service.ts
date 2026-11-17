@@ -1,4 +1,4 @@
-import { supabase } from '../api/index.js'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { aggregateJobs, AggregateResult } from './job-aggregation.service.js'
 import { ingestJobs, IngestSummary } from './job-ingest.service.js'
 
@@ -15,12 +15,25 @@ export interface SearchParams {
 
 export class AutomationService {
   /**
+   * `client` hanya diisi di tes. Tanpa itu, klien Supabase milik server dimuat saat pertama dipakai
+   * (bukan saat modul di-import, supaya modul ini bisa di-import tanpa menyalakan server).
+   */
+  constructor(private readonly client?: SupabaseClient) {}
+
+  private async db(): Promise<SupabaseClient> {
+    return this.client ?? ((await import('../api/index.js')).supabase as SupabaseClient)
+  }
+
+  /**
    * Cari lowongan lintas sumber (klien MCP), terapkan preferensi pengguna
    * (blacklist, tipe kerja), peringkat relevansi terhadap kata kunci + skill
-   * pengguna, lalu (opsional) simpan ke tabel jobs.
+   * pengguna, lalu (opsional) simpan ke tabel jobs. Skill profil (`user_skills`) dibaca di sini, tempat yang
+   * sama dengan penyimpanan, dan dipakai untuk skor `match_score` tiap lowongan yang disimpan
+   * (lihat job-ingest.service.ts dan relevanceScore di mcp/shared/utils.ts).
    */
   async searchJobs(params: SearchParams): Promise<AggregateResult & { ingest: IngestSummary | null }> {
     const { userId } = params
+    const supabase = await this.db()
 
     const [{ data: settings }, { data: skillRows }] = await Promise.all([
       supabase.from('user_automation_settings').select('*').eq('user_id', userId).maybeSingle(),
@@ -67,7 +80,9 @@ export class AutomationService {
       platforms: result.query.platforms,
       results_count: result.total,
       stats: result.stats.map((s) => ({ platform: s.platform, fetched: s.fetched, kept: s.afterFilter, errors: s.errors.length })),
-      ingest: ingest ? { inserted: ingest.inserted, duplicates: ingest.duplicates, failed: ingest.failed } : null,
+      ingest: ingest
+        ? { inserted: ingest.inserted, duplicates: ingest.duplicates, failed: ingest.failed, backfilled: ingest.backfilled }
+        : null,
     })
 
     return { ...result, ingest }
@@ -83,6 +98,7 @@ export class AutomationService {
     details?: any
   ) {
     try {
+      const supabase = await this.db()
       await supabase.from('application_logs').insert({
         user_id: userId,
         action,
