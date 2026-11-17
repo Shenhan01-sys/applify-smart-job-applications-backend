@@ -2,6 +2,8 @@ import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { supabase } from '../index.js'
 import { queueService } from '../../services/queue.service.js'
 import { prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
+import { aiPipelineService } from '../../services/ai-pipeline.service.js'
+import { regenerateApprovalCoverLetter } from '../../services/approval-regenerate.service.js'
 
 interface ApprovalRequest {
   id: string
@@ -276,7 +278,8 @@ export async function approvalRoutes(
     return { success: true, message: 'Application rejected' }
   })
 
-  // Regenerate cover letter with edits
+  // Regenerate the cover letter of a pending approval request through the AI pipeline.
+  // Nothing is sent; the user still has to approve the version on screen.
   app.post('/:id/regenerate', async (request, reply) => {
     const userId = (request as any).user?.id
     if (!userId) {
@@ -284,32 +287,19 @@ export async function approvalRoutes(
     }
 
     const { id } = request.params as { id: string }
-    const { instructions } = request.body as { instructions: string }
+    const { instructions } = (request.body ?? {}) as { instructions?: unknown }
 
-    const { data: requestData, error: fetchError } = await supabase
-      .from('approval_requests')
-      .select('*')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .eq('status', 'pending')
-      .single()
-
-    if (fetchError || !requestData) {
-      return reply.status(404).send({ error: 'Approval request not found' })
-    }
-
-    // TODO: Call AI pipeline to regenerate with instructions
-    // const newCoverLetter = await aiPipelineService.regenerateCoverLetter({
-    //   original: requestData.cover_letter,
-    //   instructions,
-    //   jobData: requestData
-    // })
-
-    // For now, return the request for frontend to handle regeneration
-    return {
-      success: true,
-      message: 'Please use AI endpoint to regenerate with instructions',
-      request: requestData,
+    try {
+      const { coverLetter, model } = await regenerateApprovalCoverLetter(supabase, aiPipelineService, {
+        userId,
+        approvalId: id,
+        instructions,
+      })
+      return { success: true, cover_letter: coverLetter, model }
+    } catch (error: any) {
+      // 404 unknown request, 410 expired, 502 AI gave nothing; anything else is a server fault.
+      const status = typeof error?.statusCode === 'number' ? error.statusCode : 500
+      return reply.status(status).send({ error: error?.message ?? 'Regenerate failed' })
     }
   })
 

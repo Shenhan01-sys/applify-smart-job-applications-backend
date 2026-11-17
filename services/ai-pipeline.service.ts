@@ -306,6 +306,59 @@ Write the cover letter now (just the body, no header/footer):`
     return result
   }
 
+  /**
+   * Tulis ulang surat lamaran yang sudah ada mengikuti instruksi pengguna (layar persetujuan, tombol
+   * "Tulis ulang"). Fakta dari surat asli dipertahankan; model dilarang menambah fakta baru.
+   */
+  async regenerateCoverLetter(params: {
+    original: string
+    instructions: string
+    jobTitle: string
+    company: string
+    jobDescription: string
+    userId?: string
+  }): Promise<string> {
+    const { original, instructions, jobTitle, company, jobDescription, userId } = params
+    const startTime = Date.now()
+
+    const prompt = `Rewrite the cover letter below for a ${jobTitle} position at ${company}.
+
+Candidate's instructions for the rewrite:
+${instructions}
+
+Rules:
+- Keep every fact that is in the original letter. Do NOT invent employers, degrees, skills, numbers or dates.
+- Keep the same language as the original letter.
+- Output only the letter body (no header, footer, subject line or commentary).
+
+Job Description:
+${jobDescription || '(not available)'}
+
+Original cover letter:
+${original}`
+
+    const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
+
+    const result = await this.callAI({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens: 1500,
+    })
+
+    await tracingService.traceAIGeneration({
+      userId,
+      type: 'cover_letter',
+      model,
+      prompt,
+      output: result,
+      duration: Date.now() - startTime,
+      metadata: { regenerate: true },
+    })
+
+    return result
+  }
+
   async generateAnswer(params: AnswerQuestionParams): Promise<string> {
     const { question, questionType, options, jobDescription, userProfile } = params
 
