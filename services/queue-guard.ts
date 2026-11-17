@@ -6,7 +6,9 @@
  * gets `approved: true` from the server, and only after it has read an approval_requests row of the same
  * user with status 'approved' that has not expired. The worker repeats the check before it sends anything
  * (worker/src/lib/approval.ts); this guard keeps forged payloads out of the queue in the first place.
+ * The same guard checks the shape of the recipient address of an email_apply job (header injection).
  */
+import { isValidApplyEmail } from './email-address.js'
 
 /** Minimal shape of the Supabase client used here (a fake is passed in tests). */
 export interface GuardDb {
@@ -20,6 +22,28 @@ export class ApprovalRequiredError extends Error {
     super(message)
     this.name = 'ApprovalRequiredError'
   }
+}
+
+/** The client sent a payload the queue will not accept (HTTP 400), as opposed to a missing consent (403). */
+export class InvalidPayloadError extends Error {
+  readonly statusCode = 400
+  readonly code: string
+  constructor(message: string, code = 'invalid_payload') {
+    super(message)
+    this.name = 'InvalidPayloadError'
+    this.code = code
+  }
+}
+
+/**
+ * HTTP reply for an error the client caused (forged or stale approval: 403, malformed payload: 400), or null
+ * for anything else (the caller then answers 500). Shared by every route that enqueues through the guard.
+ */
+export function clientErrorReply(error: unknown): { statusCode: number; body: { error: string; code: string } } | null {
+  if (error instanceof ApprovalRequiredError || error instanceof InvalidPayloadError) {
+    return { statusCode: error.statusCode, body: { error: error.message, code: error.code } }
+  }
+  return null
 }
 
 export interface ApprovedRow {
@@ -65,7 +89,9 @@ export async function requireApprovedRow(
  * - 'apply' with approval_request_id: verified; payload.job_id must match the approval (or is filled in);
  *   the server then sets approved: true.
  * - 'apply' without approval_request_id: allowed as a fill-only run (the worker never submits it).
- * - 'email_apply': approval_request_id is mandatory and verified.
+ * - 'email_apply': approval_request_id is mandatory and verified, and apply_email must be exactly one plain
+ *   address (isValidApplyEmail: no CR/LF or other control characters, no list, no display name; at most 254
+ *   characters), else InvalidPayloadError (400). The value is stored as sent; it is never trimmed or repaired.
  * - any other type: approval keys are dropped.
  */
 export async function guardQueuePayload(
@@ -97,6 +123,14 @@ export async function guardQueuePayload(
   const row = await requireApprovedRow(db, userId, payload.approval_request_id, now)
   if (payload.job_id && row.job_id && payload.job_id !== row.job_id) {
     throw new ApprovalRequiredError('approval request belongs to a different job')
+  }
+  // The worker writes this string into the To: header, so a malformed value is refused before it is queued.
+  if (needsApproval && !isValidApplyEmail(payload.apply_email)) {
+    throw new InvalidPayloadError(
+      'apply_email must be exactly one plain email address (max 254 characters; no spaces, line breaks, ' +
+        'commas, semicolons, angle brackets or display name)',
+      'invalid_apply_email'
+    )
   }
   if (row.job_id) payload.job_id = row.job_id
   if (row.application_id && !payload.application_id) payload.application_id = row.application_id

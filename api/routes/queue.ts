@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { queueService, UnsupportedJobTypeError } from '../../services/queue.service.js'
-import { ApprovalRequiredError } from '../../services/queue-guard.js'
+import { clientErrorReply } from '../../services/queue-guard.js'
 
 export async function queueRoutes(
   app: FastifyInstance,
@@ -54,10 +54,9 @@ export async function queueRoutes(
       const job = await queueService.addApplyJob(userId, request.body)
       return { success: true, jobId: job.id }
     } catch (error: any) {
-      // A forged or stale approval_request_id is a client error, not a server fault.
-      if (error instanceof ApprovalRequiredError) {
-        return reply.status(error.statusCode).send({ error: error.message, code: error.code })
-      }
+      // A forged or stale approval_request_id (403) or a malformed payload (400) is a client error, not a server fault.
+      const clientError = clientErrorReply(error)
+      if (clientError) return reply.status(clientError.statusCode).send(clientError.body)
       return reply.status(500).send({ error: error.message })
     }
   })
