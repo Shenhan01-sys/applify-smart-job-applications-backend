@@ -1,7 +1,11 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { notificationsService } from '../../services/notifications.service.js'
 import { notifyApplicationStatus } from '../../services/application-status.service.js'
-import { supabase } from '../index.js'
+
+/** Minimum gap between two Telegram test messages from the same user. */
+export const TELEGRAM_TEST_COOLDOWN_MS = 60_000
+/** The only text this API ever sends on a caller's behalf: fixed, no caller content, no user data. */
+export const TELEGRAM_TEST_MESSAGE = '🤖 Applify: this is a test notification from your automation worker.'
 
 export async function notificationRoutes(
   app: FastifyInstance,
@@ -12,24 +16,23 @@ export async function notificationRoutes(
     return notificationsService.status()
   })
 
-  // Send a test message to the configured Telegram chat
-  app.post('/telegram/test', async (_request, reply) => {
-    const result = await notificationsService.sendTelegram(
-      '🤖 Applify: this is a test notification from your automation worker.'
-    )
-    if (!result.ok) {
-      return reply.status(503).send({ success: false, error: result.error })
+  // Send the fixed test message to the configured Telegram chat. The chat is one shared chat for the whole
+  // deployment, so a caller can neither choose the text nor send more than one test per cooldown window.
+  // There is deliberately no endpoint that forwards free text from a caller to Telegram.
+  const lastTestAt = new Map<string, number>()
+  app.post('/telegram/test', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' })
     }
-    return { success: true }
-  })
-
-  // Send an arbitrary notification to the configured Telegram chat
-  app.post('/telegram', async (request, reply) => {
-    const { message } = request.body as any
-    if (!message || typeof message !== 'string') {
-      return reply.status(400).send({ error: 'message (string) is required' })
+    const now = Date.now()
+    const last = lastTestAt.get(userId)
+    if (last !== undefined && now - last < TELEGRAM_TEST_COOLDOWN_MS) {
+      const retryAfter = Math.ceil((TELEGRAM_TEST_COOLDOWN_MS - (now - last)) / 1000)
+      return reply.status(429).header('Retry-After', String(retryAfter)).send({ error: 'Too many test notifications', retry_after_seconds: retryAfter })
     }
-    const result = await notificationsService.sendTelegram(message)
+    lastTestAt.set(userId, now)
+    const result = await notificationsService.sendTelegram(TELEGRAM_TEST_MESSAGE)
     if (!result.ok) {
       return reply.status(503).send({ success: false, error: result.error })
     }
@@ -48,6 +51,8 @@ export async function notificationRoutes(
       return reply.status(400).send({ error: 'application_id (string) is required' })
     }
     try {
+      // Loaded here, not at the top, so importing this file (in tests) does not start the server.
+      const { supabase } = await import('../index.js')
       return await notifyApplicationStatus(supabase, notificationsService, { userId, applicationId: application_id })
     } catch (error: any) {
       return reply.status(500).send({ error: error.message })
