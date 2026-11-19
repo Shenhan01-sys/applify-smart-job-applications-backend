@@ -262,7 +262,9 @@ export class AIPipelineService {
             messages: params.messages,
             // Model Claude terbaru menolak `temperature` (400 "is deprecated for this model"), jadi tidak dikirim.
             ...(target.provider === 'anthropic' ? {} : { temperature: params.temperature ?? 0.7 }),
-            max_tokens: params.max_tokens ?? 2000,
+            // Claude menghitung penalaran tersembunyi ke dalam max_tokens: dengan batas kecil (300 sampai 800)
+            // jawabannya bisa kosong atau terpotong, jadi diberi ruang minimal 1600.
+            max_tokens: target.provider === 'anthropic' ? Math.max(params.max_tokens ?? 2000, 1600) : params.max_tokens ?? 2000,
           },
           { headers: target.headers, timeout: PREMIUM_CALL_TIMEOUT_MS, validateStatus: () => true }
         )
