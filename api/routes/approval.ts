@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { supabase } from '../index.js'
 import { queueService } from '../../services/queue.service.js'
-import { prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
+import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { regenerateApprovalCoverLetter } from '../../services/approval-regenerate.service.js'
 
@@ -90,10 +90,15 @@ export async function approvalRoutes(
       job_title,
       company,
       platform,
-      cover_letter,
       answers,
       resume_url,
     } = request.body as any
+    let cover_letter = (request.body as any).cover_letter as string | undefined
+
+    // Surat tidak dikirim tetapi draf AI ada: pakai surat dari ai_applications milik pengguna ini.
+    if (!(typeof cover_letter === 'string' && cover_letter.trim()) && application_id) {
+      cover_letter = (await coverLetterFromApplication(supabase, userId, application_id)) ?? cover_letter
+    }
 
     // Default expiry: 1 hour from now
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()

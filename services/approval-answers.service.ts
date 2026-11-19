@@ -12,7 +12,7 @@ import { formAutofillService, type FillResult, type FormContext, type FormField 
  * worker membukanya, setelah persetujuan. Pengisian nyata tetap dilakukan worker (worker/src/lib/ai.ts).
  */
 
-export type AnswerSource = FillResult['source']
+export type AnswerSource = FillResult['source'] | 'profile'
 export type ConfidenceLevel = 'high' | 'medium' | 'low'
 
 export interface ApprovalAnswer {
@@ -88,6 +88,61 @@ export interface AnswerInput {
   settings: Record<string, any>
   profile: { email?: string | null; skills?: string[] }
   job: { title: string; company: string; description: string }
+  /** Baris `profiles` pengguna. Dipakai hanya untuk kolom Pengaturan Otomasi yang kosong. */
+  profileRow?: Record<string, any> | null
+}
+
+/** Keyakinan jawaban yang diambil dari Profil. Kota diturunkan dari teks lokasi bebas, jadi hanya "sedang". */
+const PROFILE_CONFIDENCE: Record<string, number> = {
+  first_name: 0.85,
+  phone_number: 0.85,
+  linkedin_url: 0.85,
+  years_of_experience: 0.85,
+  current_city: 0.75,
+}
+
+const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+
+/**
+ * Lengkapi Pengaturan Otomasi dengan data Profil (`profiles`) untuk kolom yang kosong. Kolom yang sudah
+ * diisi di Pengaturan Otomasi selalu menang. Mengembalikan pengaturan gabungan dan kunci yang berasal dari Profil.
+ *   full_name -> first_name + last_name (kata pertama = nama depan, sisanya = nama belakang)
+ *   phone -> phone_number, linkedin_url -> linkedin_url, portfolio_url -> website
+ *   location -> current_city (bagian sebelum koma pertama; "Yogyakarta, Indonesia" -> "Yogyakarta")
+ *   experience_years -> years_of_experience, hanya bila > 0 (0 adalah nilai bawaan kolom, bukan jawaban pengguna)
+ */
+export function mergeProfileIntoSettings(
+  settings: Record<string, any> | null | undefined,
+  profileRow: Record<string, any> | null | undefined
+): { settings: Record<string, any>; fromProfile: Set<string> } {
+  const merged: Record<string, any> = { ...(settings ?? {}) }
+  const fromProfile = new Set<string>()
+  if (!profileRow) return { settings: merged, fromProfile }
+  const fill = (key: string, value: unknown) => {
+    const v = typeof value === 'number' ? String(value) : text(value)
+    if (v && isBlank(merged[key])) {
+      merged[key] = v
+      fromProfile.add(key)
+    }
+  }
+  const fullName = text(profileRow.full_name).replace(/\s+/g, ' ')
+  if (fullName && isBlank(merged.first_name) && isBlank(merged.last_name)) {
+    const [first, ...rest] = fullName.split(' ')
+    merged.first_name = first
+    fromProfile.add('first_name')
+    if (rest.length) {
+      merged.last_name = rest.join(' ')
+      fromProfile.add('last_name')
+    }
+  }
+  fill('phone_number', profileRow.phone)
+  fill('linkedin_url', profileRow.linkedin_url)
+  fill('website', profileRow.portfolio_url)
+  const city = text(profileRow.location).split(',')[0].trim()
+  fill('current_city', city)
+  const years = Number(profileRow.experience_years)
+  if (Number.isFinite(years) && years > 0) fill('years_of_experience', years)
+  return { settings: merged, fromProfile }
 }
 
 /**
@@ -113,7 +168,8 @@ export async function buildApprovalAnswers(
   filler: Filler = (f, c) => formAutofillService.fillField(f, c),
   timeoutMs: number = AI_ANSWER_TIMEOUT_MS
 ): Promise<ApprovalAnswer[]> {
-  const { settings, profile, job } = input
+  const { profile, job } = input
+  const { settings, fromProfile } = mergeProfileIntoSettings(input.settings, input.profileRow)
   const ctx: FormContext = {
     jobTitle: job.title,
     company: job.company,
@@ -138,13 +194,20 @@ export async function buildApprovalAnswers(
       continue
     }
     const answer = asText(res.value)
+    // Jawaban aturan yang datanya berasal dari Profil (bukan Pengaturan Otomasi) diberi sumber 'profile'.
+    const viaProfile = res.source === 'rule' && !!q.requires && fromProfile.has(q.requires) && answer.trim() !== ''
+    const confidence = viaProfile ? Math.min(res.confidence, PROFILE_CONFIDENCE[q.requires!] ?? 0.85) : res.confidence
+    const source: AnswerSource = viaProfile ? 'profile' : res.source
     out.push({
       question: q.display,
       answer,
-      confidence: res.confidence,
-      source: res.source,
+      confidence,
+      source,
       needs_review:
-        res.needsReview || confidenceLevel(res.confidence) !== 'high' || answer.trim() === '' || res.source !== 'rule',
+        res.needsReview ||
+        confidenceLevel(confidence) !== 'high' ||
+        answer.trim() === '' ||
+        (source !== 'rule' && source !== 'profile'),
     })
   }
   return out
@@ -169,14 +232,16 @@ export async function prepareApprovalAnswers(
   filler?: Filler
 ): Promise<ApprovalAnswer[]> {
   try {
-    const [{ data: settings }, { data: skills }, { data: jobRow }] = await Promise.all([
+    const [{ data: settings }, { data: profileRow }, { data: skills }, { data: jobRow }] = await Promise.all([
       db.from('user_automation_settings').select('*').eq('user_id', args.userId).maybeSingle(),
+      db.from('profiles').select('*').eq('id', args.userId).maybeSingle(),
       db.from('user_skills').select('name').eq('user_id', args.userId),
       args.jobId ? db.from('jobs').select('description').eq('id', args.jobId).maybeSingle() : Promise.resolve({ data: null }),
     ])
     return await buildApprovalAnswers(
       {
         settings: settings ?? {},
+        profileRow: profileRow ?? null,
         profile: { email: args.email ?? null, skills: (skills ?? []).map((s: any) => s.name).filter(Boolean) },
         job: { title: args.jobTitle, company: args.company, description: String(jobRow?.description ?? '') },
       },
@@ -200,8 +265,19 @@ export function sanitizeClientAnswers(raw: unknown): ApprovalAnswer[] {
       answer: String((a as any).answer ?? '').slice(0, 2000),
       confidence: Number.isFinite(c) ? Math.min(1, Math.max(0, c)) : 0,
       needs_review: (a as any).needs_review !== false,
-      source: ['rule', 'ai', 'default'].includes((a as any).source) ? (a as any).source : 'default',
+      source: ['rule', 'ai', 'default', 'profile'].includes((a as any).source) ? (a as any).source : 'default',
     })
   }
   return out
+}
+
+/** Ambil cover_letter dari ai_applications milik pengguna; null bila tidak ada, bukan milik pengguna, atau kosong. */
+export async function coverLetterFromApplication(db: { from(t: string): any }, userId: string, applicationId: string): Promise<string | null> {
+  try {
+    const { data } = await db.from('ai_applications').select('cover_letter').eq('id', applicationId).eq('user_id', userId).maybeSingle()
+    const text = typeof data?.cover_letter === 'string' ? data.cover_letter.trim() : ''
+    return text || null
+  } catch {
+    return null
+  }
 }

@@ -6,6 +6,7 @@ import { formAutofillService } from '../services/form-autofill.service.ts'
 import {
   buildApprovalAnswers,
   confidenceLevel,
+  coverLetterFromApplication,
   prepareApprovalAnswers,
   sanitizeClientAnswers,
 } from '../services/approval-answers.service.ts'
@@ -158,6 +159,80 @@ test('prepareApprovalAnswers: baca pengaturan dari database dan tidak pernah mel
 
   const broken = { from: () => { throw new Error('db down') } }
   assert.deepEqual(await prepareApprovalAnswers(broken as any, { userId: 'u1', jobTitle: 'BE', company: 'C' }), [])
+})
+
+test('Profil mengisi kolom Pengaturan Otomasi yang kosong; sumber "profile"; Pengaturan Otomasi tetap menang', async () => {
+  mockAI(async () => 'AI')
+  const profileRow = {
+    full_name: 'Hans Gunawan',
+    location: 'Yogyakarta, Indonesia',
+    experience_years: 2,
+    phone: '+6281234567890',
+    linkedin_url: 'https://linkedin.example/in/hans',
+    portfolio_url: 'https://hans.example',
+  }
+  // Pengaturan Otomasi kosong: semuanya dari Profil, email dari akun.
+  const rows = await buildApprovalAnswers({ settings: {}, profileRow, profile: { email: 'hans@contoh.test' }, job })
+  const name = byQuestion(rows, 'Nama lengkap')
+  assert.equal(name.answer, 'Hans Gunawan')
+  assert.equal(name.source, 'profile')
+  assert.equal(name.needs_review, false)
+  assert.equal(byQuestion(rows, 'Email').source, 'rule')
+  assert.equal(byQuestion(rows, 'Email').answer, 'hans@contoh.test')
+  assert.equal(byQuestion(rows, 'Nomor telepon').answer, '+6281234567890')
+  const city = byQuestion(rows, 'Kota domisili')
+  assert.equal(city.answer, 'Yogyakarta')
+  assert.equal(city.source, 'profile')
+  assert.equal(city.confidence, 0.75)
+  assert.equal(city.needs_review, true, 'kota diturunkan dari teks bebas: dicek pengguna')
+  const years = byQuestion(rows, 'Total pengalaman')
+  assert.equal(years.answer, '2')
+  assert.equal(years.source, 'profile')
+  assert.equal(byQuestion(rows, 'LinkedIn').answer, 'https://linkedin.example/in/hans')
+  // Data yang memang tidak ada tetap kosong dan wajib dicek.
+  assert.equal(byQuestion(rows, 'Ekspektasi gaji').answer, '')
+
+  // Pengaturan Otomasi yang terisi menang atas Profil.
+  const mixed = await buildApprovalAnswers({
+    settings: { first_name: 'Budi', last_name: 'Uji', current_city: 'Bandung', years_of_experience: '5' },
+    profileRow,
+    profile: { email: 'x@contoh.test' },
+    job,
+  })
+  assert.equal(byQuestion(mixed, 'Nama lengkap').answer, 'Budi Uji')
+  assert.equal(byQuestion(mixed, 'Nama lengkap').source, 'rule')
+  assert.equal(byQuestion(mixed, 'Kota domisili').answer, 'Bandung')
+  assert.equal(byQuestion(mixed, 'Total pengalaman').answer, '5')
+  assert.equal(byQuestion(mixed, 'Nomor telepon').source, 'profile') // hanya kolom kosong yang diisi Profil
+
+  // experience_years 0 (nilai bawaan kolom) tidak dianggap jawaban.
+  const zero = await buildApprovalAnswers({ settings: {}, profileRow: { ...profileRow, experience_years: 0 }, profile: {}, job })
+  assert.equal(byQuestion(zero, 'Total pengalaman').answer, '')
+})
+
+test('prepareApprovalAnswers membaca profiles dari database', async () => {
+  mockAI(async () => 'AI')
+  const db = new FakeDb({
+    profiles: [{ id: 'u2', full_name: 'Hans Gunawan', location: 'Yogyakarta, Indonesia', experience_years: 2 }],
+  })
+  const rows = await prepareApprovalAnswers(db, { userId: 'u2', email: 'hans@contoh.test', jobTitle: 'FE', company: 'C' })
+  assert.equal(byQuestion(rows, 'Nama lengkap').answer, 'Hans Gunawan')
+  assert.equal(byQuestion(rows, 'Kota domisili').answer, 'Yogyakarta')
+})
+
+test('coverLetterFromApplication: surat dari ai_applications milik pengguna itu saja', async () => {
+  const db = new FakeDb({
+    ai_applications: [
+      { id: 'a1', user_id: 'u1', cover_letter: '  Surat saya.  ' },
+      { id: 'a2', user_id: 'u2', cover_letter: 'Surat orang lain' },
+      { id: 'a3', user_id: 'u1', cover_letter: '   ' },
+    ],
+  })
+  assert.equal(await coverLetterFromApplication(db, 'u1', 'a1'), 'Surat saya.')
+  assert.equal(await coverLetterFromApplication(db, 'u1', 'a2'), null, 'milik pengguna lain')
+  assert.equal(await coverLetterFromApplication(db, 'u1', 'a3'), null, 'kosong')
+  assert.equal(await coverLetterFromApplication(db, 'u1', 'tidak-ada'), null)
+  assert.equal(await coverLetterFromApplication({ from: () => { throw new Error('db down') } }, 'u1', 'a1'), null)
 })
 
 test('sanitizeClientAnswers: bentuk salah dibuang, nilai dibatasi, needs_review default true', () => {
