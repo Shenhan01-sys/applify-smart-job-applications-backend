@@ -314,11 +314,19 @@ test('surat lamaran yang berhasil dicatat sebagai draf (ai_draft); gagal atau ru
 test('migrasi kuota: kedua RPC menghitung baris yang ditulis backend (action dan status sama) dan memeriksa auth.uid()', () => {
   const sql = readFileSync(new URL('../../database/migrations/2026-11-18_ai_draft_quota_backend.sql', import.meta.url), 'utf8')
   for (const fn of ['get_quota_status', 'consume_monthly_apply']) {
-    const body = sql.slice(sql.indexOf(`function public.${fn}(`)).split('end; $$;')[0]
-    assert.ok(body.includes('from public.ai_applications'), fn)
+    const body = sql.slice(sql.indexOf(`function public.${fn}(`)).split('end $$;')[0]
+    // Selaras dengan remote (2026-11-19): hasil jsonb dan penghitung subscriptions, bukan returns table dan ai_applications.
+    assert.ok(body.includes('returns jsonb'), `${fn}: tipe kembalian sama dengan remote (jsonb)`)
+    assert.ok(body.includes('monthly_quota') && body.includes('used_quota'), `${fn}: memakai penghitung subscriptions`)
+    assert.ok(body.includes('from public.application_logs'), `${fn}: menghitung baris yang ditulis backend`)
     assert.ok(body.includes(`action = '${AI_DRAFT_ACTION}'`), `${fn}: action yang sama dengan recordDraft`)
     assert.ok(body.includes(`status = 'success'`), `${fn}: status yang sama dengan recordDraft`)
     assert.ok(body.includes('auth.uid() <> p_user_id'), `${fn}: hanya untuk diri sendiri`)
-    assert.ok(body.includes('coalesce(daily_apply_quota, 10)'), `${fn}: batas bulanan tidak berubah`)
+    assert.ok(body.includes(`'limit_qty'`), `${fn}: kunci limit_qty dibaca parseQuotaStatus`)
+    assert.ok(!body.includes('monthly_apply_used'), `${fn}: kolom itu tidak ada di remote`)
+  }
+  assert.ok(!/grant execute[^;]*authenticated/i.test(sql), 'EXECUTE tidak dibuka ke authenticated (sama dengan remote)')
+  for (const fn of ['get_quota_status', 'consume_monthly_apply']) {
+    assert.ok(sql.includes(`grant execute on function public.${fn}(uuid)`), `${fn}: grant ke service_role`)
   }
 })
