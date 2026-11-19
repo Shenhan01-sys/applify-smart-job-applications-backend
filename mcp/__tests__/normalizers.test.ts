@@ -138,6 +138,45 @@ test('Rumus match_score: bobot judul 3, deskripsi 1, skill 2; hasil bulat 0-100;
   assert.equal(matchScoreOf({ score: Number.NaN, maxWeight: 4 }), null)
 })
 
+test('Dealls: URL slug~company, lokasi kota+negara, tipe kerja camelCase, status non-aktif dibuang', async () => {
+  const { normalizeDeallsJob, DeallsMCPClient } = await import('../dealls/index.js')
+  const base = {
+    id: '6af5a981178a2d0012976e9e',
+    slug: 'key-account-specialist-modern-trade-1',
+    role: 'Key Account Specialist (Modern Trade)',
+    employmentTypes: ['partTime'],
+    workplaceType: 'remote',
+    publishedAt: '2026-11-12T11:56:49.366Z',
+    status: 'active',
+    country: { name: 'Indonesia' },
+    city: { name: 'Jakarta Selatan' },
+    company: { name: 'PT Putera Mahkota Indonesia', slug: 'pmi-hair--beauty' },
+  }
+  const j = normalizeDeallsJob(base)!
+  assert.equal(j.url, 'https://dealls.com/loker/key-account-specialist-modern-trade-1~pmi-hair--beauty')
+  assert.equal(j.company, 'PT Putera Mahkota Indonesia')
+  assert.equal(j.location, 'Jakarta Selatan, Indonesia, Remote')
+  assert.equal(j.job_type, 'part-time')
+  assert.equal(j.work_type, 'remote')
+  assert.equal(j.platform, 'dealls')
+  assert.equal(normalizeDeallsJob({ ...base, status: 'closed' }), null)
+  assert.equal(normalizeDeallsJob({ id: '1' }), null)
+
+  const client = new DeallsMCPClient()
+  let called = ''
+  ;(client as any).fetch = async (u: string) => {
+    called = u
+    return { data: { docs: [base], totalDocs: 1, totalPages: 1, page: 1 } }
+  }
+  const res = await client.searchJobs({ keywords: 'accountant', limit: 100, page: 2 })
+  assert.equal(res.success, true)
+  assert.equal(res.data.jobs.length, 1)
+  const q = new URL(called).searchParams
+  assert.equal(q.get('search'), 'accountant')
+  assert.equal(q.get('page'), '2')
+  assert.equal(q.get('limit'), '50') // dibatasi 50
+})
+
 test('Kalibrr: permintaan mengunci country=Indonesia dan memetakan halaman ke offset', async () => {
   const { KalibrrMCPClient } = await import('../kalibrr/index.js')
   const client = new KalibrrMCPClient()

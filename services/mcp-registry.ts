@@ -10,6 +10,7 @@ import { LinkedInMCPClient } from '../mcp/linkedin/index.js'
 import { JobStreetMCPClient } from '../mcp/jobstreet/index.js'
 import { GlintsMCPClient } from '../mcp/glints/index.js'
 import { KalibrrMCPClient } from '../mcp/kalibrr/index.js'
+import { DeallsMCPClient } from '../mcp/dealls/index.js'
 import { BaseMCPClient } from '../mcp/shared/types.js'
 
 export interface BoardEntry {
@@ -57,6 +58,7 @@ export class MCPRegistry {
     this.register('jobstreet', new JobStreetMCPClient())
     this.register('glints', new GlintsMCPClient())
     this.register('kalibrr', new KalibrrMCPClient())
+    this.register('dealls', new DeallsMCPClient())
     // Butuh sesi browser
     this.register('linkedin', new LinkedInMCPClient())
     this.boards = loadBoards()
