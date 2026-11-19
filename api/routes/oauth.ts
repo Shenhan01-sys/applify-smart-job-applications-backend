@@ -3,12 +3,14 @@ import { createClient } from '@supabase/supabase-js'
 import { supabase } from '../index.js'
 import { encrypt, decrypt, signState, verifyState } from '../../services/token-crypto.js'
 import { notificationsService } from '../../services/notifications.service.js'
+import { primaryFrontendUrl } from '../../services/deploy-config.js'
 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || ''
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || ''
 const REDIRECT_URI =
   process.env.GOOGLE_REDIRECT_URI || 'http://localhost:4000/api/oauth/google/callback'
-const FRONTEND_URL = process.env.FRONTEND_URL?.split(',')[0] || 'http://localhost:5173'
+// Origin pertama dari FRONTEND_URL = tujuan redirect setelah Gmail OAuth (spasi dan "/" di ujung dibuang).
+const FRONTEND_URL = primaryFrontendUrl(process.env.FRONTEND_URL, 'http://localhost:5173')
 
 const SCOPES = ['https://www.googleapis.com/auth/gmail.send'].join(' ')
 

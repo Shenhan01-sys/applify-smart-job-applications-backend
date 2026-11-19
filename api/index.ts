@@ -19,16 +19,22 @@ import { oauthRoutes } from './routes/oauth.js'
 import { notificationRoutes } from './routes/notifications.js'
 import { authMiddleware } from './middleware/auth.js'
 import { sessionKeyProblem } from '../services/session-crypto.js'
+import { deployConfigWarnings, isOriginAllowed, parseAllowedOrigins } from '../services/deploy-config.js'
 
+// Produksi (Railway, Docker): log JSON polos ke stdout supaya mudah dibaca penampung log.
+// Lokal: pino-pretty berwarna.
 const app = Fastify({
-  logger: {
-    transport: {
-      target: 'pino-pretty',
-      options: {
-        colorize: true,
-      },
-    },
-  },
+  logger:
+    process.env.NODE_ENV === 'production'
+      ? true
+      : {
+          transport: {
+            target: 'pino-pretty',
+            options: {
+              colorize: true,
+            },
+          },
+        },
 })
 
 // Supabase client
@@ -38,17 +44,12 @@ export const supabase = createClient(
 )
 
 // Register plugins
-const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000')
-  .split(',')
-  .map(s => s.trim())
+// FRONTEND_URL berisi satu atau beberapa origin dipisah koma (mis. URL Vercel dan localhost untuk uji).
+const allowedOrigins = parseAllowedOrigins(process.env.FRONTEND_URL)
 
 await app.register(cors, {
   origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      cb(null, true)
-    } else {
-      cb(null, false)
-    }
+    cb(null, isOriginAllowed(origin, allowedOrigins))
   },
   credentials: true,
 })
@@ -60,9 +61,10 @@ await app.register(swagger, {
       description: 'API for Applify job automation platform',
       version: '1.0.0',
     },
+    // URL relatif: "Try it out" di /docs menembak host yang sama dengan halaman docs (lokal maupun Railway).
     servers: [
       {
-        url: 'http://localhost:4000',
+        url: '/',
       },
     ],
   },
@@ -100,8 +102,9 @@ const start = async () => {
   try {
     const port = Number(process.env.PORT) || 4000
     await app.listen({ port, host: '0.0.0.0' })
-    app.log.info(`Server running on http://localhost:${port}`)
-    app.log.info(`API docs available at http://localhost:${port}/docs`)
+    app.log.info(`Server listening on 0.0.0.0:${port} (health: /health, docs: /docs)`)
+    app.log.info(`CORS origins: ${allowedOrigins.join(', ')}`)
+    for (const w of deployConfigWarnings()) app.log.warn(`[config] ${w}`)
     // Kunci enkripsi sesi platform: tanpa kunci yang sah (tidak ada kunci bawaan) rute sesi menjawab 503.
     // Server tetap berjalan supaya fitur lain tidak ikut mati; galatnya dicatat sekali di sini dan di tiap permintaan.
     const keyProblem = sessionKeyProblem()
