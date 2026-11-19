@@ -206,6 +206,13 @@ test('api/index.ts: listen di 0.0.0.0 dengan PORT dari env, /health ada, tanpa l
   assert.doesNotMatch(code, /url:\s*'http:\/\/localhost:4000'/)
 })
 
+test('railway.toml backend: builder Dockerfile dan healthcheck ke /health yang memang ada di api/index.ts', () => {
+  const t = noComments(read('railway.toml'))
+  assert.match(t, /builder = "DOCKERFILE"/)
+  assert.match(t, /healthcheckPath = "\/health"/)
+  assert.match(read('api/index.ts'), /app\.get\('\/health'/)
+})
+
 test('docker-compose backend: tanpa layanan worker yang salah dan tanpa Redis terbuka (F6, F7)', () => {
   const c = noComments(read('docker-compose.yml'))
   assert.doesNotMatch(c, /queue\.service\.js/)
