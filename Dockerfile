@@ -1,27 +1,28 @@
-# Multi-stage build for production
-FROM node:22-alpine AS builder
+# Image backend Applify (Fastify, TypeScript). Dipakai Railway, docker compose, dan EC2.
+# Tiga tahap:
+#   build      memasang SEMUA dependency (tsc ada di devDependencies) lalu menjalankan `npm run build`
+#   prod-deps  memasang dependency produksi saja
+#   production tahap akhir: hanya dist, node_modules produksi, package.json, dan config/job-boards.json
 
+FROM node:22-alpine AS build
 WORKDIR /app
-
-# Copy package files
-COPY package*.json ./
-COPY tsconfig.json ./
-
-# Install dependencies
-RUN npm ci --only=production && npm cache clean --force
-
-# Copy source
+# Playwright tidak perlu mengunduh browser; image akhir memakai Chromium dari paket Alpine.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+COPY package.json package-lock.json ./
+RUN npm ci
 COPY . .
-
-# Build TypeScript
 RUN npm run build
 
-# Production stage
-FROM node:22-alpine AS production
+FROM node:22-alpine AS prod-deps
+WORKDIR /app
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
+FROM node:22-alpine AS production
 WORKDIR /app
 
-# Install Playwright dependencies for browser automation
+# Chromium sistem untuk klien portal berbasis browser (LinkedIn, cadangan Glints).
 RUN apk add --no-cache \
     chromium \
     nss \
@@ -30,20 +31,22 @@ RUN apk add --no-cache \
     ca-certificates \
     ttf-freefont
 
-# Copy built app and dependencies
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package*.json ./
+ENV NODE_ENV=production \
+    PORT=4000 \
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Set environment
-ENV NODE_ENV=production
-ENV PORT=4000
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-browser
+COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node package.json ./
+# Daftar papan lowongan dibaca saat jalan (services/mcp-registry.ts). Tanpa berkas ini daftarnya diam-diam kosong.
+COPY --chown=node:node config ./config
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:4000/health', (r) => r.statusCode === 200 ? process.exit(0) : process.exit(1))"
+USER node
 
+# Railway menyuntikkan PORT. Server mendengarkan 0.0.0.0:$PORT.
 EXPOSE 4000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "dist/api/index.js"]

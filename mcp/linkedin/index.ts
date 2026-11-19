@@ -1,5 +1,6 @@
 import { BaseMCPClient, BROWSER_LIKE_USER_AGENT, JobPosting, MCPResponse } from '../shared/types.js'
 import { chromium } from 'playwright'
+import { chromiumLaunchOptions } from '../shared/browser.js'
 
 /**
  * Browser options for LinkedIn. Applify does not disguise its automation: no User-Agent rotation and no
@@ -28,7 +29,7 @@ export class LinkedInMCPClient extends BaseMCPClient {
   private context: any = null
 
   async initBrowser(headless = true, userDataDir?: string) {
-    this.browser = await chromium.launch({ headless, args: LINKEDIN_LAUNCH_ARGS })
+    this.browser = await chromium.launch(chromiumLaunchOptions({ headless, args: LINKEDIN_LAUNCH_ARGS }))
     this.context = await this.browser.newContext(linkedinContextOptions(userDataDir))
   }
 

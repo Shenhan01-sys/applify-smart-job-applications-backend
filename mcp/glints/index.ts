@@ -1,5 +1,6 @@
 import { BaseMCPClient, BROWSER_LIKE_USER_AGENT, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
 import { guessExperienceLevel, normalizeWorkType } from '../shared/utils.js'
+import { chromiumLaunchOptions } from '../shared/browser.js'
 
 /**
  * Glints — platform karier populer di Indonesia (juga SG/MY/VN).
@@ -106,7 +107,7 @@ export class GlintsMCPClient extends BaseMCPClient {
   /** Fallback: jalankan fetch GraphQL dari dalam konteks halaman glints.com (lolos WAF). */
   private async viaBrowser(params: SearchParams): Promise<any> {
     const { chromium } = await import('playwright')
-    const browser = await chromium.launch({ headless: true })
+    const browser = await chromium.launch(chromiumLaunchOptions({ headless: true }))
     try {
       const context = await browser.newContext({ userAgent: BROWSER_LIKE_USER_AGENT, locale: 'id-ID' })
       const page = await context.newPage()

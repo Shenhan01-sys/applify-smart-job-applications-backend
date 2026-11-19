@@ -1,0 +1,22 @@
+# Rahasia dan artefak lokal tidak boleh masuk konteks build maupun image.
+.env
+.env.*
+node_modules
+dist
+.git
+.gitignore
+
+# Log dan skrip bantu lokal
+*.log
+*.log.err
+*.ps1
+logs
+
+# Tidak dipakai saat build atau jalan
+docs
+n8n
+openclaw
+ssl
+Dockerfile
+.dockerignore
+docker-compose.yml
