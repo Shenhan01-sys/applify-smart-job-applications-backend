@@ -11,6 +11,8 @@ export interface SearchParams {
   /** Simpan hasil ke tabel jobs (default true). */
   persist?: boolean
   limitPerSource?: number
+  /** Halaman hasil per sumber portal (default 1, maksimum 5). */
+  pages?: number
 }
 
 export class AutomationService {
@@ -54,6 +56,7 @@ export class AutomationService {
       companies: params.companies,
       skills,
       limitPerSource: params.limitPerSource,
+      pages: params.pages,
     })
 
     // Preferensi pengguna

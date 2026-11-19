@@ -137,3 +137,20 @@ test('Rumus match_score: bobot judul 3, deskripsi 1, skill 2; hasil bulat 0-100;
   assert.equal(matchScoreOf({ score: -3, maxWeight: 4 }), 0)
   assert.equal(matchScoreOf({ score: Number.NaN, maxWeight: 4 }), null)
 })
+
+test('Kalibrr: permintaan mengunci country_code=ID dan memetakan halaman ke offset', async () => {
+  const { KalibrrMCPClient } = await import('../kalibrr/index.js')
+  const client = new KalibrrMCPClient()
+  let called = ''
+  ;(client as any).fetch = async (u: string) => {
+    called = u
+    return { jobs: [], count: 0 }
+  }
+  const res = await client.searchJobs({ keywords: 'akuntan', limit: 50, page: 3 })
+  assert.equal(res.success, true)
+  const q = new URL(called).searchParams
+  assert.equal(q.get('country_code'), 'ID')
+  assert.equal(q.get('text'), 'akuntan')
+  assert.equal(q.get('offset'), '100')
+  assert.equal(q.get('limit'), '50')
+})

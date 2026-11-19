@@ -136,3 +136,34 @@ test('registry: sumber default non-browser & papan ATS dari config', () => {
   assert.equal(d.find((s) => s.name === 'smartrecruiters')!.requiresCompany, true)
   assert.ok(mcpRegistry.boardsFor('smartrecruiters').length > 0)
 })
+
+class PagedBoard extends BaseMCPClient {
+  name = 'pagedboard'
+  baseUrl = 'https://paged.board'
+  displayName = 'Paged Board'
+  kind = 'board' as const
+  seen: number[] = []
+  async searchJobs(p: SearchParams): Promise<MCPResponse> {
+    const page = p.page ?? 1
+    this.seen.push(page)
+    if (page > 3) return { success: true, data: { jobs: [] } }
+    return { success: true, data: { jobs: [job({ id: `p${page}a`, title: 'Staff' }), job({ id: `p${page}b`, title: 'Admin' })] } }
+  }
+  async getJobDetails(): Promise<MCPResponse> {
+    return { success: false, error: 'n/a' }
+  }
+}
+
+test('aggregateJobs: pages mengambil beberapa halaman dan berhenti di halaman kosong', async () => {
+  const board = new PagedBoard()
+  mcpRegistry.register('pagedboard', board)
+  const one = await aggregateJobs({ keywords: '', location: 'any', platforms: ['pagedboard'] })
+  assert.deepEqual(board.seen, [1]) // default: satu halaman
+  assert.equal(one.total, 2)
+
+  board.seen = []
+  const many = await aggregateJobs({ keywords: '', location: 'any', platforms: ['pagedboard'], pages: 99 })
+  assert.deepEqual(board.seen, [1, 2, 3, 4]) // halaman 4 kosong -> berhenti
+  assert.equal(many.total, 6)
+  assert.equal(many.stats[0].fetched, 6)
+})

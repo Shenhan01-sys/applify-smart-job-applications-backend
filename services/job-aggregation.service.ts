@@ -26,7 +26,14 @@ export interface AggregateParams {
   limitPerSource?: number
   /** Batas papan per sumber ATS (default 8). */
   maxBoardsPerSource?: number
+  /** Jumlah halaman hasil per sumber portal (default 1, maksimum MAX_PAGES). Sumber ATS tidak memakainya. */
+  pages?: number
 }
+
+export const MAX_PAGES = 5
+/** Jeda antarhalaman pada sumber yang sama (ms). Diubah lewat env supaya tes tidak menunggu. */
+const PAGE_DELAY_MS = Number(process.env.SEARCH_PAGE_DELAY_MS ?? 800)
+const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, ms)) : Promise.resolve())
 
 export interface RankedJob extends JobPosting {
   platform: string
@@ -75,6 +82,7 @@ export async function aggregateJobs(params: AggregateParams): Promise<AggregateR
   const locFilter = /^(any|all|semua|)$/i.test(location) ? '' : location
   const limit = params.limitPerSource ?? 25
   const maxBoards = params.maxBoardsPerSource ?? 8
+  const pages = Math.min(Math.max(Math.floor(params.pages ?? 1), 1), MAX_PAGES)
 
   const available = mcpRegistry.describe()
   const requested = params.platforms?.length
@@ -116,9 +124,18 @@ export async function aggregateJobs(params: AggregateParams): Promise<AggregateR
         }
       })
     } else {
-      const res = await client.searchJobs({ keywords, location: locFilter, limit: Math.max(limit, 30) })
-      if (!res.success) stat.errors.push(res.error || 'gagal')
-      else raw.push(...((res.data?.jobs ?? []) as JobPosting[]))
+      // Halaman 1..pages; berhenti bila halaman kosong atau gagal. Jeda antarhalaman supaya tidak membanjiri portal.
+      for (let page = 1; page <= pages; page++) {
+        if (page > 1) await sleep(PAGE_DELAY_MS)
+        const res = await client.searchJobs({ keywords, location: locFilter, limit: Math.max(limit, 30), page })
+        if (!res.success) {
+          stat.errors.push(res.error || 'gagal')
+          break
+        }
+        const got = (res.data?.jobs ?? []) as JobPosting[]
+        raw.push(...got)
+        if (got.length === 0) break
+      }
     }
 
     stat.fetched = raw.length
@@ -140,7 +157,7 @@ export async function aggregateJobs(params: AggregateParams): Promise<AggregateR
       })
       // Peringkat dulu, baru dipotong, supaya yang tersisa adalah lowongan paling relevan per sumber.
       .sort(byRelevanceThenDate)
-      .slice(0, limit)
+      .slice(0, client.requiresCompany ? limit : limit * pages)
     stat.afterFilter = kept.length
     stat.ms = Date.now() - s0
     collected.push(...kept)

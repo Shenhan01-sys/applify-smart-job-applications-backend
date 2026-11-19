@@ -71,6 +71,9 @@ export class KalibrrMCPClient extends BaseMCPClient {
       url.searchParams.set('limit', String(pageSize))
       url.searchParams.set('offset', String((page - 1) * pageSize))
       if (params.keywords) url.searchParams.set('text', params.keywords)
+      // Kalibrr melokalisasi hasil berdasarkan IP peminta (dari Railway/AS hasilnya Filipina).
+      // country_code=ID mengunci hasil ke lowongan Indonesia (diverifikasi 2026-11-19).
+      url.searchParams.set('country_code', 'ID')
 
       const data = await this.fetch(url.href, { headers: { Referer: `${SITE}/job-board` } })
       if (!data || !Array.isArray(data.jobs)) {

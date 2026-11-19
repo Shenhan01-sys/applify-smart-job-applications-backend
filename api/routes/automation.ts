@@ -132,6 +132,7 @@ export async function automationRoutes(
       ? body.platforms.map((p: any) => String(p).toLowerCase())
       : undefined
     const limit = Number(body.limit)
+    const pages = Number(body.pages)
 
     try {
       const result = await automationService.searchJobs({
@@ -142,6 +143,7 @@ export async function automationRoutes(
         companies: body.companies && typeof body.companies === 'object' ? body.companies : undefined,
         persist: body.persist !== false,
         limitPerSource: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 100) : undefined,
+        pages: Number.isFinite(pages) && pages > 0 ? Math.min(Math.floor(pages), 5) : undefined,
       })
 
       // Bentuk lama ({ results: [{platform, jobs}], total_jobs }) tetap disertakan demi kompatibilitas.
