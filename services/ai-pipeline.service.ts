@@ -260,7 +260,8 @@ export class AIPipelineService {
           {
             model: target.model,
             messages: params.messages,
-            temperature: params.temperature ?? 0.7,
+            // Model Claude terbaru menolak `temperature` (400 "is deprecated for this model"), jadi tidak dikirim.
+            ...(target.provider === 'anthropic' ? {} : { temperature: params.temperature ?? 0.7 }),
             max_tokens: params.max_tokens ?? 2000,
           },
           { headers: target.headers, timeout: PREMIUM_CALL_TIMEOUT_MS, validateStatus: () => true }

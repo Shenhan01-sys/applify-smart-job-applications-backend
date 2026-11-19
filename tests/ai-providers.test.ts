@@ -25,13 +25,13 @@ const { tracingService } = await import('../services/tracing.service.ts')
 
 const LETTER = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'uat', 'letter-indonesian-greeting-user018.txt'), 'utf8')
 
-type Call = { url: string; model: string; headers: any; timeout: any }
+type Call = { url: string; model: string; headers: any; timeout: any; temperature?: number }
 let calls: Call[]
 let script: Record<string, string | number | Error>
 
 ;(axios as any).get = async () => ({ status: 500, data: {} })
 ;(axios as any).post = async (url: string, body: any, cfg: any) => {
-  calls.push({ url, model: body.model, headers: cfg?.headers, timeout: cfg?.timeout })
+  calls.push({ url, model: body.model, headers: cfg?.headers, timeout: cfg?.timeout, temperature: body.temperature })
   const reply = script[body.model]
   if (reply instanceof Error) throw reply
   if (typeof reply === 'number') return { status: reply, data: { error: 'x' } }
@@ -99,6 +99,8 @@ test('Free: Gemini gagal (429) lalu Claude Haiku menjawab; OpenRouter tetap tida
   const doc = await aiPipelineService.generateCoverLetter(params())
   assert.equal(doc.model, 'anthropic:claude-haiku-5-5')
   assert.deepEqual(calls.map((c) => c.model), ['gemini-3.5-flash-lite', 'claude-haiku-5-5'])
+  assert.equal(typeof calls[0].temperature, 'number', 'Gemini menerima temperature')
+  assert.equal(calls[1].temperature, undefined, 'Claude menolak temperature (400), jadi tidak dikirim')
 })
 
 test('Free: Gemini dan Claude gagal (timeout, jawaban kosong) lalu jatuh ke rantai OpenRouter lama', async () => {
