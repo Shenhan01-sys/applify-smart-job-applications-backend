@@ -193,3 +193,12 @@ test('Kalibrr: permintaan mengunci country=Indonesia dan memetakan halaman ke of
   assert.equal(q.get('offset'), '100')
   assert.equal(q.get('limit'), '50')
 })
+
+test('Greenhouse: tipe pekerjaan dari judul, bukan dari kata international/partner di deskripsi', () => {
+  const base = { location: { name: 'Remote - United States' }, absolute_url: 'https://job-boards.greenhouse.io/reddit/jobs/1', updated_at: '2026-11-19T00:00:00Z' }
+  const content = '&lt;p&gt;We partner with international and internal teams across the company.&lt;/p&gt;'
+  assert.equal(normalizeGreenhouseJob({ ...base, id: 1, title: 'Frontend Engineer, Ads', content }, 'reddit')!.job_type, 'full-time')
+  assert.equal(normalizeGreenhouseJob({ ...base, id: 2, title: 'Software Engineering Intern', content }, 'reddit')!.job_type, 'internship')
+  assert.equal(normalizeGreenhouseJob({ ...base, id: 3, title: 'Part-time Tutor', content }, 'reddit')!.job_type, 'part-time')
+  assert.equal(normalizeGreenhouseJob({ ...base, id: 4, title: 'Contract Designer', content }, 'reddit')!.job_type, 'contract')
+})

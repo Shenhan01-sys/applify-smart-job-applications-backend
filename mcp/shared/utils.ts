@@ -179,6 +179,20 @@ export function normalizeJobType(raw?: string | null): string {
   return 'full-time'
 }
 
+/**
+ * Tipe pekerjaan dari judul saja, dengan batas kata. Dipakai untuk sumber tanpa kolom tipe (Greenhouse).
+ * Deskripsi tidak dipakai, karena pencocokan substring pada teks bebas salah membaca "international" atau
+ * "internal" sebagai magang dan "partner" sebagai paruh waktu.
+ */
+export function jobTypeFromTitle(title?: string | null): string {
+  const t = String(title ?? '').toLowerCase()
+  if (/\bpart[\s_-]?time\b|\bparuh waktu\b/.test(t)) return 'part-time'
+  if (/\b(contract|contractor|kontrak|temporary)\b/.test(t)) return 'contract'
+  if (/\b(intern|interns|internship|magang)\b/.test(t)) return 'internship'
+  if (/\bfreelancer?\b/.test(t)) return 'freelance'
+  return 'full-time'
+}
+
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** Jalankan tugas async dengan batas konkurensi. */

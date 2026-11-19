@@ -1,5 +1,5 @@
 import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
-import { guessExperienceLevel, htmlToText, matchesKeywords, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
+import { guessExperienceLevel, htmlToText, jobTypeFromTitle, matchesKeywords, normalizeWorkType } from '../shared/utils.js'
 
 /**
  * Greenhouse Job Board API (publik, tanpa API key).
@@ -21,7 +21,7 @@ export function normalizeGreenhouseJob(job: any, board: string, companyName?: st
     apply_url: job.absolute_url,
     posted_at: job.updated_at,
     experience_level: guessExperienceLevel(job.title, description),
-    job_type: normalizeJobType(description.slice(0, 400)),
+    job_type: jobTypeFromTitle(job.title),
     work_type: normalizeWorkType(location),
     platform: 'greenhouse',
     board,
