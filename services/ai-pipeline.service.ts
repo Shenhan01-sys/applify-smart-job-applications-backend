@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { tracingService } from './tracing.service.js'
+import { PREMIUM_CALL_TIMEOUT_MS, premiumChain } from './ai-providers.js'
 import {
   GROUNDING_RULES,
   acceptCoverLetter,
@@ -24,6 +25,7 @@ const getOpenRouterKey = () => process.env.OPENROUTER_API_KEY
 const getGroqKey = () => process.env.GROQ_API_KEY
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
+const OPENROUTER_CALL_TIMEOUT_MS = Number(process.env.AI_OPENROUTER_TIMEOUT_MS || 40_000)
 
 // Free model slugs are retired often: by 2026-10 half of the original chain (gpt-oss-20b:free,
 // nemotron nano, ling tiny, Groq llama-3.3-70b ...) no longer existed. The chains are therefore
@@ -101,6 +103,8 @@ const nextUtcMidnight = () => {
 }
 
 interface AIGenerationParams {
+  /** Paket pengguna: menentukan rantai Gemini/Anthropic di depan rantai OpenRouter dan Groq. Bawaan 'free'. */
+  tier?: 'free' | 'pro'
   model: string
   messages: Array<{ role: string; content: string }>
   temperature?: number
@@ -198,6 +202,21 @@ export class AIPipelineService {
   /** Provider/model that answered the most recent call (diagnostics and test metrics). */
   lastModelUsed: string | null = null
 
+  /** Klien Supabase untuk membaca paket pengguna. Hanya diisi di tes; kalau kosong dimuat dari server saat dipakai. */
+  tierClient?: { from(table: string): any }
+
+  /** Paket pengguna ('pro' bila subscriptions.ai_model_tier = 'pro'). Gagal atau tidak ada data: 'free'. */
+  async tierFor(userId?: string): Promise<'free' | 'pro'> {
+    if (!userId) return 'free'
+    try {
+      const db = this.tierClient ?? ((await import('../api/index.js')).supabase as { from(table: string): any })
+      const { data } = await db.from('subscriptions').select('ai_model_tier').eq('user_id', userId).maybeSingle()
+      return data?.ai_model_tier === 'pro' ? 'pro' : 'free'
+    } catch {
+      return 'free'
+    }
+  }
+
   private async callAI(params: AIGenerationParams): Promise<string> {
     return (await this.callAIDetailed(params)).text
   }
@@ -224,8 +243,52 @@ export class AIPipelineService {
     return null
   }
 
+  /**
+   * Gemini dan Anthropic (endpoint kompatibel OpenAI) dicoba lebih dulu bila kuncinya terpasang. Batas waktu
+   * per panggilan pendek supaya model yang menggantung tidak menahan seluruh rantai. Mengembalikan null bila
+   * tidak ada yang menjawab dengan jawaban yang lolos pemeriksaan mutu.
+   */
+  private async callPremium(
+    params: AIGenerationParams,
+    state: CallState
+  ): Promise<{ text: string; model: string } | null> {
+    for (const target of premiumChain(params.tier ?? 'free')) {
+      const label = `${target.provider}:${target.model}`
+      try {
+        const response = await axios.post(
+          target.url,
+          {
+            model: target.model,
+            messages: params.messages,
+            temperature: params.temperature ?? 0.7,
+            max_tokens: params.max_tokens ?? 2000,
+          },
+          { headers: target.headers, timeout: PREMIUM_CALL_TIMEOUT_MS, validateStatus: () => true }
+        )
+        if (response.status < 200 || response.status >= 300) {
+          console.warn(`[AI] ${label} -> HTTP ${response.status}, trying next model...`)
+          continue
+        }
+        const content: string = response.data?.choices?.[0]?.message?.content ?? ''
+        if (!content.trim()) {
+          console.warn(`[AI] Empty completion from ${label}, trying next model...`)
+          continue
+        }
+        const vetted = this.vet(params, label, content, state)
+        if (vetted === null) continue
+        this.lastModelUsed = label
+        return { text: vetted, model: label }
+      } catch (error: any) {
+        console.warn(`[AI] ${label} failed: ${String(error?.message ?? error).substring(0, 80)}; trying next model...`)
+      }
+    }
+    return null
+  }
+
   private async callAIDetailed(params: AIGenerationParams): Promise<{ text: string; model: string }> {
     const state: CallState = { rejections: [], attempts: 0, soft: null }
+    const premium = await this.callPremium(params, state)
+    if (premium) return premium
     const chain = Date.now() < openRouterCappedUntil
       ? []
       : await getModelChain(params.model || process.env.OPENROUTER_MODEL)
@@ -251,6 +314,8 @@ export class AIPipelineService {
             },
             // Validate so that 4xx/5xx throw and we can catch + retry.
             validateStatus: () => true,
+            // Tanpa batas waktu satu model gratis yang menggantung menahan seluruh permintaan.
+            timeout: OPENROUTER_CALL_TIMEOUT_MS,
           }
         )
 
@@ -421,12 +486,13 @@ ${GROUNDING_RULES.map((r) => `- ${r}`).join('\n')}
 
 Write the cover letter now (just the body, no header/footer):`
 
-    // Every plan uses the same chain here: OPENROUTER_MODEL (default a free model), the free fallbacks, then
-    // Groq. Only the Edge Function (drafts) and the worker (form planning) pick DeepSeek V4 for Pro.
+    // Rantai: Gemini/Anthropic menurut paket (FREE_MODELS / PRO_MODELS, lihat ai-providers.ts) bila kuncinya
+    // terpasang, lalu OPENROUTER_MODEL dan cadangan gratisnya, lalu Groq.
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
     const allowedContext = [userProfile.firstName, userProfile.lastName, company, jobTitle, jobDescription, userProfile.summary].join(' ')
     const result = await this.callAIDetailed({
+      tier: await this.tierFor(userId),
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.8,
@@ -492,6 +558,7 @@ ${original}`
 
     const allowedContext = [original, company, jobTitle, jobDescription].join(' ')
     const result = await this.callAI({
+      tier: await this.tierFor(userId),
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
