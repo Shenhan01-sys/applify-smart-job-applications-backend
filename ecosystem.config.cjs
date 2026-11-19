@@ -27,48 +27,12 @@ module.exports = {
       kill_timeout: 5000,
       // Auto restart on failure
       autorestart: true,
-      // Graceful shutdown
-      wait_ready: true,
+      // wait_ready sengaja tidak dipakai: api/ tidak memanggil process.send('ready'), jadi PM2 akan menunggu listen_timeout lalu menganggapnya gagal.
       // Environment file
-      env_file: '.env',
-    },
-    {
-      name: 'applify-worker',
-      script: './dist/services/queue.service.js',
-      instances: 2,
-      exec_mode: 'fork',
-      env: {
-        NODE_ENV: 'production',
-      },
-      log_file: './logs/worker-combined.log',
-      out_file: './logs/worker-out.log',
-      error_file: './logs/worker-error.log',
-      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
-      merge_logs: true,
-      max_memory_restart: '512M',
-      restart_delay: 5000,
-      max_restarts: 10,
-      autorestart: true,
       env_file: '.env',
     },
   ],
 
-  deploy: {
-    production: {
-      user: 'deploy',
-      host: ['your-aws-ip'],
-      ref: 'origin/main',
-      repo: 'https://github.com/Shenhan01-sys/applify-smart-job-applications.git',
-      path: '/var/www/applify/backend',
-      'post-deploy': `
-        npm install &&
-        npm run build &&
-        pm2 reload ecosystem.config.cjs --env production &&
-        pm2 save
-      `,
-      env: {
-        NODE_ENV: 'production',
-      },
-    },
-  },
+  // Pemroses antrean (worker) bukan bagian dari backend: ia ada di ../worker (`node dist/worker.js`, Dockerfile sendiri).
+  // Blok `deploy` PM2 dihapus karena hanya berisi placeholder. Deploy memakai Docker (Railway) atau skrip aws-*.sh.
 }

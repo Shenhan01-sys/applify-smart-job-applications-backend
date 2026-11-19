@@ -1,5 +1,10 @@
 version: '3.8'
 
+# Susunan lama untuk satu mesin (EC2). Untuk Railway pakai Dockerfile langsung, tanpa berkas ini.
+# Pemroses antrean (worker) BUKAN bagian dari image backend: kodenya ada di ../worker dengan Dockerfile sendiri
+# (`node dist/worker.js`). Backend hanya memasukkan pekerjaan ke tabel automation_queue.
+# Redis tidak dipakai lagi (queue memakai database), jadi tidak ada layanan Redis di sini.
+
 services:
   api:
     build:
@@ -14,40 +19,10 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - SESSION_ENCRYPTION_KEY=${SESSION_ENCRYPTION_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - REDIS_URL=redis://redis:6379
       - FRONTEND_URL=${FRONTEND_URL}
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_BASE_URL=${LANGFUSE_BASE_URL}
-    depends_on:
-      - redis
-    restart: unless-stopped
-    networks:
-      - applify-network
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: node dist/services/queue.service.js
-    environment:
-      - NODE_ENV=production
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
-      - REDIS_URL=redis://redis:6379
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-    depends_on:
-      - redis
-    restart: unless-stopped
-    networks:
-      - applify-network
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
     restart: unless-stopped
     networks:
       - applify-network
@@ -65,9 +40,6 @@ services:
     restart: unless-stopped
     networks:
       - applify-network
-
-volumes:
-  redis-data:
 
 networks:
   applify-network:
