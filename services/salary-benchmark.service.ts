@@ -90,7 +90,7 @@ export async function salaryBenchmark(db: SupabaseClient, jobId: string): Promis
 
   const { data, error } = await db
     .from('jobs')
-    .select('id, title, location, salary_min, salary_max, salary_currency, salary_period')
+    .select('id, title, location, salary_min, salary_max, salary_currency, salary_period, external_url, platform_source')
     .eq('status', 'active')
     .gt('salary_min', 0)
     .or('salary_currency.eq.IDR,salary_currency.is.null')
@@ -103,6 +103,11 @@ export async function salaryBenchmark(db: SupabaseClient, jobId: string): Promis
   const cands: Cand[] = []
   for (const r of (data ?? []) as any[]) {
     if (r.id === jobId) continue
+    // Hanya lowongan nyata. Baris seed UAT tidak punya external_url, gajinya bulat (5–20 jt), dan periodenya
+    // 'monthly'; satu baris uji memakai platform httpbin (cek database 20 November 2026). Data itu tidak boleh
+    // menjadi pembanding gaji.
+    if (typeof r.external_url !== 'string' || !r.external_url.startsWith('https://')) continue
+    if (String(r.platform_source ?? '').toLowerCase() === 'httpbin') continue
     // Pengaman kedua di sisi aplikasi: filter DB bisa saja tidak ketat (mata uang/periode kosong dianggap rupiah/bulan).
     if (r.salary_currency != null && String(r.salary_currency).toUpperCase() !== 'IDR') continue
     if (r.salary_period != null && r.salary_period !== 'month') continue

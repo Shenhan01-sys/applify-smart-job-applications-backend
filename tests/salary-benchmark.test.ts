@@ -12,11 +12,25 @@ const M = 1_000_000
 let seq = 0
 const row = (title: string, min: number | null, max: number | null, over: Record<string, any> = {}) => ({
   id: `c${++seq}`, title, location: 'Bandung, Indonesia', status: 'active',
-  salary_min: min, salary_max: max, salary_currency: 'IDR', salary_period: 'month', ...over,
+  salary_min: min, salary_max: max, salary_currency: 'IDR', salary_period: 'month',
+  external_url: `https://id.jobstreet.com/id/job/${seq}`, platform_source: 'jobstreet', ...over,
 })
 const target = (over: Record<string, any> = {}) => ({
   id: 'j0', title: 'Senior Data Analyst (Contract)', location: 'Jakarta Selatan, Indonesia', status: 'active',
   salary_min: null, salary_max: null, salary_currency: null, salary_period: null, ...over,
+})
+
+test('benchmark: baris seed tanpa external_url, platform httpbin, dan periode monthly tidak dipakai', async () => {
+  const real = [1, 2, 3, 4, 5].map((i) => row('Data Analyst', (5 + i) * M, (7 + i) * M))
+  const seeds = [
+    row('Data Analyst', 5 * M, 20 * M, { external_url: null }),
+    row('Data Analyst', 12 * M, 20 * M, { platform_source: 'httpbin', external_url: 'https://httpbin.org/forms/post' }),
+    row('Data Analyst', 5 * M, 20 * M, { salary_period: 'monthly' }),
+  ]
+  const db = new FakeDb({ jobs: [target(), ...real, ...seeds] })
+  const b = await salaryBenchmark(db as any, 'j0')
+  assert.equal(b?.n, 5)
+  assert.equal(b?.median, 9 * M)
 })
 
 test('percentile: interpolasi linear', () => {
