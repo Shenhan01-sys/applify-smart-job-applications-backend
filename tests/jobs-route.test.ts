@@ -39,7 +39,7 @@ beforeEach(async () => {
   db = new FakeDb({
     jobs: [
       { id: 'j1', title: 'Data Analyst', company: 'PT Uji', location: 'Jakarta, Indonesia', status: 'active', platform_source: 'jobstreet', external_url: JS_URL, description: 'teaser', requirements: [], salary_min: null, salary_max: null },
-      { id: 'j2', title: 'Data Analyst', company: 'PT Lain', location: 'Jakarta, Indonesia', status: 'active', salary_min: 8_000_000, salary_max: 10_000_000, salary_currency: 'IDR', salary_period: 'month' },
+      { id: 'j2', title: 'Data Analyst', company: 'PT Lain', location: 'Jakarta, Indonesia', status: 'active', salary_min: 8_000_000, salary_max: 10_000_000, salary_currency: 'IDR', salary_period: 'month', external_url: 'https://id.jobstreet.com/id/job/2', platform_source: 'jobstreet' },
     ],
   })
   app = Fastify()
