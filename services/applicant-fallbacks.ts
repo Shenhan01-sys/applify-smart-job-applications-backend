@@ -6,10 +6,19 @@
  * Berkas ini disalin byte demi byte ke worker/src/lib/applicantFallbacks.ts (paket terpisah); ubah keduanya sekaligus.
  * Tes di worker/tests/applicant-fallbacks.test.ts memeriksa kesamaannya.
  *
- * Aturan: negara diturunkan dari teks lokasi Profil hanya bila bagian terakhir (setelah koma terakhir) adalah nama
- * negara yang dikenal. Nama kota atau provinsi tidak pernah ditebak menjadi negara: "Yogyakarta" tidak
- * menghasilkan apa-apa, "Sleman, Yogyakarta" juga tidak, "Yogyakarta, Indonesia" menghasilkan "Indonesia".
+ * Dua aturan:
+ *   1. Negara diturunkan dari teks lokasi Profil hanya bila bagian terakhir (setelah koma terakhir) adalah nama
+ *      negara yang dikenal. Nama kota atau provinsi tidak pernah ditebak menjadi negara: "Yogyakarta" tidak
+ *      menghasilkan apa-apa, "Sleman, Yogyakarta" juga tidak, "Yogyakarta, Indonesia" menghasilkan "Indonesia".
+ *   2. "No" pada `require_visa` (huruf N besar, persis) adalah nilai bawaan kolom di database production, bukan
+ *      pilihan pengguna. Pada 200 baris snapshot 3 Oktober 2026 (.backup/2026-10-03-db-reconcile) semuanya "No"
+ *      padahal skrip seed tidak pernah mengisinya, dan database/schema.sql tidak memuat nilai bawaan itu (hanya
+ *      live schema yang memuatnya). Halaman Pengaturan Agen menyimpan pilihan pengguna dengan huruf kecil
+ *      ("no" atau "yes"), jadi "No" persis berarti belum pernah dipilih.
  */
+
+/** Keyakinan jawaban yang datanya hanya nilai bawaan database: "sedang", jadi selalu ditandai untuk dicek. */
+export const UNCONFIRMED_DEFAULT_CONFIDENCE = 0.6
 
 /**
  * Nama negara kanonik (bahasa Inggris, sesuai daftar negara di formulir lowongan) beserta nama lain dalam bahasa
@@ -120,4 +129,13 @@ export function cityFromLocation(location: unknown): string | null {
   if (parts.length === 0) return null
   if (parts.length === 1 && COUNTRY_BY_NAME.has(normalizeName(parts[0]))) return null
   return parts[0]
+}
+
+/**
+ * True bila `require_visa` berisi nilai bawaan database ("No" persis, huruf N besar), yaitu pengguna belum pernah
+ * memilih. Pilihan pengguna di Pengaturan Agen tersimpan sebagai "no" atau "yes" (huruf kecil). Nilai kosong
+ * bukan nilai bawaan ini: itu "belum diisi" dan ditangani pemanggil.
+ */
+export function isUnconfirmedVisaDefault(value: unknown): boolean {
+  return typeof value === 'string' && value.trim() === 'No'
 }

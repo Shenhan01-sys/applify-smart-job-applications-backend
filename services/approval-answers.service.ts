@@ -1,7 +1,12 @@
 import { formAutofillService, type FillResult, type FormContext, type FormField } from './form-autofill.service.js'
 import { buildAchievementLines } from './profile-context.js'
 import { deriveExperienceYears } from './experience-years.js'
-import { cityFromLocation, countryFromLocation } from './applicant-fallbacks.js'
+import {
+  UNCONFIRMED_DEFAULT_CONFIDENCE,
+  cityFromLocation,
+  countryFromLocation,
+  isUnconfirmedVisaDefault,
+} from './applicant-fallbacks.js'
 
 /**
  * Jawaban formulir standar yang disiapkan agen untuk satu lamaran, lengkap dengan skor keyakinan, supaya
@@ -244,6 +249,13 @@ export async function buildApprovalAnswers(
     // dari setahun): jangan dilaporkan yakin. Rendah dan wajib dicek pengguna.
     if (q.requires === 'years_of_experience' && hasWorkHistory && Number(answer.trim()) === 0 && answer.trim() !== '') {
       confidence = Math.min(confidence, CONTRADICTED_YEARS_CONFIDENCE)
+      source = 'default'
+    }
+    // "No" persis pada sponsor visa adalah nilai bawaan kolom di database, bukan pilihan pengguna (pilihannya
+    // tersimpan "no" atau "yes" huruf kecil). Jawabannya tetap ditampilkan, tetapi bukan jawaban yakin: sedang,
+    // sumber "belum ada data", dan wajib dicek (uji klik produksi 20 November 2026, temuan 15).
+    if (q.requires === 'require_visa' && isUnconfirmedVisaDefault(settings.require_visa) && answer.trim() !== '') {
+      confidence = Math.min(confidence, UNCONFIRMED_DEFAULT_CONFIDENCE)
       source = 'default'
     }
     out.push({

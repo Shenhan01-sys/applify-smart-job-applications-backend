@@ -37,7 +37,8 @@ const fullSettings = {
   years_of_experience: '3',
   desired_salary: 9000000,
   notice_period: 30,
-  require_visa: 'No',
+  // huruf kecil = pilihan pengguna di Pengaturan Agen; "No" persis adalah nilai bawaan database (applicant-fallbacks.ts)
+  require_visa: 'no',
   linkedin_url: 'https://linkedin.example/in/budi',
 }
 const job = { title: 'Backend Engineer', company: 'Contoh PT', description: 'Bangun API.' }

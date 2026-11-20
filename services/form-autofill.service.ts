@@ -1,4 +1,5 @@
 import { aiPipelineService } from './ai-pipeline.service.js'
+import { UNCONFIRMED_DEFAULT_CONFIDENCE, isUnconfirmedVisaDefault } from './applicant-fallbacks.js'
 
 export interface FormField {
   type: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox' | 'file'
@@ -165,7 +166,15 @@ export class FormAutofillService {
 
     // Visa
     if (label.includes('visa') || label.includes('sponsorship') || label.includes('work authorization')) {
-      return { value: this.findOption(options, settings.require_visa || 'No'), confidence: 0.95 }
+      const visa = String(settings.require_visa ?? '').trim()
+      // Kolom kosong bukan "No": jawaban yang diada-adakan dengan keyakinan 0,95 menyesatkan (temuan 15 uji klik
+      // produksi 20 November 2026), jadi tanpa data nilainya kosong dengan keyakinan 0, sama seperti kota.
+      if (!visa) return { value: '', confidence: 0 }
+      // "No" persis adalah nilai bawaan kolom di database, bukan pilihan pengguna: jawab, tetapi tidak dengan yakin.
+      return {
+        value: this.findOption(options, visa),
+        confidence: isUnconfirmedVisaDefault(visa) ? UNCONFIRMED_DEFAULT_CONFIDENCE : 0.95,
+      }
     }
 
     // Citizenship
