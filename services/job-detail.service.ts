@@ -25,7 +25,8 @@ export interface JobDetail {
   skills: string[]
 }
 
-export type DetailFailure = 'unsupported' | 'not_found' | 'failed'
+/** gone = lowongan sudah ditutup di situs asal (HTTP 404/410, atau halaman yang ditandai kedaluwarsa/ditutup). */
+export type DetailFailure = 'unsupported' | 'not_found' | 'gone' | 'failed'
 /** ok=true -> `detail` terisi; ok=false -> `reason` terisi. (Bukan union: tsconfig tidak strict, union boolean tidak menyempit.) */
 export interface DetailResult {
   ok: boolean
@@ -335,6 +336,27 @@ function detailFromDeallsNode(node: any): JobDetail | null {
   }
 }
 
+/**
+ * Apakah halaman lowongan menyatakan lowongannya sudah ditutup. Situs tetap menjawab HTTP 200 untuk lowongan seperti
+ * ini, jadi kode status saja tidak cukup. Diperiksa 20 November 2026 pada halaman asli:
+ *  - JobStreet: jobdetails.result.job.isExpired true dan status "Expired" (lowongan aktif: false dan "Active").
+ *  - Dealls: objek lowongan di __NEXT_DATA__ punya closed false dan status "active" saat masih dibuka.
+ * Hanya tanda yang jelas yang dipakai. Halaman yang tidak dikenali tidak pernah dianggap ditutup.
+ */
+export function isClosedJobPage(platform: string, html: string): boolean {
+  if (platform === 'jobstreet') {
+    const job = parseSeekReduxData(html)?.jobdetails?.result?.job
+    if (!job || typeof job !== 'object') return false
+    return job.isExpired === true || (typeof job.status === 'string' && job.status.toLowerCase() === 'expired')
+  }
+  if (platform === 'dealls') {
+    const node = findDeallsJob(parseNextData(html))
+    if (!node) return false
+    return node.closed === true || (typeof node.status === 'string' && /^(closed|inactive|expired|archived)$/i.test(node.status))
+  }
+  return false
+}
+
 /** Urai satu halaman lowongan menurut platformnya. null bila isinya tidak bisa dikenali. */
 export function parseJobPage(platform: string, html: string): JobDetail | null {
   if (platform === 'jobstreet') {
@@ -427,7 +449,8 @@ async function getPage(
       }
       if (res.status === 404 || res.status === 410) {
         await res.body?.cancel().catch(() => {})
-        return { ok: false, reason: 'not_found' }
+        // JobStreet dan Dealls menjawab 404 untuk lowongan yang sudah dihapus (dicek 20 November 2026).
+        return { ok: false, reason: 'gone' }
       }
       if (!res.ok) {
         await res.body?.cancel().catch(() => {})
@@ -460,6 +483,7 @@ export async function fetchJobDetailResult(
 
   const page = await getPage(p, u, fetchImpl, opts.timeoutMs ?? DETAIL_TIMEOUT_MS, opts.maxBytes ?? DETAIL_MAX_BYTES)
   if (!page.ok) return { ok: false, reason: page.reason }
+  if (isClosedJobPage(p, page.html)) return { ok: false, reason: 'gone' }
   const detail = parseJobPage(p, page.html)
   return detail ? { ok: true, detail } : { ok: false, reason: 'not_found' }
 }
@@ -489,7 +513,11 @@ export const ENRICH_REASONS = {
   saveFailed: 'gagal menyimpan detail',
   jobNotFound: 'lowongan tidak ditemukan',
   readFailed: 'gagal membaca lowongan',
+  closed: 'lowongan sudah ditutup di situs asal',
 } as const
+
+/** Nilai jobs.status untuk lowongan yang sudah ditutup (nilai yang sudah dipakai di tabel). Daftar lowongan hanya memuat 'active'. */
+export const CLOSED_JOB_STATUS = 'closed'
 
 export interface EnrichDeps {
   fetchImpl?: typeof fetch
@@ -539,18 +567,28 @@ export async function enrichJob(db: SupabaseClient, jobId: string, deps: EnrichD
   if (!row) return fail('not_found', R.jobNotFound)
 
   const unchanged = (reason: string): EnrichResult => ({ job: row, enriched: false, reason, status: 'ok' })
+  if (row.status === CLOSED_JOB_STATUS) return unchanged(R.closed)
 
   const description = typeof row.description === 'string' ? row.description : ''
   const currentReqs = requirementsList(row.requirements)
-  if (description.length >= 600 && hasRealRequirements(currentReqs)) return unchanged(R.complete)
+  const complete = description.length >= 600 && hasRealRequirements(currentReqs)
 
   const platform = platformForUrl(row.external_url) ?? String(row.platform_source ?? '').toLowerCase()
-  if (!row.external_url || !DETAIL_HOSTS[platform]) return unchanged(R.unsupported)
+  const supported = Boolean(row.external_url && DETAIL_HOSTS[platform])
+  if (!supported) return unchanged(complete ? R.complete : R.unsupported)
+  // Baris yang sudah lengkap tetap diambil satu kali: halamannya dipakai untuk mengecek apakah lowongan sudah ditutup.
 
   const res = await fetchJobDetailResult(platform, row.external_url, deps.fetchImpl ?? fetch, {
     timeoutMs: deps.timeoutMs,
     maxBytes: deps.maxBytes,
   })
+  if (!res.ok && res.reason === 'gone') {
+    // Ditandai ditutup supaya tidak tampil lagi di daftar lowongan dan tidak dilamar. Hanya satu baris ini yang diubah.
+    const patch = { status: CLOSED_JOB_STATUS, updated_at: (deps.now?.() ?? new Date()).toISOString() }
+    const { data: saved, error: upErr } = await db.from('jobs').update(patch).eq('id', jobId).select('*').maybeSingle()
+    return { job: upErr ? row : (saved ?? { ...row, ...patch }), enriched: false, reason: R.closed, status: 'ok' }
+  }
+  if (complete) return unchanged(R.complete)
   if (!res.ok) {
     return unchanged(res.reason === 'unsupported' ? R.unsupported : res.reason === 'not_found' ? R.detailNotFound : R.fetchFailed)
   }

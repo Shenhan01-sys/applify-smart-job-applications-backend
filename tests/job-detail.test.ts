@@ -8,6 +8,7 @@ import {
   fetchJobDetail,
   fetchJobDetailResult,
   hasRealRequirements,
+  isClosedJobPage,
   parseJsonLdJobPosting,
   parseSeekReduxData,
 } from '../services/job-detail.service.ts'
@@ -245,11 +246,11 @@ test('redirect: host tujuan dicek sebelum diikuti; redirect sah (host sama) diik
   assert.equal(loop.calls.length, 4, 'tiga redirect lalu menyerah')
 })
 
-test('status HTTP: 404/410 -> not_found; 403/500 -> failed; galat jaringan -> failed', async () => {
+test('status HTTP: 404/410 -> gone (lowongan dihapus); 403/500 -> failed; galat jaringan -> failed', async () => {
   const code = async (status: number) =>
     (await fetchJobDetailResult('jobstreet', JS_URL, fakeFetch({ [JS_URL]: html('x', status) }).impl)).reason
-  assert.equal(await code(404), 'not_found')
-  assert.equal(await code(410), 'not_found')
+  assert.equal(await code(404), 'gone')
+  assert.equal(await code(410), 'gone')
   assert.equal(await code(403), 'failed')
   assert.equal(await code(500), 'failed')
   const boom = (async () => {
@@ -371,7 +372,7 @@ test('enrichJob: gaji yang sudah ada tidak ditimpa; deskripsi lebih panjang tida
   assert.deepEqual(Object.keys(db.writes.find((w) => w.op === 'update')!.payload).sort(), ['requirements', 'updated_at'])
 })
 
-test('enrichJob: sudah lengkap (deskripsi >= 600 dan syarat ada) -> tidak ada fetch, tidak ada tulis', async () => {
+test('enrichJob: sudah lengkap (deskripsi >= 600 dan syarat ada) -> satu fetch untuk cek tutup, tanpa tulis', async () => {
   const row = job({
     description: 'x'.repeat(650),
     requirements: ['Minimal S1 Statistik atau Teknik Informatika', 'Menguasai SQL dan Python'],
@@ -381,6 +382,57 @@ test('enrichJob: sudah lengkap (deskripsi >= 600 dan syarat ada) -> tidak ada fe
   const r = await enrichJob(db as any, 'j1', { fetchImpl: impl })
   assert.deepEqual({ enriched: r.enriched, reason: r.reason, status: r.status }, { enriched: false, reason: 'sudah lengkap', status: 'ok' })
   assert.equal(r.job!.description.length, 650)
+  assert.equal(calls.length, 1)
+  assert.equal(db.writes.length, 0)
+
+  // Situs yang tidak didukung: tetap "sudah lengkap", tanpa fetch.
+  const glints = new FakeDb({ jobs: [{ ...row, platform_source: 'glints', external_url: 'https://glints.com/id/opportunities/jobs/abc' }] })
+  const g = seekFetch()
+  assert.equal((await enrichJob(glints as any, 'j1', { fetchImpl: g.impl })).reason, 'sudah lengkap')
+  assert.equal(g.calls.length, 0)
+})
+
+test('isClosedJobPage: hanya tanda tutup yang jelas dari JobStreet dan Dealls', () => {
+  assert.equal(isClosedJobPage('jobstreet', seekHtml({ ...SEEK_JOB, isExpired: true, status: 'Expired' })), true)
+  assert.equal(isClosedJobPage('jobstreet', seekHtml({ ...SEEK_JOB, status: 'Expired' })), true)
+  assert.equal(isClosedJobPage('jobstreet', seekHtml({ ...SEEK_JOB, isExpired: false, status: 'Active' })), false)
+  assert.equal(isClosedJobPage('jobstreet', seekHtml(SEEK_JOB)), false)
+  assert.equal(isClosedJobPage('jobstreet', '<html>kosong</html>'), false)
+  const dl = (node: Record<string, any>) => deallsNextHtml({ requirements: '<ul><li>Teliti</li></ul>', ...node })
+  assert.equal(isClosedJobPage('dealls', dl({ closed: true, status: 'active' })), true)
+  assert.equal(isClosedJobPage('dealls', dl({ closed: false, status: 'closed' })), true)
+  assert.equal(isClosedJobPage('dealls', dl({ closed: false, status: 'active' })), false)
+  assert.equal(isClosedJobPage('dealls', dl({})), false)
+  assert.equal(isClosedJobPage('glints', seekHtml({ ...SEEK_JOB, isExpired: true })), false)
+})
+
+test('enrichJob: lowongan ditutup di situs asal (404 atau halaman Expired) -> status closed, hanya kolom status dan updated_at', async () => {
+  const cases: Array<[string, Record<string, any>, typeof fetch]> = [
+    ['404', job(), fakeFetch({ [JS_URL]: html('', 404) }).impl],
+    ['JobStreet Expired', job(), fakeFetch({ [JS_URL]: html(seekHtml({ ...SEEK_JOB, isExpired: true, status: 'Expired' })) }).impl],
+    ['lengkap tapi Expired', job({ description: 'x'.repeat(650), requirements: ['Minimal S1 Statistik atau Teknik Informatika', 'Menguasai SQL dan Python'] }),
+      fakeFetch({ [JS_URL]: html(seekHtml({ ...SEEK_JOB, isExpired: true })) }).impl],
+    ['Dealls closed', job({ platform_source: 'dealls', external_url: DL_URL }),
+      fakeFetch({ [DL_URL]: html(deallsNextHtml({ requirements: '<ul><li>Teliti</li></ul>', closed: true, status: 'closed' })) }).impl],
+  ]
+  for (const [name, row, f] of cases) {
+    const db = new FakeDb({ jobs: [row] })
+    const r = await enrichJob(db as any, 'j1', { fetchImpl: f, now: () => NOW })
+    assert.deepEqual({ status: r.status, enriched: r.enriched, reason: r.reason }, { status: 'ok', enriched: false, reason: 'lowongan sudah ditutup di situs asal' }, name)
+    assert.equal(r.job!.status, 'closed', name)
+    assert.equal(db.rows('jobs')[0].status, 'closed', name)
+    const updates = db.writes.filter((w) => w.op === 'update')
+    assert.equal(updates.length, 1, name)
+    assert.deepEqual(updates[0].payload, { status: 'closed', updated_at: NOW.toISOString() }, name)
+  }
+})
+
+test('enrichJob: baris yang sudah closed -> tanpa fetch, tanpa tulis', async () => {
+  const db = new FakeDb({ jobs: [job({ status: 'closed' })] })
+  const { impl, calls } = seekFetch()
+  const r = await enrichJob(db as any, 'j1', { fetchImpl: impl })
+  assert.equal(r.reason, 'lowongan sudah ditutup di situs asal')
+  assert.equal(r.job!.status, 'closed')
   assert.equal(calls.length, 0)
   assert.equal(db.writes.length, 0)
 })
@@ -422,7 +474,7 @@ test('enrichJob: alasan kegagalan berbahasa Indonesia; tidak pernah melempar', a
   assert.equal(noUrl.reason, 'situs tidak didukung')
 
   const gone = await run(job(), fakeFetch({ [JS_URL]: html('', 404) }).impl)
-  assert.equal(gone.reason, 'detail tidak ditemukan')
+  assert.equal(gone.reason, 'lowongan sudah ditutup di situs asal')
 
   const empty = await run(job(), fakeFetch({ [JS_URL]: html('<html>kosong</html>') }).impl)
   assert.equal(empty.reason, 'detail tidak ditemukan')
