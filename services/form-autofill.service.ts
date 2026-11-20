@@ -137,12 +137,15 @@ export class FormAutofillService {
       return { value: settings.street || '', confidence: 0.9 }
     }
 
-    // Experience
+    // Experience. Kolom kosong bukan "0 tahun": jawaban 0 dengan keyakinan 0,95 menyesatkan (uji klik produksi
+    // 20 November 2026), jadi tanpa data nilainya kosong dengan keyakinan 0, sama seperti kota.
     if (label.includes('experience') && (label.includes('year') || label.includes('how many'))) {
-      return { value: settings.years_of_experience || '0', confidence: 0.95 }
+      const years = String(settings.years_of_experience ?? '').trim()
+      return { value: years, confidence: years ? 0.95 : 0 }
     }
     if (label.includes('current experience') || label.includes('total experience')) {
-      return { value: settings.years_of_experience || '0', confidence: 0.95 }
+      const years = String(settings.years_of_experience ?? '').trim()
+      return { value: years, confidence: years ? 0.95 : 0 }
     }
 
     // Salary

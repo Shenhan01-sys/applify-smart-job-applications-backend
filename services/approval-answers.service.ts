@@ -1,5 +1,6 @@
 import { formAutofillService, type FillResult, type FormContext, type FormField } from './form-autofill.service.js'
 import { buildAchievementLines } from './profile-context.js'
+import { deriveExperienceYears } from './experience-years.js'
 
 /**
  * Jawaban formulir standar yang disiapkan agen untuk satu lamaran, lengkap dengan skor keyakinan, supaya
@@ -92,6 +93,10 @@ export interface AnswerInput {
   job: { title: string; company: string; description: string }
   /** Baris `profiles` pengguna. Dipakai hanya untuk kolom Pengaturan Otomasi yang kosong. */
   profileRow?: Record<string, any> | null
+  /** Baris `work_experiences` (start_date, end_date, is_current). Dasar tahun pengalaman bila kolom lain kosong atau 0. */
+  workExperiences?: Array<Record<string, any>> | null
+  /** Jam yang dipakai menghitung peran yang masih berjalan. Hanya tes yang mengisi ini. */
+  now?: Date
 }
 
 /** Keyakinan jawaban yang diambil dari Profil. Kota diturunkan dari teks lokasi bebas, jadi hanya "sedang". */
@@ -103,6 +108,11 @@ const PROFILE_CONFIDENCE: Record<string, number> = {
   current_city: 0.75,
 }
 
+/** Tahun pengalaman yang dihitung dari tanggal riwayat kerja: hasil hitungan, jadi selalu "sedang" dan dicek pengguna. */
+export const DERIVED_YEARS_CONFIDENCE = 0.7
+/** Tahun pengalaman 0 padahal profil punya riwayat kerja: hampir pasti salah, jadi "rendah". */
+export const CONTRADICTED_YEARS_CONFIDENCE = 0.4
+
 const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
 
 /**
@@ -112,14 +122,37 @@ const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
  *   phone -> phone_number, linkedin_url -> linkedin_url, portfolio_url -> website
  *   location -> current_city (bagian sebelum koma pertama; "Yogyakarta, Indonesia" -> "Yogyakarta")
  *   experience_years -> years_of_experience, hanya bila > 0 (0 adalah nilai bawaan kolom, bukan jawaban pengguna)
+ *   tahun pengalaman kosong atau 0 di keduanya -> dihitung dari work_experiences (periode digabung, peran berjalan
+ *   sampai hari ini, dibulatkan ke bawah). Kuncinya masuk `derived`; jawabannya diberi keyakinan sedang.
+ *
+ * Nilai "0" di Pengaturan Otomasi diperlakukan sebagai belum diisi, sama seperti 0 di profil: itu nilai bawaan,
+ * dan menjawab 0 tahun dengan yakin padahal ada riwayat kerja menyesatkan (uji klik produksi 20 November 2026).
  */
 export function mergeProfileIntoSettings(
   settings: Record<string, any> | null | undefined,
-  profileRow: Record<string, any> | null | undefined
-): { settings: Record<string, any>; fromProfile: Set<string> } {
+  profileRow: Record<string, any> | null | undefined,
+  workExperiences?: Array<Record<string, any>> | null,
+  now: Date = new Date()
+): { settings: Record<string, any>; fromProfile: Set<string>; derived: Set<string> } {
   const merged: Record<string, any> = { ...(settings ?? {}) }
   const fromProfile = new Set<string>()
-  if (!profileRow) return { settings: merged, fromProfile }
+  const derived = new Set<string>()
+  const yearsFromProfile = Number(profileRow?.experience_years)
+  const yearsUnset = isBlank(merged.years_of_experience) || Number(String(merged.years_of_experience).trim()) === 0
+  if (yearsUnset) {
+    if (Number.isFinite(yearsFromProfile) && yearsFromProfile > 0) {
+      merged.years_of_experience = String(yearsFromProfile)
+      fromProfile.add('years_of_experience')
+    } else {
+      const d = deriveExperienceYears(workExperiences, now)
+      if (d && d.years > 0) {
+        merged.years_of_experience = String(d.years)
+        fromProfile.add('years_of_experience')
+        derived.add('years_of_experience')
+      }
+    }
+  }
+  if (!profileRow) return { settings: merged, fromProfile, derived }
   const fill = (key: string, value: unknown) => {
     const v = typeof value === 'number' ? String(value) : text(value)
     if (v && isBlank(merged[key])) {
@@ -142,9 +175,7 @@ export function mergeProfileIntoSettings(
   fill('website', profileRow.portfolio_url)
   const city = text(profileRow.location).split(',')[0].trim()
   fill('current_city', city)
-  const years = Number(profileRow.experience_years)
-  if (Number.isFinite(years) && years > 0) fill('years_of_experience', years)
-  return { settings: merged, fromProfile }
+  return { settings: merged, fromProfile, derived }
 }
 
 /**
@@ -171,7 +202,8 @@ export async function buildApprovalAnswers(
   timeoutMs: number = AI_ANSWER_TIMEOUT_MS
 ): Promise<ApprovalAnswer[]> {
   const { profile, job } = input
-  const { settings, fromProfile } = mergeProfileIntoSettings(input.settings, input.profileRow)
+  const { settings, fromProfile, derived } = mergeProfileIntoSettings(input.settings, input.profileRow, input.workExperiences, input.now)
+  const hasWorkHistory = Array.isArray(input.workExperiences) && input.workExperiences.length > 0
   const ctx: FormContext = {
     jobTitle: job.title,
     company: job.company,
@@ -198,8 +230,15 @@ export async function buildApprovalAnswers(
     const answer = asText(res.value)
     // Jawaban aturan yang datanya berasal dari Profil (bukan Pengaturan Otomasi) diberi sumber 'profile'.
     const viaProfile = res.source === 'rule' && !!q.requires && fromProfile.has(q.requires) && answer.trim() !== ''
-    const confidence = viaProfile ? Math.min(res.confidence, PROFILE_CONFIDENCE[q.requires!] ?? 0.85) : res.confidence
-    const source: AnswerSource = viaProfile ? 'profile' : res.source
+    let confidence = viaProfile ? Math.min(res.confidence, PROFILE_CONFIDENCE[q.requires!] ?? 0.85) : res.confidence
+    let source: AnswerSource = viaProfile ? 'profile' : res.source
+    if (viaProfile && derived.has(q.requires!)) confidence = Math.min(confidence, DERIVED_YEARS_CONFIDENCE)
+    // Jawaban 0 tahun padahal ada riwayat kerja (mis. nilai bawaan 0 di Pengaturan Otomasi, atau semua peran kurang
+    // dari setahun): jangan dilaporkan yakin. Rendah dan wajib dicek pengguna.
+    if (q.requires === 'years_of_experience' && hasWorkHistory && Number(answer.trim()) === 0 && answer.trim() !== '') {
+      confidence = Math.min(confidence, CONTRADICTED_YEARS_CONFIDENCE)
+      source = 'default'
+    }
     out.push({
       question: q.display,
       answer,
@@ -247,23 +286,39 @@ async function loadAchievementLines(db: AnswersDb, userId: string): Promise<stri
   }
 }
 
+/**
+ * Periode kerja pengguna untuk menghitung tahun pengalaman. Gagal membaca = null (jawaban dibuat tanpa hitungan ini,
+ * seperti sebelum fitur ini ada), jadi pengajuan persetujuan tidak tertahan.
+ */
+async function loadWorkExperiences(db: AnswersDb, userId: string): Promise<Array<Record<string, any>> | null> {
+  try {
+    const { data, error } = await db.from('work_experiences').select('start_date, end_date, is_current').eq('user_id', userId).limit(100)
+    return !error && Array.isArray(data) ? data : null
+  } catch (e) {
+    console.warn('[approval-answers] riwayat kerja tidak terbaca, tahun pengalaman tidak dihitung:', (e as Error)?.message)
+    return null
+  }
+}
+
 export async function prepareApprovalAnswers(
   db: AnswersDb,
   args: { userId: string; email?: string | null; jobId?: string | null; jobTitle: string; company: string },
   filler?: Filler
 ): Promise<ApprovalAnswer[]> {
   try {
-    const [{ data: settings }, { data: profileRow }, { data: skills }, { data: jobRow }, achievements] = await Promise.all([
+    const [{ data: settings }, { data: profileRow }, { data: skills }, { data: jobRow }, achievements, workExperiences] = await Promise.all([
       db.from('user_automation_settings').select('*').eq('user_id', args.userId).maybeSingle(),
       db.from('profiles').select('*').eq('id', args.userId).maybeSingle(),
       db.from('user_skills').select('name').eq('user_id', args.userId),
       args.jobId ? db.from('jobs').select('description').eq('id', args.jobId).maybeSingle() : Promise.resolve({ data: null }),
       loadAchievementLines(db, args.userId),
+      loadWorkExperiences(db, args.userId),
     ])
     return await buildApprovalAnswers(
       {
         settings: settings ?? {},
         profileRow: profileRow ?? null,
+        workExperiences,
         profile: {
           email: args.email ?? null,
           skills: (skills ?? []).map((s: any) => s.name).filter(Boolean),
