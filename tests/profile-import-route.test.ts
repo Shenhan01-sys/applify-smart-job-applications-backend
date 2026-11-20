@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import Fastify, { type FastifyInstance } from 'fastify'
+import cors from '@fastify/cors'
 import { readFileSync } from 'node:fs'
 import { FakeDb } from './helpers/fakeDb.ts'
 import { makePdf } from './helpers/makePdf.ts'
@@ -9,6 +10,7 @@ import { AiGuardService, DEFAULT_IMPORT_LIMITS, PROFILE_IMPORT_ACTION, importLim
 import { LinkedInImportService } from '../services/linkedin-import.service.ts'
 import { PDF_MAX_BYTES } from '../services/linkedin-pdf.ts'
 import { profileImportRoutes } from '../api/routes/profile-import.ts'
+import { isOriginAllowed, parseAllowedOrigins } from '../services/deploy-config.ts'
 
 /**
  * POST /api/profile/import/linkedin-pdf pada Fastify sungguhan (app.inject, tanpa jaringan): login, validasi
@@ -220,6 +222,30 @@ test('galat tak terduga: 500 generik, pesan internal dan isi PDF tidak bocor', a
   assert.equal(res.statusCode, 500)
   assert.equal(res.json().success, false)
   assert.ok(!res.body.includes('Rina') && !res.body.includes('example.com'))
+})
+
+test('CORS: preflight dari browser (Content-Type application/pdf + Authorization, tanpa token) lolos; POST tanpa token tetap 401', async () => {
+  // Content-Type application/pdf bukan tipe aman CORS, jadi browser selalu mengirim OPTIONS lebih dulu, tanpa Authorization.
+  // Hook 401 milik rute impor tidak boleh menghadang preflight itu.
+  const origin = 'https://applify.example'
+  const withCors = Fastify()
+  await withCors.register(cors, { origin: (o, cb) => cb(null, isOriginAllowed(o, parseAllowedOrigins(origin))), credentials: true })
+  withCors.addHook('preHandler', async (req) => {
+    ;(req as any).user = { id: 'u1' }
+  })
+  await withCors.register(profileImportRoutes, { prefix: '/api/profile', guard: { checkImportRate: async () => {} } as any, importer: { importFromPdf: async () => ({}) } as any })
+  const pre = await withCors.inject({
+    method: 'OPTIONS',
+    url: '/api/profile/import/linkedin-pdf',
+    headers: { origin, 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization,content-type' },
+  })
+  assert.equal(pre.statusCode, 204)
+  assert.equal(pre.headers['access-control-allow-origin'], origin)
+  assert.match(String(pre.headers['access-control-allow-headers']), /authorization/i)
+  assert.match(String(pre.headers['access-control-allow-headers']), /content-type/i)
+  const noToken = await withCors.inject({ method: 'POST', url: '/api/profile/import/linkedin-pdf', payload: fixturePdf(), headers: { origin, 'content-type': 'application/pdf' } })
+  assert.equal(noToken.statusCode, 401)
+  await withCors.close()
 })
 
 test('batas impor: bawaan 3 per menit dan 10 per jam; lingkungan hanya menerima bilangan bulat positif', () => {
