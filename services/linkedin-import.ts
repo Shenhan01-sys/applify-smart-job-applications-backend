@@ -288,10 +288,14 @@ export interface ParsedYears {
   end: number | 'present' | null
 }
 
-/** "2020 - 2024", "(2020 - Present)", "2018". */
+/**
+ * "2020 - 2024", "(2020 - Present)", "2018", dan bentuk bernama bulan dari PDF LinkedIn berbahasa Indonesia
+ * atau Inggris seperti "Agustus 2023 - November 2026" atau "Feb 2025 – Mar 2025". Nama bulan sebelum tahun akhir
+ * dilewati; tanpa itu tahun akhir terbaca kosong dan seluruh riwayat pendidikan terbuang.
+ */
 export function parseYearRange(raw: unknown): ParsedYears | null {
   const s = line(raw).replace(/[()·•]/g, ' ')
-  const m = /\b(\d{4})\b(?:\s*(?:[-–—]|to|sampai|hingga)\s*\b(\d{4}|present|sekarang|current|saat ini)\b)?/i.exec(s)
+  const m = /\b(\d{4})\b(?:\s*(?:[-–—]|to|sampai|hingga)\s*(?:\p{L}+\.?\s+)?(\d{4}|present|sekarang|current|saat ini)\b)?/iu.exec(s)
   if (!m) return null
   const start = Number(m[1])
   const endRaw = m[2]
