@@ -3,6 +3,9 @@
  * Dipakai bila `profiles.experience_years` dan Pengaturan Otomasi tidak mengisi "tahun pengalaman", supaya
  * jawaban formulir tidak jatuh ke 0 padahal profil memuat riwayat kerja. Fungsi murni: tanpa jaringan dan database.
  *
+ * Berkas ini disalin byte demi byte ke worker/src/lib/experienceYears.ts (paket terpisah); ubah keduanya sekaligus.
+ * Tes di worker/tests/experience-years.test.ts memeriksa kesamaannya.
+ *
  * Aturan:
  *   - Tanggal dibaca per bulan (`YYYY-MM-DD`, `YYYY-MM`, atau stempel ISO). Bulan mulai dan bulan selesai ikut
  *     dihitung, karena tanggal selesai tersimpan sebagai tanggal 1 bulan terakhir bekerja (impor LinkedIn).
