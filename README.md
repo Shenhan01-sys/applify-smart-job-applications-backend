@@ -78,6 +78,7 @@ npm run mcp:jobs:http                # Applify Jobs MCP server via Streamable HT
 | `FRONTEND_URL` | No | CORS allowed origin |
 | `SESSION_ENCRYPTION_KEY` | Yes | Kunci enkripsi sesi platform (cookie LinkedIn dll.), minimal 32 karakter, mis. `openssl rand -base64 32`. Tidak ada kunci bawaan: kosong, pendek, atau nilai contoh `.env.example` = sesi tidak disimpan atau dibaca (503 `session_encryption_not_configured`) dan galat konfigurasi dicatat saat start |
 | `AI_RATE_LIMIT_PER_MINUTE` / `AI_RATE_LIMIT_PER_HOUR` | No | Batas permintaan `/api/ai/*` per pengguna (bawaan 10 dan 60) |
+| `PROFILE_IMPORT_RATE_LIMIT_PER_MINUTE` / `PROFILE_IMPORT_RATE_LIMIT_PER_HOUR` | No | Batas impor profil dari PDF LinkedIn per pengguna (bawaan 3 dan 10). Terpisah dari batas `/api/ai/*` |
 | `OPENROUTER_API_KEY` | No | For AI features (optional) |
 | `REDIS_URL` | No | Deprecated — queue memakai DB-as-queue, tanpa Redis |
 | `APPLIFY_JOBS_MCP_PORT` | No | Port Applify Jobs MCP server mode HTTP (default 8090) |
@@ -114,6 +115,14 @@ match_score    = round(100 x bobot cocok / bobot maksimum)
 - `GET /api/automation/logs` - Get application logs
 - `GET /api/automation/queue` - Get queue status
 - `POST /api/automation/queue` - Add job to queue
+
+### Profil
+- `POST /api/profile/import/linkedin-pdf` - Impor profil dari PDF LinkedIn ("Lainnya", "Simpan ke PDF"). Hanya mengembalikan pratinjau; penyimpanan dilakukan frontend setelah pengguna menyetujuinya.
+  - Permintaan: `Authorization: Bearer <JWT>`, `Content-Type: application/pdf`, badan = isi PDF mentah (bukan multipart). Maksimal 5 MB, harus diawali `%PDF`. Diproses di memori, tidak disimpan.
+  - Respons 200: `{ success: true, preview: { profile: { full_name, current_title, location, linkedin_url }, experiences[], education[], certifications[], skills[], meta: { method: 'ai' | 'rules', model, pages, chars, truncated, dropped }, warnings[] } }`. Tanggal pengalaman `YYYY-MM-01`; tahun pendidikan bilangan bulat; bahasa masuk `skills` dengan `category: 'language'`.
+  - Galat: 400 `not_pdf` / `empty_file`, 413 `file_too_large`, 415 `not_pdf`, 422 `pdf_unreadable` / `pdf_too_long` / `pdf_no_text` / `nothing_found`, 429 `rate_limited` (`retryAfterSec`, `Retry-After`), 503 `rate_limit_check_failed`.
+  - Pembacaan: model AI lewat rantai yang sama dengan `/api/ai/*` (`aiPipelineService.completeJson`), lalu hasilnya divalidasi kode (fakta harus ada di teks PDF). Bila model gagal atau habis waktu, parser aturan (`services/linkedin-import.ts`) dipakai dan `meta.method` bernilai `rules`.
+  - Tidak memakai atau memeriksa kuota draf AI. Batas lajunya sendiri: `application_logs.action = 'profile_import'` (bawaan 3 per menit, 10 per jam).
 
 ### AI
 Semua rute `/api/ai/*` memanggil model AI, jadi semuanya dijaga sebelum pipeline dipanggil
