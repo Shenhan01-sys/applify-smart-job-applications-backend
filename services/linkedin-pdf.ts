@@ -1,0 +1,95 @@
+import { extractText, getDocumentProxy } from 'unpdf'
+
+/**
+ * Validasi dan ekstraksi teks PDF untuk impor profil dari PDF LinkedIn. Semuanya di memori: berkas tidak ditulis
+ * ke disk, Storage, maupun database. Isi teks tidak pernah dicatat di log; hanya ukuran dan jumlah halaman.
+ */
+
+/** Batas ukuran sama dengan unggah CV (5 MB). */
+export const PDF_MAX_BYTES = 5 * 1024 * 1024
+/** PDF profil LinkedIn paling panjang yang masih wajar. Lebih dari ini ditolak sebelum diurai. */
+export const PDF_MAX_PAGES = 25
+/** Di bawah ini (tanpa spasi) PDF dianggap hasil pindai atau gambar: tidak ada teks yang bisa dibaca. */
+export const PDF_MIN_TEXT_CHARS = 80
+const PDF_PARSE_TIMEOUT_MS = 20_000
+
+export type ImportErrorCode =
+  | 'not_pdf'
+  | 'empty_file'
+  | 'file_too_large'
+  | 'pdf_unreadable'
+  | 'pdf_too_long'
+  | 'pdf_no_text'
+  | 'nothing_found'
+
+/** Galat impor dengan status HTTP dan kode yang dibaca antarmuka. `message` siap tampil (Bahasa Indonesia). */
+export class LinkedInImportError extends Error {
+  constructor(
+    readonly statusCode: 400 | 413 | 415 | 422,
+    readonly code: ImportErrorCode,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'LinkedInImportError'
+  }
+}
+
+/** Berkas harus berupa PDF sungguhan: tidak kosong, di bawah batas ukuran, dan diawali penanda `%PDF`. */
+export function assertPdfUpload(body: unknown): Buffer {
+  if (!Buffer.isBuffer(body)) {
+    throw new LinkedInImportError(400, 'not_pdf', 'Unggah berkas PDF dari LinkedIn (Simpan ke PDF).')
+  }
+  if (body.length === 0) {
+    throw new LinkedInImportError(400, 'empty_file', 'Berkas kosong. Pilih PDF yang diunduh dari LinkedIn.')
+  }
+  if (body.length > PDF_MAX_BYTES) {
+    throw new LinkedInImportError(413, 'file_too_large', 'Ukuran PDF terlalu besar, maksimal 5 MB.')
+  }
+  if (body.subarray(0, 4).toString('latin1') !== '%PDF') {
+    throw new LinkedInImportError(400, 'not_pdf', 'Berkas ini bukan PDF. Unggah PDF yang diunduh dari LinkedIn (Simpan ke PDF).')
+  }
+  return body
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('pdf_parse_timeout')), ms)
+  })
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+}
+
+/** Teks per halaman. Galat pustaka (PDF rusak, berkata sandi, terlalu panjang) menjadi LinkedInImportError 422. */
+export async function extractPdfPages(buffer: Buffer): Promise<string[]> {
+  try {
+    return await withTimeout(readPages(buffer), PDF_PARSE_TIMEOUT_MS)
+  } catch (e) {
+    if (e instanceof LinkedInImportError) throw e
+    // Pesan pustaka bisa memuat potongan isi berkas; hanya nama galatnya yang dicatat.
+    console.warn(`[linkedin-import] PDF tidak terbaca (${(e as Error)?.name ?? 'Error'})`)
+    throw new LinkedInImportError(422, 'pdf_unreadable', 'PDF tidak bisa dibaca. PDF yang rusak atau dikunci kata sandi tidak didukung.')
+  }
+}
+
+async function readPages(buffer: Buffer): Promise<string[]> {
+  // Salinan, karena pdf.js boleh melepas buffer yang diberikan.
+  const pdf = await getDocumentProxy(new Uint8Array(buffer))
+  try {
+    if (pdf.numPages > PDF_MAX_PAGES) {
+      throw new LinkedInImportError(422, 'pdf_too_long', `PDF terlalu panjang (${pdf.numPages} halaman). Profil LinkedIn biasanya kurang dari ${PDF_MAX_PAGES} halaman.`)
+    }
+    const { text } = await extractText(pdf, { mergePages: false })
+    const pages = Array.isArray(text) ? text : [String(text ?? '')]
+    const chars = pages.join('').replace(/\s+/g, '').length
+    if (chars < PDF_MIN_TEXT_CHARS) {
+      throw new LinkedInImportError(422, 'pdf_no_text', 'PDF ini tidak berisi teks yang bisa dibaca (mungkin hasil pindai atau gambar). Unduh PDF langsung dari LinkedIn: Lainnya, Simpan ke PDF.')
+    }
+    return pages
+  } finally {
+    try {
+      await (pdf as unknown as { destroy?: () => Promise<void> }).destroy?.()
+    } catch {
+      // membersihkan memori saja; kegagalannya tidak mengubah hasil
+    }
+  }
+}

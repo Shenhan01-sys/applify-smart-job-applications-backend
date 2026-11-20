@@ -1,0 +1,54 @@
+# SINTETIS: tokoh, perusahaan, sekolah, email, dan nomor telepon di bawah ini fiktif, ditulis tangan untuk uji.
+# Bukan data orang sungguhan. Tata letaknya meniru teks PDF "Simpan ke PDF" LinkedIn: kolom kiri dulu,
+# lalu nama, judul profil, lokasi, lalu Summary, Experience, Education. Halaman dipisah baris ---PAGE---.
+# Baris yang diawali "# " dibuang oleh pemuat.
+Contact
+www.linkedin.com/in/rina-kusuma-sintetis (LinkedIn)
+rina.sintetis@example.com (Home)
++62 812 0000 0000 (Mobile)
+Top Skills
+Python
+Data Analysis
+Project Management
+Languages
+Indonesian (Native or Bilingual)
+English (Full Professional)
+Japanese (Elementary)
+Certifications
+Google Data Analytics Professional Certificate
+AWS Certified Cloud Practitioner
+Rina Kusuma Wardhani
+Senior Data Analyst at Biru Langit Labs
+Yogyakarta, Daerah Istimewa Yogyakarta, Indonesia
+Summary
+Data analyst with experience in retail and logistics. Builds dashboards and
+forecasting models for operations teams.
+Experience
+Biru Langit Labs
+Senior Data Analyst
+January 2022 - Present (2 years 11 months)
+Yogyakarta, Daerah Istimewa Yogyakarta, Indonesia
+Lead a team of three analysts. Built a demand forecasting model that reduced
+stock-outs. Maintain executive dashboards in Metabase.
+Page 1 of 2
+---PAGE---
+PT Nusantara Digital Solusi
+3 years 4 months
+Data Analyst
+March 2020 - December 2021 (1 year 10 months)
+Jakarta, Indonesia
+Analyzed sales data across 40 stores.
+Junior Data Analyst
+September 2018 - February 2020 (1 year 6 months)
+Jakarta, Indonesia
+Cleaned and merged data from point-of-sale systems.
+Studio Kopi Hitam
+Data Intern
+June 2018 - August 2018 (3 months)
+Bandung, Jawa Barat, Indonesia (Remote)
+Education
+Universitas Fiktif Nusantara
+Bachelor of Engineering - BE, Information Systems · (2014 - 2018)
+Sekolah Menengah Atas Contoh 1 Yogyakarta
+SMA, IPA · (2011 - 2014)
+Page 2 of 2

@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { tracingService } from './tracing.service.js'
 import { PREMIUM_CALL_TIMEOUT_MS, premiumChain } from './ai-providers.js'
+import { acceptJsonObject } from './json-output.js'
 import {
   GROUNDING_RULES,
   acceptCoverLetter,
@@ -624,6 +625,26 @@ Candidate Info: ${JSON.stringify(userProfile, null, 2)}
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.6,
       max_tokens: 800,
+    })
+  }
+
+  /**
+   * Panggilan model untuk keluaran SATU objek JSON, lewat rantai yang sama dengan fitur lain (Gemini/Anthropic
+   * menurut paket, lalu OpenRouter, lalu Groq). Jawaban yang bukan JSON objek ditolak dan rantai lanjut ke model
+   * berikutnya. Dipakai impor profil dari PDF LinkedIn. Isi prompt tidak dicatat di log maupun trace.
+   */
+  async completeJson(params: { system: string; user: string; userId?: string; maxTokens?: number; temperature?: number }): Promise<{ text: string; model: string }> {
+    const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
+    return this.callAIDetailed({
+      tier: await this.tierFor(params.userId),
+      model,
+      messages: [
+        { role: 'system', content: params.system },
+        { role: 'user', content: params.user },
+      ],
+      temperature: params.temperature ?? 0.1,
+      max_tokens: params.maxTokens ?? 4000,
+      accept: acceptJsonObject,
     })
   }
 
