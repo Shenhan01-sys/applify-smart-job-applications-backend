@@ -117,6 +117,36 @@ interface AIGenerationParams {
    * dibersihkan dari blok penalaran dan harus tidak kosong.
    */
   accept?: (raw: string) => AcceptOutcome
+  /**
+   * Batas waktu mutlak (epoch ms) untuk seluruh rantai. Lewat batas ini tidak ada panggilan baru, dan batas waktu
+   * tiap panggilan dipendekkan ke sisa waktu. Tanpa nilai ini rantai berjalan sampai habis (perilaku lama).
+   */
+  deadlineAt?: number
+}
+
+/** Sisa waktu rantai (ms); Infinity bila tidak ada batas. */
+const timeLeft = (p: AIGenerationParams): number => (p.deadlineAt === undefined ? Infinity : p.deadlineAt - Date.now())
+/** Sisa waktu di bawah ini tidak cukup untuk satu panggilan model yang berguna. */
+const MIN_USEFUL_CALL_MS = 2_000
+const budgetSpent = (p: AIGenerationParams): boolean => timeLeft(p) < MIN_USEFUL_CALL_MS
+/** Batas waktu satu panggilan: nilai dasar, tidak pernah melewati sisa waktu rantai. Tanpa deadline = nilai dasar. */
+const callTimeout = (p: AIGenerationParams, base?: number): number | undefined => {
+  const left = timeLeft(p)
+  if (left === Infinity) return base
+  return Math.max(MIN_USEFUL_CALL_MS, Math.min(base ?? left, left))
+}
+/** Galat jaringan yang berarti servernya tidak terjangkau: model lain di penyedia yang sama tidak akan menjawab juga. */
+const UNREACHABLE_CODES = new Set(['ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'])
+const isUnreachable = (error: any): boolean => !error?.response && UNREACHABLE_CODES.has(String(error?.code ?? ''))
+/** Kunci ditolak: semua model di penyedia yang sama akan ditolak juga. */
+const isAuthRejection = (status: number): boolean => status === 401 || status === 403
+
+/** Batas waktu rantai habis sebelum ada model yang menjawab dengan jawaban yang lolos. Tidak ada yang disimpan. */
+export class AiBudgetExhaustedError extends Error {
+  constructor() {
+    super('AI time budget exhausted before any model answered')
+    this.name = 'AiBudgetExhausted'
+  }
 }
 
 /** Semua model di rantai menjawab, tetapi tidak satu pun jawabannya lolos pemeriksaan mutu. Tidak ada yang disimpan. */
@@ -200,6 +230,8 @@ interface CallState {
   rejections: string[]
   attempts: number
   soft: { text: string; model: string } | null
+  /** Penyedia Gemini/Anthropic yang sudah pasti tidak bisa dipakai di permintaan ini (kunci ditolak atau tidak terjangkau). */
+  skipProviders: Set<string>
 }
 
 export class AIPipelineService {
@@ -257,6 +289,8 @@ export class AIPipelineService {
     state: CallState
   ): Promise<{ text: string; model: string } | null> {
     for (const target of premiumChain(params.tier ?? 'free')) {
+      if (budgetSpent(params)) break
+      if (state.skipProviders.has(target.provider)) continue
       const label = `${target.provider}:${target.model}`
       try {
         const response = await axios.post(
@@ -270,10 +304,11 @@ export class AIPipelineService {
             // jawabannya bisa kosong atau terpotong, jadi diberi ruang minimal 1600.
             max_tokens: target.provider === 'anthropic' ? Math.max(params.max_tokens ?? 2000, 1600) : params.max_tokens ?? 2000,
           },
-          { headers: target.headers, timeout: PREMIUM_CALL_TIMEOUT_MS, validateStatus: () => true }
+          { headers: target.headers, timeout: callTimeout(params, PREMIUM_CALL_TIMEOUT_MS), validateStatus: () => true }
         )
         if (response.status < 200 || response.status >= 300) {
           console.warn(`[AI] ${label} -> HTTP ${response.status}, trying next model...`)
+          if (isAuthRejection(response.status)) state.skipProviders.add(target.provider)
           continue
         }
         const content: string = response.data?.choices?.[0]?.message?.content ?? ''
@@ -287,21 +322,23 @@ export class AIPipelineService {
         return { text: vetted, model: label }
       } catch (error: any) {
         console.warn(`[AI] ${label} failed: ${String(error?.message ?? error).substring(0, 80)}; trying next model...`)
+        if (isUnreachable(error)) state.skipProviders.add(target.provider)
       }
     }
     return null
   }
 
   private async callAIDetailed(params: AIGenerationParams): Promise<{ text: string; model: string }> {
-    const state: CallState = { rejections: [], attempts: 0, soft: null }
+    const state: CallState = { rejections: [], attempts: 0, soft: null, skipProviders: new Set() }
     const premium = await this.callPremium(params, state)
     if (premium) return premium
-    const chain = Date.now() < openRouterCappedUntil
+    const chain = Date.now() < openRouterCappedUntil || budgetSpent(params)
       ? []
       : await getModelChain(params.model || process.env.OPENROUTER_MODEL)
     let lastError: any = chain.length === 0 ? new Error('OpenRouter free-tier daily cap reached') : null
 
     for (let i = 0; i < chain.length; i++) {
+      if (budgetSpent(params)) break
       const model = chain[i]
       try {
         const response = await axios.post(
@@ -322,7 +359,7 @@ export class AIPipelineService {
             // Validate so that 4xx/5xx throw and we can catch + retry.
             validateStatus: () => true,
             // Tanpa batas waktu satu model gratis yang menggantung menahan seluruh permintaan.
-            timeout: OPENROUTER_CALL_TIMEOUT_MS,
+            timeout: callTimeout(params, OPENROUTER_CALL_TIMEOUT_MS),
           }
         )
 
@@ -335,8 +372,15 @@ export class AIPipelineService {
             break
           }
           console.warn(`[AI] 429 rate-limited on ${model}, switching to next model...`)
-          await new Promise((r) => setTimeout(r, 1500)) // brief backoff
+          if (timeLeft(params) > 3_000) await new Promise((r) => setTimeout(r, 1500)) // brief backoff
           continue
+        }
+
+        // Kunci ditolak: model lain di OpenRouter akan ditolak juga, langsung ke cadangan.
+        if (isAuthRejection(response.status)) {
+          console.warn(`[AI] OpenRouter rejected the key (HTTP ${response.status}); skipping the rest of the OpenRouter chain`)
+          lastError = new Error(`OpenRouter ${response.status}`)
+          break
         }
 
         // Other non-OK statuses → throw to catch below
@@ -370,19 +414,21 @@ export class AIPipelineService {
         if (status === 429 || /429|rate.?limit/i.test(msg)) {
           console.warn(`[AI] Rate limited on ${model} (${msg.substring(0, 60)}), switching to next model...`)
           lastError = error
-          await new Promise((r) => setTimeout(r, 1500))
+          if (timeLeft(params) > 3_000) await new Promise((r) => setTimeout(r, 1500))
           continue
         }
         // Non-rate-limit error → log and try next model too (more resilient)
         console.error(`[AI] Error on ${model}: ${msg.substring(0, 80)}`)
         lastError = error
+        // Server tidak terjangkau: model berikutnya di host yang sama gagal juga, jangan buang waktu.
+        if (isUnreachable(error)) break
         // Still try next model as fallback
         continue
       }
     }
 
     // All OpenRouter models exhausted → try Groq backup provider
-    if (getGroqKey()) {
+    if (getGroqKey() && !budgetSpent(params)) {
       console.warn(`[AI] All OpenRouter models exhausted. Trying Groq backup provider...`)
       const groqResult = await this.callGroq(params, state)
       if (groqResult !== null) {
@@ -402,6 +448,8 @@ export class AIPipelineService {
       throw new OutputRejectedError(state.rejections, state.attempts)
     }
 
+    if (params.deadlineAt !== undefined && budgetSpent(params)) throw new AiBudgetExhaustedError()
+
     throw new Error(`AI generation failed after ${chain.length} OpenRouter + Groq model attempts. Last: ${lastError?.message || 'unknown'}`)
   }
 
@@ -413,6 +461,7 @@ export class AIPipelineService {
 
     const groqChain = await getGroqChain()
     for (let i = 0; i < groqChain.length; i++) {
+      if (budgetSpent(params)) break
       const model = groqChain[i]
       try {
         const response = await axios.post(
@@ -429,13 +478,20 @@ export class AIPipelineService {
               'Content-Type': 'application/json',
             },
             validateStatus: () => true,
+            // Hanya berlaku bila rantai punya deadline; tanpa itu Groq tetap tanpa batas waktu (perilaku lama).
+            timeout: callTimeout(params),
           }
         )
 
         if (response.status === 429) {
           console.warn(`[AI] Groq 429 on ${model}, trying next Groq model...`)
-          await new Promise((r) => setTimeout(r, 1500))
+          if (timeLeft(params) > 3_000) await new Promise((r) => setTimeout(r, 1500))
           continue
+        }
+
+        if (isAuthRejection(response.status)) {
+          console.warn(`[AI] Groq rejected the key (HTTP ${response.status}); skipping the rest of the Groq chain`)
+          break
         }
 
         if (response.status < 200 || response.status >= 300) {
@@ -454,7 +510,8 @@ export class AIPipelineService {
         return { text: vetted, model: `groq:${model}` }
       } catch (error: any) {
         console.error(`[AI] Groq error on ${model}: ${(error.message || '').substring(0, 80)}`)
-        await new Promise((r) => setTimeout(r, 1500))
+        if (isUnreachable(error)) break
+        if (timeLeft(params) > 3_000) await new Promise((r) => setTimeout(r, 1500))
         continue
       }
     }
@@ -650,7 +707,7 @@ Candidate Info: ${JSON.stringify(candidateInfo, null, 2)}
    * menurut paket, lalu OpenRouter, lalu Groq). Jawaban yang bukan JSON objek ditolak dan rantai lanjut ke model
    * berikutnya. Dipakai impor profil dari PDF LinkedIn. Isi prompt tidak dicatat di log maupun trace.
    */
-  async completeJson(params: { system: string; user: string; userId?: string; maxTokens?: number; temperature?: number }): Promise<{ text: string; model: string }> {
+  async completeJson(params: { system: string; user: string; userId?: string; maxTokens?: number; temperature?: number; deadlineAt?: number }): Promise<{ text: string; model: string }> {
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
     return this.callAIDetailed({
       tier: await this.tierFor(params.userId),
@@ -662,6 +719,7 @@ Candidate Info: ${JSON.stringify(candidateInfo, null, 2)}
       temperature: params.temperature ?? 0.1,
       max_tokens: params.maxTokens ?? 4000,
       accept: acceptJsonObject,
+      deadlineAt: params.deadlineAt,
     })
   }
 

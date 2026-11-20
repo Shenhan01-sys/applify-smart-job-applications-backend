@@ -537,20 +537,58 @@ function parseExperienceRules(lines: string[]): RawExtraction[] {
   })
 }
 
-const EDU_LINE_RE = /^(.*?)\s*[·•]?\s*\(\s*(\d{4})\s*(?:[-–—]\s*([^)]*))?\)\s*$/
+/**
+ * Baris gelar: "<gelar>, <bidang> · (<tanggal>)". Isi kurung boleh tahun saja ("2019 - 2023") atau memakai nama
+ * bulan Inggris maupun Indonesia ("Agustus 2023 - November 2026", "Aug 2019 - Jun 2023", "2022 - Sekarang").
+ * Syaratnya: ada satu tahun empat digit di dalam kurung. Pembacaan tahunnya ada di parseYearRange.
+ */
+const EDU_LINE_RE = /^(.*?)\s*[·•]?\s*\(\s*([^()]*\b\d{4}\b[^()]*?)\s*\)\s*$/u
+/** Kurung tanggal yang belum tertutup di ujung baris: "... · (Juli" atau "... · (Juni 2026 -". */
+const OPEN_DATE_PAREN_RE = /\(\s*[\p{L}\d.\s\-–—]*$/u
+/** Baris berakhir dengan pemisah "·" atau "•": tanggalnya turun ke baris berikutnya. */
+const TRAILING_SEPARATOR_RE = /[·•]\s*$/
 
-function parseEducationRules(lines: string[]): RawExtraction[] {
+/**
+ * Di PDF LinkedIn berbahasa Indonesia, baris gelar yang panjang dipatahkan di kolom lebar, kadang di tengah
+ * tanggal ("... · (Juli" lalu "2020 - Juli 2023)"). Sambung baris-baris itu lagi sebelum dibaca. Paling banyak
+ * dua sambungan, supaya kurung yang salah tidak menelan isi seksi.
+ */
+function joinWrappedEducation(lines: string[]): string[] {
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    let cur = lines[i]
+    for (let k = 0; k < 2 && i + 1 < lines.length; k++) {
+      const next = lines[i + 1]
+      const open = OPEN_DATE_PAREN_RE.test(cur) && !/\)/.test(cur.slice(cur.lastIndexOf('(')))
+      const dangling = TRAILING_SEPARATOR_RE.test(cur) && /^\(/.test(next)
+      if (!open && !dangling) break
+      cur = `${cur} ${next}`
+      i++
+    }
+    out.push(cur)
+  }
+  return out
+}
+
+function parseEducationRules(rawLines: string[]): RawExtraction[] {
+  const lines = joinWrappedEducation(rawLines)
   const out: RawExtraction[] = []
+  let usedUpTo = -1 // indeks baris gelar terakhir yang sudah dipakai
   lines.forEach((l, i) => {
     const m = EDU_LINE_RE.exec(l)
     if (!m || i === 0) return
+    // Nama sekolah = baris di atas gelar. Bila baris itu diawali huruf kecil, ia sambungan nama sekolah yang terpotong.
+    let at = i - 1
+    let school = lines[at]
+    while (at - 1 > usedUpTo && /^\p{Ll}/u.test(school)) school = `${lines[--at]} ${school}`
+    usedUpTo = i
     const rest = m[1].replace(/[·•\s]+$/, '').trim()
     const comma = rest.indexOf(',')
     out.push({
-      school: lines[i - 1],
+      school,
       degree: comma > 0 ? rest.slice(0, comma).trim() : rest,
       field: comma > 0 ? rest.slice(comma + 1).trim() : null,
-      years: `${m[2]} - ${(m[3] ?? '').trim()}`,
+      years: m[2].trim(),
     })
   })
   return out
@@ -605,6 +643,25 @@ function parseAchievementRules(lines: string[], kind: AchievementCategory): RawE
   return entries.map((e) => ({ title: joinWrapped(e.title), kind, issuer: null, date: e.date, description: null }))
 }
 
+/** Baris sertifikat sepanjang ini atau lebih dianggap penuh selebar kolom kiri, jadi judulnya mungkin berlanjut. */
+const CERT_FULL_LINE = 30
+
+/**
+ * Sertifikat ada di kolom kiri yang sempit: judul panjang terpotong menjadi 2 sampai 3 baris dan tidak ada
+ * pemisah antaritem. Tebakan terbaik (cadangan bila AI tidak tersedia): baris yang diawali huruf kecil atau "("
+ * menyambung baris sebelumnya, dan baris pendek (di bawah 20 karakter) sesudah baris yang penuh juga sambungan.
+ * Dua sertifikat berjudul pendek berurutan tidak ikut tergabung; pengguna memeriksanya di pratinjau.
+ */
+function parseCertificationRules(lines: string[]): RawExtraction[] {
+  const names: string[] = []
+  lines.forEach((l, i) => {
+    const continues = i > 0 && (/^[\p{Ll}(]/u.test(l) || (lines[i - 1].length >= CERT_FULL_LINE && l.length < SHORT_TITLE_LINE))
+    if (continues) names[names.length - 1] = joinWrapped([names[names.length - 1], l])
+    else names.push(l)
+  })
+  return names.map((name) => ({ name, issuer: null }))
+}
+
 /** Sambung baris judul yang terpotong dengan spasi; tanda "/" di ujung baris (mis. "(ABC/" lalu "DEF)") disambung tanpa spasi. */
 function joinWrapped(lines: string[]): string {
   return lines.reduce((out, l, i) => (i === 0 ? l : out.endsWith('/') ? out + l : `${out} ${l}`), '')
@@ -651,7 +708,7 @@ export function parseWithRules(text: string): RawExtraction {
     location,
     experiences: parseExperienceRules(linesOf(blocks, 'experience')),
     education: parseEducationRules(linesOf(blocks, 'education')),
-    certifications: linesOf(blocks, 'certifications').map((name) => ({ name, issuer: null })),
+    certifications: parseCertificationRules(linesOf(blocks, 'certifications')),
     // Dibaca sesudah nama, judul profil, dan lokasi dilepas dari ujung blok terakhir kolom kiri (lihat di atas).
     achievements: [...parseAchievementRules(linesOf(blocks, 'honors'), 'award'), ...parseAchievementRules(linesOf(blocks, 'publications'), 'publication')],
     skills: linesOf(blocks, 'topSkills'),
@@ -970,6 +1027,18 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
   }
 
   return { fullName, headline, location, experiences, education, certifications, achievements, skills, dropped }
+}
+
+/**
+ * Bagian utama (Pengalaman, Pendidikan) yang ada isinya di PDF tetapi menghasilkan nol item. Dipakai untuk
+ * peringatan, supaya pengguna tidak mengira datanya memang kosong.
+ */
+export function emptyMainSections(text: string, counts: { experience: number; education: number }): string[] {
+  const blocks = splitSections(text)
+  const out: string[] = []
+  if (counts.experience === 0 && linesOf(blocks, 'experience').length > 0) out.push('Pengalaman')
+  if (counts.education === 0 && linesOf(blocks, 'education').length > 0) out.push('Pendidikan')
+  return out
 }
 
 export function isEmptyExtraction(n: NormalizedExtraction): boolean {

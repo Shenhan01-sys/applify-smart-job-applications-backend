@@ -79,6 +79,7 @@ npm run mcp:jobs:http                # Applify Jobs MCP server via Streamable HT
 | `SESSION_ENCRYPTION_KEY` | Yes | Kunci enkripsi sesi platform (cookie LinkedIn dll.), minimal 32 karakter, mis. `openssl rand -base64 32`. Tidak ada kunci bawaan: kosong, pendek, atau nilai contoh `.env.example` = sesi tidak disimpan atau dibaca (503 `session_encryption_not_configured`) dan galat konfigurasi dicatat saat start |
 | `AI_RATE_LIMIT_PER_MINUTE` / `AI_RATE_LIMIT_PER_HOUR` | No | Batas permintaan `/api/ai/*` per pengguna (bawaan 10 dan 60) |
 | `PROFILE_IMPORT_RATE_LIMIT_PER_MINUTE` / `PROFILE_IMPORT_RATE_LIMIT_PER_HOUR` | No | Batas impor profil dari PDF LinkedIn per pengguna (bawaan 3 dan 10). Terpisah dari batas `/api/ai/*` |
+| `LINKEDIN_IMPORT_AI_BUDGET_MS` | No | Anggaran waktu total AI untuk impor PDF LinkedIn (bawaan 40000). Lewat batas ini rantai model berhenti dan parser aturan dipakai |
 | `OPENROUTER_API_KEY` | No | For AI features (optional) |
 | `REDIS_URL` | No | Deprecated — queue memakai DB-as-queue, tanpa Redis |
 | `APPLIFY_JOBS_MCP_PORT` | No | Port Applify Jobs MCP server mode HTTP (default 8090) |

@@ -1,0 +1,48 @@
+# SINTETIS: tokoh, perusahaan, sekolah, email, dan nomor telepon di bawah ini fiktif, ditulis tangan untuk uji.
+# Bukan data orang sungguhan. Tata letaknya meniru teks PDF "Simpan ke PDF" LinkedIn berbahasa Indonesia:
+# kolom kiri (Kontak, Kemampuan Teratas, Bahasa, Sertifikasi dengan judul yang terpotong), lalu nama, judul profil,
+# lokasi, Ringkasan, Pengalaman, dan Pendidikan. Baris gelar yang panjang patah di tengah tanggal:
+# "... · (Juli" lalu "2020 - Juli 2023)". Baris yang diawali "# " dibuang oleh pemuat.
+Kontak
+www.linkedin.com/in/dewi-lestari-sintetis (LinkedIn)
+dewi.sintetis@example.com (Home)
+Kemampuan Teratas
+Analisis Data
+Pemrograman Python
+Manajemen Proyek
+Bahasa
+Indonesia (Bahasa asli atau dwibahasa)
+Inggris (Kemampuan kerja profesional)
+Sertifikasi
+Analis Data Profesional Bersertifikat
+Tingkat Lanjut
+Cloud Practitioner Associate Certified
+dan Keamanan Informasi
+Scrum Fundamentals
+Dewi Lestari Sintetis
+Analis Data di Studio Fiktif Cahaya
+Bandung, Jawa Barat, Indonesia
+Ringkasan
+Analis data yang menyusun laporan untuk tim operasi.
+Pengalaman
+Studio Fiktif Cahaya
+Analis Data
+Maret 2022 - Sekarang (4 tahun 9 bulan)
+Bandung, Jawa Barat, Indonesia
+Menyusun laporan mingguan untuk tim operasi.
+Toko Fiktif Mandiri
+Staf Administrasi
+Januari 2020 - Februari 2022 (2 tahun 2 bulan)
+Bandung, Jawa Barat, Indonesia
+Pendidikan
+Universitas Fiktif Nusantara
+Gelar Sarjana, Sistem Informasi · (Agustus 2023 - November 2026)
+Politeknik Fiktif Pasundan
+Gelar Sarjana Terapan, Teknik Informatika · (Juli
+2020 - Juli 2023)
+Akademi Fiktif Parahyangan
+Diploma Tiga, Manajemen Informatika · (Juni
+2026 - September 2026)
+Sekolah Menengah Atas Fiktif 1
+Ilmu Pengetahuan Alam · (2017 - 2020)
+Halaman 1 dari 1
