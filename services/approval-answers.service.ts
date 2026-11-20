@@ -113,7 +113,7 @@ const PROFILE_CONFIDENCE: Record<string, number> = {
   linkedin_url: 0.85,
   years_of_experience: 0.85,
   current_city: 0.75,
-  // Negara diturunkan dari teks lokasi (nama negara di bagian terakhir), bukan diketik pengguna: "sedang".
+  // Negara diturunkan dari teks lokasi (nama negara, atau provinsi/kota Indonesia yang dikenal), bukan diketik pengguna: "sedang".
   country: 0.7,
 }
 
@@ -131,8 +131,9 @@ const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
  *   phone -> phone_number, linkedin_url -> linkedin_url, portfolio_url -> website
  *   location -> current_city (bagian sebelum koma pertama; "Yogyakarta, Indonesia" -> "Yogyakarta"; lokasi yang hanya
  *   berisi nama negara tidak menjadi kota)
- *   location -> country, hanya bila bagian terakhirnya nama negara yang dikenal ("Yogyakarta, Indonesia" -> "Indonesia");
- *   nama kota atau provinsi tidak pernah ditebak menjadi negara (applicant-fallbacks.ts)
+ *   location -> country, bila bagian terakhirnya nama negara yang dikenal ("Yogyakarta, Indonesia" -> "Indonesia"),
+ *   atau bila tidak ada nama negara dan salah satu bagiannya provinsi atau kota Indonesia yang dikenal ("Daerah
+ *   Istimewa Yogyakarta" -> "Indonesia"). Kota atau provinsi lain tidak ditebak menjadi negara (applicant-fallbacks.ts)
  *   experience_years -> years_of_experience, hanya bila > 0 (0 adalah nilai bawaan kolom, bukan jawaban pengguna)
  *   tahun pengalaman kosong atau 0 di keduanya -> dihitung dari work_experiences (periode digabung, peran berjalan
  *   sampai hari ini, dibulatkan ke bawah). Kuncinya masuk `derived`; jawabannya diberi keyakinan sedang.
