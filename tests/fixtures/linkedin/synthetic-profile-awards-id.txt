@@ -1,0 +1,36 @@
+# SINTETIS: tokoh, penghargaan, publikasi, penyelenggara, email, dan nomor telepon di bawah ini fiktif, ditulis tangan
+# untuk uji. Bukan data orang sungguhan. Tata letaknya meniru teks PDF "Simpan ke PDF" LinkedIn berbahasa Indonesia:
+# kolom kiri dengan judul seksi Penghargaan dan Publikasi, lalu nama, judul profil, lokasi, Ringkasan, Pengalaman,
+# Pendidikan.
+# Baris yang diawali "# " dibuang oleh pemuat.
+Kontak
+www.linkedin.com/in/budi-santoso-sintetis (LinkedIn)
+budi.sintetis@example.com (Home)
+Kemampuan Teratas
+Akuntansi
+Bahasa
+Indonesia (Bahasa asli atau dwibahasa)
+Penghargaan
+Juara 2 Lomba Karya Tulis Ilmiah
+(Nasional)
+2024
+Mahasiswa Berprestasi Fakultas
+(Universitas Fiktif 2023)
+Publikasi
+Analisis Sentimen Ulasan Aplikasi
+Transportasi Daring Menggunakan
+Metode Naive Bayes
+Budi Santoso Sintetis
+Akuntan di Toko Fiktif
+Surabaya, Jawa Timur, Indonesia
+Ringkasan
+Akuntan yang menulis karya ilmiah.
+Pengalaman
+Toko Fiktif Sejahtera
+Akuntan
+Januari 2021 - Sekarang (3 tahun 11 bulan)
+Surabaya, Jawa Timur, Indonesia
+Pendidikan
+Universitas Fiktif Surabaya
+Sarjana Ekonomi, Akuntansi · (2016 - 2020)
+Halaman 1 dari 1

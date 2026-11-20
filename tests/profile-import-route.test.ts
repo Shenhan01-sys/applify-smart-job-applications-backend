@@ -106,6 +106,30 @@ test('PDF sah: 200 dengan pratinjau; model dipanggil sekali; metode ai', async (
   assert.equal(llmCalls, 1)
 })
 
+test('PDF dengan Honors-Awards dan Publications: pratinjau memuat achievements dan meta.dropped.achievements; tabel achievements tidak disentuh', async () => {
+  llm = async () => ({
+    text: JSON.stringify({
+      full_name: 'Dewi Anggraini Sintetis',
+      achievements: [
+        { title: 'Best Paper Award at Simulasi', kind: 'award', issuer: null, date: '(KONFIK 2024)', description: null },
+        { title: 'Dashboard Design for Job Seekers', kind: 'publication', issuer: 'Jurnal Fiktif', date: '(Jurnal Fiktif 2024)', description: null },
+        { title: 'Turing Award for Fictional Computing', kind: 'award', issuer: null, date: '1999', description: null }, // karangan
+      ],
+    }),
+    model: 'test:model',
+  })
+  const res = await upload(fixturePdf('synthetic-profile-awards-en.txt'))
+  assert.equal(res.statusCode, 200)
+  const p = res.json().preview
+  assert.deepEqual(p.achievements.map((a: any) => [a.category, a.title, a.issuer, a.achievement_date]), [
+    ['award', 'Best Paper Award at Simulasi', 'KONFIK', '2024-01-01'],
+    ['publication', 'Dashboard Design for Job Seekers', 'Jurnal Fiktif', '2024-01-01'],
+  ])
+  assert.deepEqual(p.meta.dropped, { experiences: 0, education: 0, certifications: 0, achievements: 1, skills: 0 })
+  assert.equal(db.tables.achievements, undefined, 'rute hanya mengembalikan pratinjau')
+  assert.deepEqual(db.writes.map((w) => `${w.table}:${w.op}`), ['application_logs:insert'])
+})
+
 test('rute tidak menulis ke tabel profil dan tidak memakai kuota draf: satu-satunya tulisan adalah baris batas laju', async () => {
   const res = await upload(fixturePdf())
   assert.equal(res.statusCode, 200)
@@ -113,7 +137,7 @@ test('rute tidak menulis ke tabel profil dan tidak memakai kuota draf: satu-satu
   assert.equal(importRows().length, 1)
   assert.equal(importRows()[0].status, 'success')
   assert.deepEqual(Object.keys(db.tables).sort(), ['application_logs'], 'tidak ada tabel lain yang disentuh')
-  for (const t of ['profiles', 'work_experiences', 'education', 'certifications', 'user_skills']) assert.equal(db.tables[t], undefined, t)
+  for (const t of ['profiles', 'work_experiences', 'education', 'certifications', 'achievements', 'user_skills']) assert.equal(db.tables[t], undefined, t)
   assert.equal(db.rows('application_logs').filter((r) => r.action === 'ai_draft').length, 0, 'tidak mencatat draf AI')
   assert.equal(db.rpcCalls.length, 0, 'get_quota_status tidak dipanggil: kuota draf bukan urusan impor')
 })

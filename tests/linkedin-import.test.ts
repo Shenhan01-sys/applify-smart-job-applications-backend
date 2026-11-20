@@ -196,7 +196,7 @@ test('parser aturan pada fixture sintetis: profil, 4 jabatan (grup perusahaan), 
     ['Python', 'technical', 3], ['Data Analysis', 'technical', 3], ['Project Management', 'technical', 3],
     ['Indonesian', 'language', 5], ['English', 'language', 4], ['Japanese', 'language', 1],
   ])
-  assert.deepEqual(preview.meta.dropped, { experiences: 0, education: 0, certifications: 0, skills: 0 })
+  assert.deepEqual(preview.meta.dropped, { experiences: 0, education: 0, certifications: 0, achievements: 0, skills: 0 })
 })
 
 test('parser aturan pada judul Indonesia: Pengalaman, Pendidikan, Sekarang, tanggal Indonesia', () => {
@@ -275,7 +275,7 @@ test('normalizeExtraction: perusahaan, jabatan, sekolah, dan sertifikat karangan
   assert.deepEqual(n.education.map((e) => e.institution), ['Universitas Fiktif Nusantara'])
   assert.deepEqual(n.certifications.map((c) => c.name), ['AWS Certified Cloud Practitioner'])
   assert.deepEqual(n.skills.map((s) => s.name), ['Python', 'English'])
-  assert.deepEqual(n.dropped, { experiences: 2, education: 1, certifications: 1, skills: 2 })
+  assert.deepEqual(n.dropped, { experiences: 2, education: 1, certifications: 1, achievements: 0, skills: 2 })
 })
 
 test('normalizeExtraction pendidikan: Present = is_current, bidang dipindah ke jenjang bila jenjang kosong, tanpa tahun atau jenjang dibuang', () => {
@@ -435,7 +435,7 @@ test('layanan: sebagian isi jawaban model karangan = dibuang, sisanya dipakai, p
   const preview = await service(async () => ({ text: JSON.stringify(mixed), model: 'm' })).importFromPdf(fixturePdf())
   assert.equal(preview.meta.method, 'ai')
   assert.equal(preview.experiences.length, 2)
-  assert.deepEqual(preview.meta.dropped, { experiences: 1, education: 0, certifications: 0, skills: 1 })
+  assert.deepEqual(preview.meta.dropped, { experiences: 1, education: 0, certifications: 0, achievements: 0, skills: 1 })
   assert.match(preview.warnings.join(' '), /2 item tidak dimasukkan/)
 })
 

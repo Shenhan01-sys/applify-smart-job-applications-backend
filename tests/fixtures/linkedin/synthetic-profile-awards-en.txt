@@ -1,0 +1,49 @@
+# SINTETIS: tokoh, penghargaan, publikasi, penyelenggara, email, dan nomor telepon di bawah ini fiktif, ditulis tangan
+# untuk uji. Bukan data orang sungguhan. Tata letaknya meniru teks PDF "Simpan ke PDF" LinkedIn berbahasa Inggris:
+# kolom kiri (Contact, Top Skills, Languages, Honors-Awards, Publications) memakai judul yang terpotong 2 sampai 3
+# baris, lalu nama, judul profil, lokasi, lalu Summary, Experience, Education.
+# Baris yang diawali "# " dibuang oleh pemuat.
+Contact
+www.linkedin.com/in/dewi-anggraini-sintetis (LinkedIn)
+dewi.sintetis@example.com (Home)
+Top Skills
+Data Visualization
+Public Speaking
+Languages
+Indonesian (Native or Bilingual)
+English (Professional Working)
+Honors-Awards
+Best Paper Award at Simulasi
+(KONFIK 2024)
+3rd Place Winner of Hackathon
+(Smart City Category)
+2023
+Finalist - Lomba Analitik Data
+Mahasiswa Tingkat Nasional (LAD/
+NAS)
+Beasiswa Unggulan Fiktif
+Angkatan 2022
+Dean's List Award Semester 3
+(Maret 2022)
+Publications
+A Study of Caching on Mobile
+Learning: Understanding the Effect
+on Memory and Retrieval Speed
+Authors
+Dashboard Design for Job Seekers
+(Jurnal Fiktif 2024)
+Dewi Anggraini Sintetis
+Data Analyst at Perusahaan Fiktif
+Surabaya, Jawa Timur, Indonesia
+Summary
+Data analyst who writes about dashboards and student competitions.
+Experience
+Perusahaan Fiktif
+Data Analyst
+January 2023 - Present (1 year 10 months)
+Surabaya, Jawa Timur, Indonesia
+Built weekly reporting dashboards.
+Education
+Universitas Fiktif Surabaya
+Bachelor of Science - BS, Statistics · (2019 - 2023)
+Page 1 of 1

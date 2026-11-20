@@ -44,7 +44,7 @@ export interface LinkedInImportDeps {
   aiTimeoutMs?: number
 }
 
-const sumDropped = (n: NormalizedExtraction) => n.dropped.experiences + n.dropped.education + n.dropped.certifications + n.dropped.skills
+const sumDropped = (n: NormalizedExtraction) => n.dropped.experiences + n.dropped.education + n.dropped.certifications + n.dropped.achievements + n.dropped.skills
 
 export class LinkedInImportService {
   constructor(private readonly deps: LinkedInImportDeps = {}) {}
@@ -104,7 +104,7 @@ export class LinkedInImportService {
     const preview = assemblePreview(result, text, { method, model, pages: pages.length, truncated: prompt.truncated }, warnings)
     console.log(
       `[linkedin-import] selesai metode=${method} halaman=${pages.length} karakter=${text.length} ` +
-        `pengalaman=${preview.experiences.length} pendidikan=${preview.education.length} sertifikat=${preview.certifications.length} skill=${preview.skills.length} dibuang=${dropped}`,
+        `pengalaman=${preview.experiences.length} pendidikan=${preview.education.length} sertifikat=${preview.certifications.length} penghargaan=${preview.achievements.length} skill=${preview.skills.length} dibuang=${dropped}`,
     )
     return preview
   }
