@@ -21,6 +21,7 @@ import {
   type OutputWarning,
   type ProfileLike,
 } from './ai-output-guard.js'
+import { ACHIEVEMENT_GROUNDING_RULE, achievementPromptSection, answerCandidateInfo, buildAchievementLines } from './profile-context.js'
 
 const getOpenRouterKey = () => process.env.OPENROUTER_API_KEY
 const getGroqKey = () => process.env.GROQ_API_KEY
@@ -154,6 +155,8 @@ interface CoverLetterParams {
     yearsOfExperience: string
     skills: string[]
     summary: string
+    /** Baris tabel achievements atau teks baris dari pemanggil; dibatasi dan dirapikan oleh buildAchievementLines. */
+    achievements?: unknown
   }
   tone?: 'professional' | 'casual' | 'enthusiastic'
   /** 'id' | 'en' | 'auto'. Bawaan: Bahasa Indonesia, kecuali deskripsi lowongan jelas berbahasa Inggris. */
@@ -465,6 +468,13 @@ export class AIPipelineService {
     // Bahasa: permintaan eksplisit menang; selain itu Indonesia, kecuali lowongan jelas berbahasa Inggris.
     const language = selectLanguage({ requested: params.language, jobText: `${jobTitle}\n${jobDescription}` })
 
+    // Penghargaan dan publikasi (maks. 8, satu baris tiap entri). Tanpa entri, prompt sama persis dengan sebelumnya.
+    const achievementLines = buildAchievementLines(userProfile.achievements)
+    const achievementSection = achievementLines.length
+      ? `\n- ${achievementPromptSection(achievementLines).replace(/\n/g, '\n  ')}`
+      : ''
+    const achievementRule = achievementLines.length ? `\n- ${ACHIEVEMENT_GROUNDING_RULE}` : ''
+
     const prompt = `Write a compelling cover letter for a ${jobTitle} position at ${company}.
 
 Job Description:
@@ -474,7 +484,7 @@ Candidate Profile:
 - Name: ${userProfile.firstName} ${userProfile.lastName}
 - Experience: ${userProfile.yearsOfExperience} years
 - Skills: ${userProfile.skills.join(', ')}
-- Background: ${userProfile.summary}
+- Background: ${userProfile.summary}${achievementSection}
 
 Instructions:
 - Language: ${languageInstruction(language)}
@@ -486,7 +496,7 @@ Instructions:
 - Do NOT use generic templates - make it personalized
 
 Grounding rules (strict):
-${GROUNDING_RULES.map((r) => `- ${r}`).join('\n')}
+${GROUNDING_RULES.map((r) => `- ${r}`).join('\n')}${achievementRule}
 
 Write the cover letter now (just the body, no header/footer):`
 
@@ -494,7 +504,7 @@ Write the cover letter now (just the body, no header/footer):`
     // terpasang, lalu OPENROUTER_MODEL dan cadangan gratisnya, lalu Groq.
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
-    const allowedContext = [userProfile.firstName, userProfile.lastName, company, jobTitle, jobDescription, userProfile.summary].join(' ')
+    const allowedContext = [userProfile.firstName, userProfile.lastName, company, jobTitle, jobDescription, userProfile.summary, ...achievementLines].join(' ')
     const result = await this.callAIDetailed({
       tier: await this.tierFor(userId),
       model,
@@ -518,7 +528,7 @@ Write the cover letter now (just the body, no header/footer):`
     const check = validateCoverLetter(result.text, { language, allowedContext })
     const warnings = [
       ...check.warnings,
-      ...checkGrounding(result.text, buildGroundingSource(userProfile), { sections: false }),
+      ...checkGrounding(result.text, buildGroundingSource({ ...userProfile, achievements: achievementLines }), { sections: false }),
     ]
     return { text: result.text, warnings, language, model: result.model }
   }
@@ -586,13 +596,20 @@ ${original}`
   async generateAnswer(params: AnswerQuestionParams): Promise<string> {
     const { question, questionType, options, jobDescription, userProfile } = params
 
+    // Penghargaan dan publikasi hanya untuk pertanyaan teks panjang. Pilihan, radio, kotak centang, dan teks pendek
+    // tidak mendapat daftarnya; profil tanpa kunci `achievements` tidak berubah sama sekali.
+    const { info: candidateInfo, lines: achievementLines } = answerCandidateInfo(userProfile, questionType === 'textarea')
+
     let prompt = `You are helping a job applicant answer an application question.
 
 Question: "${question}"
 Question Type: ${questionType}
 Job Description: ${jobDescription}
-Candidate Info: ${JSON.stringify(userProfile, null, 2)}
+Candidate Info: ${JSON.stringify(candidateInfo, null, 2)}
 `
+    if (achievementLines.length > 0) {
+      prompt += `\nThe "achievements" entries are the candidate's listed awards and publications. ${ACHIEVEMENT_GROUNDING_RULE}\n`
+    }
 
     if (options && options.length > 0) {
       prompt += `\nAvailable Options: ${options.join(', ')}`

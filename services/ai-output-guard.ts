@@ -455,6 +455,8 @@ export interface ProfileLike {
   education?: Array<{ degree?: string; field_of_study?: string; institution?: string; start_year?: number; end_year?: number }>
   projects?: string[]
   certifications?: string[]
+  /** Baris penghargaan dan publikasi (services/profile-context.ts). Fakta sah untuk surat, bukan pengecualian angka. */
+  achievements?: string[]
 }
 
 export interface GroundingSource {
@@ -487,6 +489,7 @@ export function buildGroundingSource(profile: ProfileLike, now: Date = new Date(
   }
   for (const p of profile.projects ?? []) add(p)
   for (const c of profile.certifications ?? []) add(c)
+  for (const a of profile.achievements ?? []) add(a)
   const yoe = Number(profile.yearsOfExperience)
   if (Number.isFinite(yoe)) extra.push(yoe)
   extra.push((profile.workExperiences ?? []).length, (profile.education ?? []).length, (profile.skills ?? []).length)

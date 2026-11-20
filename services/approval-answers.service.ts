@@ -1,4 +1,5 @@
 import { formAutofillService, type FillResult, type FormContext, type FormField } from './form-autofill.service.js'
+import { buildAchievementLines } from './profile-context.js'
 
 /**
  * Jawaban formulir standar yang disiapkan agen untuk satu lamaran, lengkap dengan skor keyakinan, supaya
@@ -86,7 +87,8 @@ export type Filler = (field: FormField, ctx: FormContext) => Promise<FillResult>
 
 export interface AnswerInput {
   settings: Record<string, any>
-  profile: { email?: string | null; skills?: string[] }
+  /** `achievements`: baris penghargaan dan publikasi (buildAchievementLines). Hanya dipakai untuk jawaban AI teks panjang. */
+  profile: { email?: string | null; skills?: string[]; achievements?: string[] }
   job: { title: string; company: string; description: string }
   /** Baris `profiles` pengguna. Dipakai hanya untuk kolom Pengaturan Otomasi yang kosong. */
   profileRow?: Record<string, any> | null
@@ -226,23 +228,47 @@ export interface AnswersDb {
  * Baca data pengguna dan lowongan, lalu bangun jawaban. Tidak pernah melempar: kegagalan apa pun
  * menghasilkan daftar kosong, supaya pengajuan persetujuan tidak tertahan oleh fitur pratinjau ini.
  */
+/**
+ * Penghargaan dan publikasi pengguna sebagai baris konteks (maks. 8). Membaca tabel `achievements`; kegagalan
+ * membaca tidak boleh menggagalkan jawaban lain, jadi hasilnya kosong dan jawaban dibuat tanpa daftar ini.
+ */
+async function loadAchievementLines(db: AnswersDb, userId: string): Promise<string[]> {
+  try {
+    const { data } = await db
+      .from('achievements')
+      .select('title, category, issuer, achievement_date, is_featured, created_at')
+      .eq('user_id', userId)
+      .order('achievement_date', { ascending: false, nullsFirst: false })
+      .limit(50)
+    return buildAchievementLines(data)
+  } catch (e) {
+    console.warn('[approval-answers] penghargaan tidak terbaca, jawaban dibuat tanpa daftar ini:', (e as Error)?.message)
+    return []
+  }
+}
+
 export async function prepareApprovalAnswers(
   db: AnswersDb,
   args: { userId: string; email?: string | null; jobId?: string | null; jobTitle: string; company: string },
   filler?: Filler
 ): Promise<ApprovalAnswer[]> {
   try {
-    const [{ data: settings }, { data: profileRow }, { data: skills }, { data: jobRow }] = await Promise.all([
+    const [{ data: settings }, { data: profileRow }, { data: skills }, { data: jobRow }, achievements] = await Promise.all([
       db.from('user_automation_settings').select('*').eq('user_id', args.userId).maybeSingle(),
       db.from('profiles').select('*').eq('id', args.userId).maybeSingle(),
       db.from('user_skills').select('name').eq('user_id', args.userId),
       args.jobId ? db.from('jobs').select('description').eq('id', args.jobId).maybeSingle() : Promise.resolve({ data: null }),
+      loadAchievementLines(db, args.userId),
     ])
     return await buildApprovalAnswers(
       {
         settings: settings ?? {},
         profileRow: profileRow ?? null,
-        profile: { email: args.email ?? null, skills: (skills ?? []).map((s: any) => s.name).filter(Boolean) },
+        profile: {
+          email: args.email ?? null,
+          skills: (skills ?? []).map((s: any) => s.name).filter(Boolean),
+          ...(achievements.length > 0 ? { achievements } : {}),
+        },
         job: { title: args.jobTitle, company: args.company, description: String(jobRow?.description ?? '') },
       },
       filler

@@ -60,6 +60,10 @@ export class FormAutofillService {
             experience: settings.years_of_experience,
             skills: context.userProfile?.skills || [],
             summary: settings.linkedin_summary || '',
+            // Daftar penghargaan hanya dibawa bila ada; generateAnswer memakainya untuk pertanyaan teks panjang saja.
+            ...(Array.isArray(context.userProfile?.achievements) && context.userProfile.achievements.length > 0
+              ? { achievements: context.userProfile.achievements }
+              : {}),
           },
         })
 
