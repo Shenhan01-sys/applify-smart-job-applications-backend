@@ -51,6 +51,12 @@ test('countryFromLocation: nama negara di bagian terakhir; tanpa nama negara, pr
   ]) {
     assert.equal(countryFromLocation(place), 'Indonesia', place)
   }
+  // susunan kata lain yang memuat nama tempat khas sebagai kata utuh (uji klik produksi 20 November 2026)
+  assert.equal(countryFromLocation('Special Region Yogyakarta'), 'Indonesia')
+  assert.equal(countryFromLocation('Jakarta Selatan'), 'Indonesia')
+  assert.equal(countryFromLocation('Bandung Barat'), 'Indonesia')
+  assert.equal(countryFromLocation('Balikpapanese Street'), null, 'harus kata utuh, bukan potongan kata')
+  assert.equal(countryFromLocation('Bali Nyonga'), null, 'nama di bawah enam huruf tidak dicari di dalam teks')
   // bukan Indonesia atau tidak dikenal: tidak ada tebakan
   assert.equal(countryFromLocation('Atlanta, Georgia'), null, '"Georgia" sengaja tidak dikenal: bisa negara bagian AS')
   assert.equal(countryFromLocation('Austin, Texas'), null)

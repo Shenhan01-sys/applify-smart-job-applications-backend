@@ -172,12 +172,22 @@ const INDONESIA_PLACE_SET: Set<string> = new Set(INDONESIA_PLACES.map(normalizeP
 const PLACE_PREFIX = /^(?:kota|kabupaten|kab|provinsi|prov|greater|city of|province of)\s+/
 const PLACE_SUFFIX = /\s+(?:metropolitan area|area|province|city|regency)$/
 
+/**
+ * Nama tempat yang cukup khas untuk dicari sebagai kata utuh di dalam teks yang susunannya lain
+ * ("Special Region Yogyakarta", "Jakarta Selatan"). Hanya nama minimal enam huruf, supaya nama pendek seperti
+ * "Bali" atau "Solo" tidak ikut cocok di teks yang bukan tempat di Indonesia.
+ */
+const INDONESIA_PLACE_WORDS: RegExp[] = [...INDONESIA_PLACE_SET]
+  .filter((name) => name.replace(/\s/g, '').length >= 6)
+  .map((name) => new RegExp(`(?:^|\\s)${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`))
+
 /** True bila satu bagian lokasi adalah provinsi atau kota Indonesia yang dikenal. */
 const isIndonesiaPlace = (part: string): boolean => {
   const name = normalizePlace(part)
   if (INDONESIA_PLACE_SET.has(name)) return true
   const bare = name.replace(PLACE_PREFIX, '').replace(PLACE_SUFFIX, '').trim()
-  return bare !== name && INDONESIA_PLACE_SET.has(bare)
+  if (bare !== name && INDONESIA_PLACE_SET.has(bare)) return true
+  return INDONESIA_PLACE_WORDS.some((re) => re.test(name))
 }
 
 const locationParts = (location: unknown): string[] =>
