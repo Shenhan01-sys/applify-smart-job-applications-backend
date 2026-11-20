@@ -89,6 +89,7 @@ class Query implements PromiseLike<Result> {
   is(col: string, val: any) { this.filters.push((r) => (val === null ? r[col] == null : r[col] === val)); return this; }
   contains(col: string, obj: any) { this.filters.push((r) => isSubset(obj, r[col])); return this; }
   ilike(col: string, pattern: string) { this.filters.push((r) => likeMatch(r[col], pattern)); return this; }
+  like(col: string, pattern: string) { this.filters.push((r) => likeMatch(r[col], pattern)); return this; }
   /** PostgREST `or`: "col.eq.v,col.is.null,col.ilike.%x%" — a row passes when any condition holds. */
   or(expr: string) {
     const conds = expr.split(",").map((c) => c.trim()).filter(Boolean).map((c) => {

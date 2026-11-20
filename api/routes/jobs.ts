@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { enrichJob } from '../../services/job-detail.service.js'
 import { salaryBenchmark } from '../../services/salary-benchmark.service.js'
+import { backfillState, isBackfillAdmin, runBackfill, selectBackfillTargets } from '../../services/job-backfill.service.js'
 
 /** Batas POST /:id/enrich per pengguna: tiap permintaan bisa memicu satu fetch ke situs lowongan. */
 export const ENRICH_LIMIT_PER_MINUTE = 30
@@ -59,6 +60,31 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
     } catch (error: any) {
       return reply.status(500).send({ error: error?.message ?? 'Failed to enrich job' })
     }
+  })
+
+  // Backfill detail lowongan lama. Hanya id di env BACKFILL_ADMIN_IDS (403 untuk pengguna lain). Berjalan di latar,
+  // satu per satu dengan jeda; 202 { started, total }, 409 bila backfill lain masih berjalan.
+  app.post('/backfill', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+    if (!isBackfillAdmin(userId)) return reply.status(403).send({ error: 'Forbidden' })
+    if (backfillState().running) return reply.status(409).send({ error: 'Backfill sedang berjalan', state: backfillState() })
+    const limit = Number((request.body as any)?.limit ?? 500)
+    try {
+      const db = await getDb()
+      const ids = await selectBackfillTargets(db, Number.isFinite(limit) ? limit : 500)
+      void runBackfill(db, ids, { startedBy: userId }).catch((e) => request.log.error(e, '[backfill] berhenti'))
+      return reply.status(202).send({ started: true, total: ids.length })
+    } catch (error: any) {
+      return reply.status(500).send({ error: error?.message ?? 'Failed to start backfill' })
+    }
+  })
+
+  app.get('/backfill/status', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+    if (!isBackfillAdmin(userId)) return reply.status(403).send({ error: 'Forbidden' })
+    return backfillState()
   })
 
   // Pembanding gaji: persentil gaji (IDR per bulan) lowongan aktif lain dengan judul mirip.
