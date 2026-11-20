@@ -24,6 +24,15 @@ export const AI_REQUEST_ACTION = 'ai_request'
 export const AI_DRAFT_ACTION = 'ai_draft'
 export const DEFAULT_AI_LIMITS = { perMinute: 10, perHour: 60 } as const
 
+/**
+ * Impor profil dari PDF LinkedIn (/api/profile/import/linkedin-pdf). Memanggil model AI, tetapi BUKAN draf lamaran:
+ * tidak memeriksa kuota draf bulanan dan tidak mencatat 'ai_draft'. Hanya batas laju sendiri (action terpisah,
+ * jadi tidak berbagi hitungan dengan 'ai_request'): bawaan 3 per menit dan 10 per jam per pengguna; ubah lewat
+ * PROFILE_IMPORT_RATE_LIMIT_PER_MINUTE dan PROFILE_IMPORT_RATE_LIMIT_PER_HOUR.
+ */
+export const PROFILE_IMPORT_ACTION = 'profile_import'
+export const DEFAULT_IMPORT_LIMITS = { perMinute: 3, perHour: 10 } as const
+
 export interface AiLimits {
   perMinute: number
   perHour: number
@@ -60,6 +69,14 @@ export function aiLimitsFromEnv(env: Record<string, string | undefined> = proces
   return {
     perMinute: positiveInt(env.AI_RATE_LIMIT_PER_MINUTE, DEFAULT_AI_LIMITS.perMinute),
     perHour: positiveInt(env.AI_RATE_LIMIT_PER_HOUR, DEFAULT_AI_LIMITS.perHour),
+  }
+}
+
+/** Batas impor profil dari lingkungan; nilai yang tidak sah memakai bawaan. */
+export function importLimitsFromEnv(env: Record<string, string | undefined> = process.env): AiLimits {
+  return {
+    perMinute: positiveInt(env.PROFILE_IMPORT_RATE_LIMIT_PER_MINUTE, DEFAULT_IMPORT_LIMITS.perMinute),
+    perHour: positiveInt(env.PROFILE_IMPORT_RATE_LIMIT_PER_HOUR, DEFAULT_IMPORT_LIMITS.perHour),
   }
 }
 
@@ -130,6 +147,41 @@ export class AiGuardService {
   }
 
   /**
+   * Batas laju untuk impor profil dari PDF, tanpa pemeriksaan kuota draf. Permintaan yang lolos dicatat sebagai
+   * application_logs action 'profile_import' (satu-satunya tulisan ke database oleh rute impor; tabel profil
+   * tidak disentuh). Melewati batas: AiAccessError 429 rate_limited. Gagal membaca atau mencatat: 503.
+   */
+  async checkImportRate(userId: string, route: string): Promise<void> {
+    const db = await this.db()
+    const limits = this.limits ?? importLimitsFromEnv()
+    const now = this.clock()
+    const waits = await Promise.all([
+      this.retryAfterSec(db, userId, 60_000, limits.perMinute, now, PROFILE_IMPORT_ACTION),
+      this.retryAfterSec(db, userId, 3_600_000, limits.perHour, now, PROFILE_IMPORT_ACTION),
+    ])
+    const wait = Math.max(0, ...waits.map((w) => w ?? 0))
+    if (wait > 0) {
+      throw new AiAccessError(
+        429,
+        'rate_limited',
+        `Terlalu banyak impor PDF. Coba lagi dalam ${wait} detik.`,
+        { retryAfterSec: wait, limits },
+      )
+    }
+    const { error: logErr } = await db.from('application_logs').insert({
+      user_id: userId,
+      action: PROFILE_IMPORT_ACTION,
+      platform: 'ai',
+      status: 'success',
+      details: { route },
+    })
+    if (logErr) {
+      console.error(`[ai-guard] pencatatan impor gagal: ${logErr.message}`)
+      throw new AiAccessError(503, 'rate_limit_check_failed', 'Batas impor tidak dapat diperiksa sekarang. Coba lagi nanti.')
+    }
+  }
+
+  /**
    * Catat satu draf yang berhasil dibuat lewat backend agar ikut terhitung di kuota bulanan (lihat migrasi).
    * Kegagalan mencatat tidak menggagalkan respons: surat sudah dibuat, dan galatnya masuk log server.
    */
@@ -153,13 +205,13 @@ export class AiGuardService {
    * null bila permintaan masih di bawah batas pada jendela itu; selain itu detik sampai satu slot bebas
    * (permintaan ke-`max` terbaru keluar dari jendela).
    */
-  private async retryAfterSec(db: AiGuardDb, userId: string, windowMs: number, max: number, now: Date): Promise<number | null> {
+  private async retryAfterSec(db: AiGuardDb, userId: string, windowMs: number, max: number, now: Date, action: string = AI_REQUEST_ACTION): Promise<number | null> {
     const since = new Date(now.getTime() - windowMs).toISOString()
     const { data, error } = await db
       .from('application_logs')
       .select('created_at')
       .eq('user_id', userId)
-      .eq('action', AI_REQUEST_ACTION)
+      .eq('action', action)
       .gte('created_at', since)
       .order('created_at', { ascending: false })
       .limit(max)
