@@ -1,3 +1,5 @@
+export type SalaryPeriod = 'month' | 'year' | 'hour' | 'day' | 'week'
+
 export interface JobPosting {
   id: string
   title: string
@@ -9,7 +11,14 @@ export interface JobPosting {
   experience_level?: string
   job_type?: string
   work_type?: string
+  /** Teks gaji apa adanya dari sumber (untuk tampilan). Angka terstruktur ada di salary_min/max di bawah. */
   salary_range?: string
+  /** Gaji terstruktur (diisi bila sumber memberi angka atau teks gaji yang terbaca; lihat services/salary.ts). */
+  salary_min?: number
+  salary_max?: number
+  /** Kode ISO 4217 (IDR, USD, ...). */
+  salary_currency?: string
+  salary_period?: SalaryPeriod
   requirements?: string[]
   skills?: string[]
   /** Platform id asal lowongan (mis. 'kalibrr', 'greenhouse'). Diisi oleh registry/aggregator. */

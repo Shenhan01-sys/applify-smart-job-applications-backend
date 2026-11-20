@@ -1,5 +1,6 @@
 import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
 import { guessExperienceLevel, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
+import { salaryFields, sanitizeSalary } from '../../services/salary.js'
 
 /**
  * Dealls (dealls.com) — portal lowongan Indonesia (grup Sejutacita), banyak untuk fresh graduate dan magang.
@@ -34,6 +35,12 @@ export function normalizeDeallsJob(item: any): JobPosting | null {
   const types = Array.isArray(item.employmentTypes) ? item.employmentTypes.join(' ') : ''
   const description = `${title} — ${company}${city ? ` (${city})` : ''}`
   const path = companySlug ? `${encodeURIComponent(slug)}~${encodeURIComponent(companySlug)}` : encodeURIComponent(slug)
+  // salaryRange: { start, end } dalam rupiah per bulan; null bila tidak dicantumkan.
+  const sr = item.salaryRange
+  const salary = sr && typeof sr === 'object' ? sanitizeSalary({ min: sr.start, max: sr.end, currency: 'IDR', period: 'month' }) : null
+  const skills = Array.isArray(item.skills)
+    ? [...new Set<string>(item.skills.map((s: any) => (typeof s === 'string' ? s : s?.name)).filter((n: any) => typeof n === 'string' && n.trim()).map((n: string) => n.trim()))].slice(0, 20)
+    : []
 
   return {
     id,
@@ -47,6 +54,10 @@ export function normalizeDeallsJob(item: any): JobPosting | null {
     // employmentTypes memakai camelCase (fullTime, partTime, internship); pisahkan agar normalizeJobType mengenalinya.
     job_type: normalizeJobType(types.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase()),
     work_type: normalizeWorkType(workplace, location),
+    ...(salary
+      ? { salary_range: `IDR ${salary.min.toLocaleString('id-ID')} - ${salary.max.toLocaleString('id-ID')} / month`, ...salaryFields(salary) }
+      : {}),
+    ...(skills.length ? { skills } : {}),
     platform: 'dealls',
     raw_data: { id, workplaceType: workplace || null, employmentTypes: item.employmentTypes ?? [] },
   }

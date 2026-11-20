@@ -84,7 +84,7 @@ export class AutomationService {
       results_count: result.total,
       stats: result.stats.map((s) => ({ platform: s.platform, fetched: s.fetched, kept: s.afterFilter, errors: s.errors.length })),
       ingest: ingest
-        ? { inserted: ingest.inserted, duplicates: ingest.duplicates, failed: ingest.failed, backfilled: ingest.backfilled }
+        ? { inserted: ingest.inserted, duplicates: ingest.duplicates, failed: ingest.failed, backfilled: ingest.backfilled, enriched: ingest.enriched }
         : null,
     })
 

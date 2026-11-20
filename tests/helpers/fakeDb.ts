@@ -12,6 +12,13 @@ function isSubset(sub: any, sup: any): boolean {
   return Object.entries(sub).every(([k, v]) => isSubset(v, sup[k]));
 }
 
+/** SQL LIKE with % wildcards, case-insensitive (enough for ilike/or filters in tests). */
+function likeMatch(value: any, pattern: string): boolean {
+  if (value == null) return false;
+  const re = pattern.split("%").map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+  return new RegExp(`^${re}$`, "i").test(String(value));
+}
+
 export class FakeDb {
   tables: Record<string, Row[]>;
   /** Every write, in order: { table, op, payload } — for assertions. */
@@ -81,6 +88,22 @@ class Query implements PromiseLike<Result> {
   in(col: string, vals: any[]) { this.filters.push((r) => vals.includes(r[col])); return this; }
   is(col: string, val: any) { this.filters.push((r) => (val === null ? r[col] == null : r[col] === val)); return this; }
   contains(col: string, obj: any) { this.filters.push((r) => isSubset(obj, r[col])); return this; }
+  ilike(col: string, pattern: string) { this.filters.push((r) => likeMatch(r[col], pattern)); return this; }
+  /** PostgREST `or`: "col.eq.v,col.is.null,col.ilike.%x%" — a row passes when any condition holds. */
+  or(expr: string) {
+    const conds = expr.split(",").map((c) => c.trim()).filter(Boolean).map((c) => {
+      const [col, op, ...rest] = c.split(".");
+      const val = rest.join(".");
+      return (r: Row) => {
+        if (op === "is") return val === "null" ? r[col] == null : String(r[col]) === val;
+        if (op === "eq") return r[col] != null && String(r[col]) === val;
+        if (op === "ilike" || op === "like") return likeMatch(r[col], val);
+        return false;
+      };
+    });
+    this.filters.push((r) => conds.some((f) => f(r)));
+    return this;
+  }
   order(col: string, opts?: { ascending?: boolean }) { this.orderBy = { col, asc: opts?.ascending !== false }; return this; }
   limit(n: number) { this.max = n; return this; }
   single() { this.mode = "single"; return this; }

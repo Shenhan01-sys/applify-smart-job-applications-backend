@@ -1,6 +1,7 @@
 import { BaseMCPClient, BROWSER_LIKE_USER_AGENT, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
 import { guessExperienceLevel, normalizeWorkType } from '../shared/utils.js'
 import { chromiumLaunchOptions } from '../shared/browser.js'
+import { periodFromMode, salaryFields, sanitizeSalary, type ParsedSalary } from '../../services/salary.js'
 
 /**
  * Glints — platform karier populer di Indonesia (juga SG/MY/VN).
@@ -38,6 +39,17 @@ query searchJobsV3($data: JobSearchConditionInput!) {
   }
 }`
 
+/**
+ * Gaji terstruktur dari salaries[]: entri BASIC didahulukan (entri lain bisa berupa tunjangan), lalu entri pertama.
+ * salaryMode (MONTH/YEAR/HOUR/DAY/WEEK) menjadi periode; tanpa mode rupiah dianggap per bulan.
+ */
+export function glintsSalary(salaries: any): ParsedSalary | null {
+  if (!Array.isArray(salaries) || salaries.length === 0) return null
+  const s = salaries.find((x: any) => String(x?.salaryType ?? '').toUpperCase() === 'BASIC') ?? salaries[0]
+  if (!s || typeof s !== 'object') return null
+  return sanitizeSalary({ min: s.minAmount, max: s.maxAmount, currency: s.CurrencyCode ?? 'IDR', period: periodFromMode(s.salaryMode) })
+}
+
 function formatSalary(salaries: any): string | undefined {
   const s = Array.isArray(salaries) ? salaries[0] : null
   if (!s || (s.minAmount == null && s.maxAmount == null)) return undefined
@@ -68,6 +80,7 @@ export function normalizeGlintsJob(item: any): JobPosting | null {
     job_type: 'full-time',
     work_type: normalizeWorkType(location),
     salary_range: formatSalary(item.salaries),
+    ...salaryFields(glintsSalary(item.salaries)),
     platform: 'glints',
     raw_data: { id, country: item.country?.code ?? null },
   }

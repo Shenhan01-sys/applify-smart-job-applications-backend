@@ -17,6 +17,7 @@ import { rateLimitRoutes } from './routes/rate-limit.js'
 import { linkedinSessionRoutes } from './routes/linkedin-session.js'
 import { oauthRoutes } from './routes/oauth.js'
 import { notificationRoutes } from './routes/notifications.js'
+import { jobRoutes } from './routes/jobs.js'
 import { authMiddleware } from './middleware/auth.js'
 import { sessionKeyProblem } from '../services/session-crypto.js'
 import { deployConfigWarnings, isOriginAllowed, parseAllowedOrigins } from '../services/deploy-config.js'
@@ -90,6 +91,7 @@ await app.register(async (app) => {
   await app.register(rateLimitRoutes, { prefix: '/api/rate-limits' })
   await app.register(linkedinSessionRoutes, { prefix: '/api/linkedin' })
   await app.register(notificationRoutes, { prefix: '/api/notifications' })
+  await app.register(jobRoutes, { prefix: '/api/jobs' })
 })
 
 // Public routes

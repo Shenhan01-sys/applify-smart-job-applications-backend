@@ -1,5 +1,6 @@
 import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
 import { guessExperienceLevel, htmlToText, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
+import { parseSalaryLabel, salaryFields } from '../../services/salary.js'
 
 /**
  * JobStreet Indonesia (SEEK Group) — portal lowongan terbesar di Indonesia.
@@ -47,6 +48,7 @@ export function normalizeJobStreetItem(item: any): JobPosting | null {
     job_type: normalizeJobType(workTypes),
     work_type: normalizeWorkType(arrangement, location),
     salary_range: item.salaryLabel || undefined,
+    ...salaryFields(parseSalaryLabel(item.salaryLabel)),
     platform: 'jobstreet',
     raw_data: { id, roleId: item.roleId ?? null, workTypes: item.workTypes ?? [] },
   }
