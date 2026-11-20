@@ -4,6 +4,7 @@ import { queueService } from '../../services/queue.service.js'
 import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { regenerateApprovalCoverLetter } from '../../services/approval-regenerate.service.js'
+import { resumeUrlForUser } from '../../services/resume-file.service.js'
 
 interface ApprovalRequest {
   id: string
@@ -91,8 +92,9 @@ export async function approvalRoutes(
       company,
       platform,
       answers,
-      resume_url,
     } = request.body as any
+    // resume_url kiriman klien diabaikan. CV diambil dari profil pengguna (bucket privat `resumes`).
+    const resume_url = await resumeUrlForUser(supabase as any, userId)
     let cover_letter = (request.body as any).cover_letter as string | undefined
 
     // Surat tidak dikirim tetapi draf AI ada: pakai surat dari ai_applications milik pengguna ini.
