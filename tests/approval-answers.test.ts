@@ -63,7 +63,7 @@ test('confidenceLevel: >0,8 tinggi; 0,5 sampai 0,8 sedang; <0,5 rendah', () => {
 test('data lengkap: jawaban aturan tetap berkeyakinan tinggi dan tidak ditandai; jawaban AI ditandai', async () => {
   mockAI(async () => 'Saya tertarik karena stack-nya cocok.')
   const rows = await buildApprovalAnswers({ settings: fullSettings, profile, job })
-  assert.equal(rows.length, 10)
+  assert.equal(rows.length, 11)
 
   const name = byQuestion(rows, 'Nama lengkap')
   assert.equal(name.answer, 'Budi Uji')
@@ -95,7 +95,7 @@ test('AI selalu ditandai walau pengguna mematikan pause_at_failed_question', asy
 test('data sumber kosong: jawaban dikosongkan, keyakinan 0, wajib dicek (tidak ada nilai bawaan palsu)', async () => {
   mockAI(async () => 'x')
   const rows = await buildApprovalAnswers({ settings: {}, profile: { email: null }, job })
-  for (const part of ['Nama lengkap', 'Email', 'Nomor telepon', 'Kota domisili', 'Total pengalaman', 'Ekspektasi gaji', 'notice', 'sponsor visa', 'LinkedIn']) {
+  for (const part of ['Nama lengkap', 'Email', 'Nomor telepon', 'Kota domisili', 'Negara', 'Total pengalaman', 'Ekspektasi gaji', 'notice', 'sponsor visa', 'LinkedIn']) {
     const r = byQuestion(rows, part)
     assert.equal(r.answer, '', part)
     assert.equal(r.confidence, 0, part)
@@ -142,7 +142,7 @@ test('filler yang melempar: jawaban kosong dan ditandai, daftar tetap lengkap', 
   const rows = await buildApprovalAnswers({ settings: fullSettings, profile, job }, async () => {
     throw new Error('boom')
   })
-  assert.equal(rows.length, 10)
+  assert.equal(rows.length, 11)
   assert.ok(rows.every((r) => r.needs_review && r.answer === ''))
 })
 
@@ -154,7 +154,7 @@ test('prepareApprovalAnswers: baca pengaturan dari database dan tidak pernah mel
     jobs: [{ id: 'j1', description: 'Bangun API.' }],
   })
   const rows = await prepareApprovalAnswers(db, { userId: 'u1', email: 'budi@contoh.test', jobId: 'j1', jobTitle: 'BE', company: 'C' })
-  assert.equal(rows.length, 10)
+  assert.equal(rows.length, 11)
   assert.equal(byQuestion(rows, 'Nama lengkap').answer, 'Budi Uji')
 
   const broken = { from: () => { throw new Error('db down') } }

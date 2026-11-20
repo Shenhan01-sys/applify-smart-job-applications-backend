@@ -272,7 +272,7 @@ test('prepareApprovalAnswers: membaca achievements milik pengguna itu saja, teru
     achievements: [...mine, { user_id: 'u2', ...row('Milik orang lain') }],
   })
   const rows = await prepareApprovalAnswers(db as any, { userId: 'u1', email: 'budi@contoh.test', jobTitle: 'BE', company: 'C' }, filler)
-  assert.equal(rows.length, 10)
+  assert.equal(rows.length, 11)
   const profile = seen[0]
   assert.equal(profile.achievements.length, 8)
   assert.deepEqual(profile.achievements.slice(0, 2), ['Paper Unggulan (Publikasi, 2020)', 'Juara 1 Hackathon (Penghargaan, Kemenkominfo, 2024)'])
@@ -289,7 +289,7 @@ test('prepareApprovalAnswers: membaca achievements milik pengguna itu saja, teru
   const broken = new FakeDb({ user_automation_settings: [settings], user_skills: [{ user_id: 'u1', name: 'SQL' }], achievements: mine })
   broken.failOn('achievements', 'select')
   const rows2 = await prepareApprovalAnswers(broken as any, { userId: 'u1', email: 'budi@contoh.test', jobTitle: 'BE', company: 'C' }, filler)
-  assert.equal(rows2.length, 10)
+  assert.equal(rows2.length, 11)
   assert.deepEqual(seen[0], { email: 'budi@contoh.test', skills: ['SQL'] })
 })
 

@@ -157,7 +157,7 @@ test('prepareApprovalAnswers membaca work_experiences; gagal membaca = jawaban t
 
   db.failOn('work_experiences', 'select')
   const without = await prepareApprovalAnswers(db, { userId: 'u1', jobTitle: 'BE', company: 'C' })
-  assert.equal(without.length, 10)
+  assert.equal(without.length, 11)
   const b = without.find((r) => r.question.includes('Total pengalaman'))!
   assert.equal(b.answer, '0', 'tanpa riwayat terbaca: perilaku lama, tidak ada hitungan')
 })

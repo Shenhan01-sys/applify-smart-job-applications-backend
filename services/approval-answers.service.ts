@@ -1,6 +1,7 @@
 import { formAutofillService, type FillResult, type FormContext, type FormField } from './form-autofill.service.js'
 import { buildAchievementLines } from './profile-context.js'
 import { deriveExperienceYears } from './experience-years.js'
+import { cityFromLocation, countryFromLocation } from './applicant-fallbacks.js'
 
 /**
  * Jawaban formulir standar yang disiapkan agen untuk satu lamaran, lengkap dengan skor keyakinan, supaya
@@ -51,6 +52,7 @@ export function standardQuestions(company: string): StandardQuestion[] {
     { display: 'Email', field: { type: 'text', label: 'Email' }, requires: 'email' },
     { display: 'Nomor telepon', field: { type: 'text', label: 'Phone number' }, requires: 'phone_number' },
     { display: 'Kota domisili', field: { type: 'text', label: 'Current city' }, requires: 'current_city' },
+    { display: 'Negara', field: { type: 'text', label: 'Country' }, requires: 'country' },
     {
       display: 'Total pengalaman kerja (tahun)',
       field: { type: 'text', label: 'Total years of experience' },
@@ -106,6 +108,8 @@ const PROFILE_CONFIDENCE: Record<string, number> = {
   linkedin_url: 0.85,
   years_of_experience: 0.85,
   current_city: 0.75,
+  // Negara diturunkan dari teks lokasi (nama negara di bagian terakhir), bukan diketik pengguna: "sedang".
+  country: 0.7,
 }
 
 /** Tahun pengalaman yang dihitung dari tanggal riwayat kerja: hasil hitungan, jadi selalu "sedang" dan dicek pengguna. */
@@ -120,7 +124,10 @@ const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
  * diisi di Pengaturan Otomasi selalu menang. Mengembalikan pengaturan gabungan dan kunci yang berasal dari Profil.
  *   full_name -> first_name + last_name (kata pertama = nama depan, sisanya = nama belakang)
  *   phone -> phone_number, linkedin_url -> linkedin_url, portfolio_url -> website
- *   location -> current_city (bagian sebelum koma pertama; "Yogyakarta, Indonesia" -> "Yogyakarta")
+ *   location -> current_city (bagian sebelum koma pertama; "Yogyakarta, Indonesia" -> "Yogyakarta"; lokasi yang hanya
+ *   berisi nama negara tidak menjadi kota)
+ *   location -> country, hanya bila bagian terakhirnya nama negara yang dikenal ("Yogyakarta, Indonesia" -> "Indonesia");
+ *   nama kota atau provinsi tidak pernah ditebak menjadi negara (applicant-fallbacks.ts)
  *   experience_years -> years_of_experience, hanya bila > 0 (0 adalah nilai bawaan kolom, bukan jawaban pengguna)
  *   tahun pengalaman kosong atau 0 di keduanya -> dihitung dari work_experiences (periode digabung, peran berjalan
  *   sampai hari ini, dibulatkan ke bawah). Kuncinya masuk `derived`; jawabannya diberi keyakinan sedang.
@@ -173,8 +180,8 @@ export function mergeProfileIntoSettings(
   fill('phone_number', profileRow.phone)
   fill('linkedin_url', profileRow.linkedin_url)
   fill('website', profileRow.portfolio_url)
-  const city = text(profileRow.location).split(',')[0].trim()
-  fill('current_city', city)
+  fill('current_city', cityFromLocation(profileRow.location))
+  fill('country', countryFromLocation(profileRow.location))
   return { settings: merged, fromProfile, derived }
 }
 
