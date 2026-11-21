@@ -22,6 +22,7 @@ import {
   type ProfileLike,
 } from './ai-output-guard.js'
 import { ACHIEVEMENT_GROUNDING_RULE, achievementPromptSection, answerCandidateInfo, buildAchievementLines } from './profile-context.js'
+import { letterStructureRules } from './letter-rules.js'
 
 const getOpenRouterKey = () => process.env.OPENROUTER_API_KEY
 const getGroqKey = () => process.env.GROQ_API_KEY
@@ -195,6 +196,8 @@ interface CoverLetterParams {
 
 interface AnswerQuestionParams {
   question: string
+  /** 'id' | 'en' | 'auto'. Kosong sama dengan 'auto': Indonesia, kecuali lowongan jelas berbahasa Inggris. */
+  language?: unknown
   questionType: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox' | 'file'
   options?: string[]
   jobDescription: string
@@ -547,6 +550,7 @@ Instructions:
 - Language: ${languageInstruction(language)}
 - Tone: ${tone}
 - Length: 200-300 words
+${letterStructureRules(jobTitle, company).map((r) => `- ${r}`).join('\n')}
 - Highlight relevant skills and experience that appear in the candidate profile
 - Show enthusiasm for the company and role
 - Include a strong call to action
@@ -690,6 +694,14 @@ Candidate Info: ${JSON.stringify(candidateInfo, null, 2)}
         break
       default:
         prompt += 'provide an appropriate answer.'
+    }
+
+    // Bahasa jawaban teks: label pertanyaan baku berbahasa Inggris ("Why are you interested in this role?"), dan tanpa
+    // instruksi ini model menjawab dalam bahasa label itu walau lowongannya berbahasa Indonesia (uji klik 21 November 2026,
+    // temuan 28). Pilihan, radio, dan kotak centang tidak diberi instruksi: jawabannya harus salah satu opsi apa adanya.
+    if (questionType === 'text' || questionType === 'textarea') {
+      const language = selectLanguage({ requested: params.language, jobText: jobDescription })
+      prompt += `\n\nLanguage: ${languageInstruction(language)}`
     }
 
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
