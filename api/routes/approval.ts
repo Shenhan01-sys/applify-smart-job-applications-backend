@@ -6,6 +6,9 @@ import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { regenerateApprovalCoverLetter } from '../../services/approval-regenerate.service.js'
 import { resumeUrlForUser } from '../../services/resume-file.service.js'
 import { rerunApproval } from '../../services/rerun-guard.js'
+import { markApprovalSent } from '../../services/manual-submit-guard.js'
+import { notifyApplicationStatus } from '../../services/application-status.service.js'
+import { notificationsService } from '../../services/notifications.service.js'
 
 /** Masa berlaku permintaan persetujuan sejak dibuat: 24 jam. */
 export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000
@@ -251,6 +254,23 @@ export async function approvalRoutes(
 
     const { id } = request.params as { id: string }
     const result = await rerunApproval(supabase as any, queueService, userId, id)
+    return reply.status(result.status).send(result.body)
+  })
+
+  // The user sent the application themselves on the job site (the agent stopped before Submit, for example
+  // because the site is not on the auto-send allowlist). Records a 'success' log row marked manual, which also
+  // uses the approval up for the worker, and moves the application to 'submitted'. Nothing is sent anywhere.
+  // Expiry is not checked: consent for the agent no longer matters. Rules: manual-submit-guard.ts.
+  app.post('/:id/mark-sent', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' })
+    }
+
+    const { id } = request.params as { id: string }
+    const result = await markApprovalSent(supabase as any, userId, id, new Date(), (applicationId) =>
+      notifyApplicationStatus(supabase as any, notificationsService, { userId, applicationId })
+    )
     return reply.status(result.status).send(result.body)
   })
 
