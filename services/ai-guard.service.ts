@@ -152,32 +152,46 @@ export class AiGuardService {
    * tidak disentuh). Melewati batas: AiAccessError 429 rate_limited. Gagal membaca atau mencatat: 503.
    */
   async checkImportRate(userId: string, route: string): Promise<void> {
+    return this.checkActionRateLimit(userId, PROFILE_IMPORT_ACTION, route, this.limits ?? importLimitsFromEnv(), 'Terlalu banyak impor PDF')
+  }
+
+  /**
+   * Batas laju umum untuk rute AI tambahan (`/api/approvals/:id/regenerate`, `/api/approvals` autofill)
+   * tanpa mengurangi atau memeriksa kuota draf bulanan.
+   */
+  async checkActionRateLimit(
+    userId: string,
+    action: string,
+    route: string,
+    customLimits?: AiLimits,
+    messagePrefix: string = 'Terlalu banyak permintaan AI'
+  ): Promise<void> {
     const db = await this.db()
-    const limits = this.limits ?? importLimitsFromEnv()
+    const limits = customLimits ?? this.limits ?? aiLimitsFromEnv()
     const now = this.clock()
     const waits = await Promise.all([
-      this.retryAfterSec(db, userId, 60_000, limits.perMinute, now, PROFILE_IMPORT_ACTION),
-      this.retryAfterSec(db, userId, 3_600_000, limits.perHour, now, PROFILE_IMPORT_ACTION),
+      this.retryAfterSec(db, userId, 60_000, limits.perMinute, now, action),
+      this.retryAfterSec(db, userId, 3_600_000, limits.perHour, now, action),
     ])
     const wait = Math.max(0, ...waits.map((w) => w ?? 0))
     if (wait > 0) {
       throw new AiAccessError(
         429,
         'rate_limited',
-        `Terlalu banyak impor PDF. Coba lagi dalam ${wait} detik.`,
+        `${messagePrefix}. Coba lagi dalam ${wait} detik.`,
         { retryAfterSec: wait, limits },
       )
     }
     const { error: logErr } = await db.from('application_logs').insert({
       user_id: userId,
-      action: PROFILE_IMPORT_ACTION,
+      action,
       platform: 'ai',
       status: 'success',
       details: { route },
     })
     if (logErr) {
-      console.error(`[ai-guard] pencatatan impor gagal: ${logErr.message}`)
-      throw new AiAccessError(503, 'rate_limit_check_failed', 'Batas impor tidak dapat diperiksa sekarang. Coba lagi nanti.')
+      console.error(`[ai-guard] pencatatan batas laju ${action} gagal: ${logErr.message}`)
+      throw new AiAccessError(503, 'rate_limit_check_failed', 'Batas permintaan tidak dapat diperiksa sekarang. Coba lagi nanti.')
     }
   }
 

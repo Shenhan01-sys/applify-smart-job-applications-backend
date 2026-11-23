@@ -15,9 +15,11 @@ import {
 import {
   authorizeExtensionSubmit,
   ExtensionRunnerError,
+  getUserMinTokenVersion,
   listPendingExtensionApprovals,
   REPORT_RUN_BODY_LIMIT,
   reportExtensionRun,
+  revokeAllExtensionTokens,
   verifyExtensionApproval,
 } from '../../services/extension-runner.js'
 
@@ -41,7 +43,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
   const getDb = async (): Promise<SupabaseClient> => opts.db ?? ((await import('../index.js')).supabase as SupabaseClient)
   const primaryAuth = opts.authenticatePrimary ?? authMiddleware
 
-  function requireExtensionUser(request: FastifyRequest, reply: FastifyReply): string | null {
+  async function requireExtensionUser(request: FastifyRequest, reply: FastifyReply): Promise<string | null> {
     const bearer = extractBearerToken(request.headers.authorization)
     if (!bearer) {
       reply.status(401).send({ error: 'Token ekstensi diperlukan' })
@@ -53,10 +55,22 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
         reply.status(401).send({ error: 'Token ekstensi tidak sah atau sudah kedaluwarsa', code: verified.reason })
         return null
       }
+      const minVer = await getUserMinTokenVersion(await getDb(), verified.userId)
+      if (verified.tokenVersion < minVer) {
+        reply.status(401).send({
+          error: 'Token ekstensi sudah dicabut dari Pengaturan. Buat token baru untuk menghubungkan ulang.',
+          code: 'token_revoked',
+        })
+        return null
+      }
       return verified.userId
-    } catch (err) {
+    } catch (err: any) {
       if (err instanceof ExtensionTokenConfigError) {
         reply.status(503).send({ error: err.message, code: err.code })
+        return null
+      }
+      if (err instanceof ExtensionRunnerError) {
+        reply.status(err.statusCode).send({ error: err.message, code: err.code })
         return null
       }
       throw err
@@ -69,8 +83,10 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
     if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
     const rawTtl = (request.body as any)?.ttlSeconds
     try {
+      const ver = await getUserMinTokenVersion(await getDb(), userId)
       return createExtensionToken(userId, {
         ttlSec: typeof rawTtl === 'number' ? rawTtl : undefined,
+        ver,
         now: new Date(now()),
         env,
       })
@@ -78,13 +94,30 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
       if (err instanceof ExtensionTokenConfigError) {
         return reply.status(503).send({ error: err.message, code: err.code })
       }
+      if (err instanceof ExtensionRunnerError) {
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+      }
       return reply.status(400).send({ error: err?.message ?? 'Gagal membuat token ekstensi' })
+    }
+  })
+
+  // 1b. Cabut seluruh token ekstensi lama ("Putuskan semua perangkat"), wajib JWT utama.
+  app.post('/revoke-all', { preHandler: [primaryAuth] }, async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+    try {
+      return await revokeAllExtensionTokens(await getDb(), userId, new Date(now()))
+    } catch (err: any) {
+      if (err instanceof ExtensionRunnerError) {
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+      }
+      return reply.status(500).send({ error: err?.message ?? 'Gagal mencabut token ekstensi' })
     }
   })
 
   // 2. Daftar persetujuan aktif (`approved`, belum dipakai submit, bukan LinkedIn).
   app.get('/pending-approvals', async (request, reply) => {
-    const userId = requireExtensionUser(request, reply)
+    const userId = await requireExtensionUser(request, reply)
     if (!userId) return reply
     try {
       const items = await listPendingExtensionApprovals(await getDb(), userId, new Date(now()))
@@ -99,7 +132,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
 
   // 3. Rencanakan isian formulir dari kontrol terstruktur tab aktif (tanpa raw HTML / cookie).
   app.post('/plan-form', async (request, reply) => {
-    const userId = requireExtensionUser(request, reply)
+    const userId = await requireExtensionUser(request, reply)
     if (!userId) return reply
     const body = (request.body ?? {}) as Record<string, unknown>
     const approvalId = typeof body.approvalId === 'string' ? body.approvalId : ''
@@ -120,9 +153,23 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
         return reply.status(approvalCheck.statusCode).send({ error: approvalCheck.error, code: approvalCheck.code })
       }
 
+      const authEmail = await (async () => {
+        try {
+          const admin = (db as any)?.auth?.admin
+          if (admin && typeof admin.getUserById === 'function') {
+            const res = await admin.getUserById(userId)
+            return typeof res?.data?.user?.email === 'string' ? res.data.user.email : undefined
+          }
+        } catch {
+          // Abaikan bila mock DB tidak menyertakan auth.admin
+        }
+        return undefined
+      })()
+
       return await planner.planForm({
         db,
         userId,
+        userEmail: authEmail,
         jobId: approvalCheck.row.job_id,
         coverLetter: approvalCheck.row.cover_letter ?? null,
         pageUrl,
@@ -142,7 +189,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
 
   // 4. Gate akhir sebelum ekstensi mengklik tombol Submit (HITL + approval + kuota harian).
   app.post('/authorize-submit', async (request, reply) => {
-    const userId = requireExtensionUser(request, reply)
+    const userId = await requireExtensionUser(request, reply)
     if (!userId) return reply
     const body = (request.body ?? {}) as Record<string, unknown>
     try {
@@ -170,7 +217,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
   //    Batas badan diperbesar hanya di sini: dua PNG base64 melewati 1 MiB bawaan Fastify, dan laporan kirim yang
   //    ditolak 413 sesudah klik Submit membuat pengguna menekan Kirim lagi (temuan keamanan 3).
   app.post('/report-run', { bodyLimit: REPORT_RUN_BODY_LIMIT }, async (request, reply) => {
-    const userId = requireExtensionUser(request, reply)
+    const userId = await requireExtensionUser(request, reply)
     if (!userId) return reply
     const body = (request.body ?? {}) as Record<string, unknown>
     try {

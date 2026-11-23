@@ -5,6 +5,7 @@ import { pageMatchesJob } from './page-host.js'
 import type { GuardDb } from './queue-guard.js'
 import { DAILY_APPLY_LIMIT, COUNTED_ACTIONS, startOfUtcDay } from './rate-limit.service.js'
 import { APPLICATION_STATUSES, notifyApplicationStatus, type ApplicationStatus } from './application-status.service.js'
+import { notificationDispatcher } from './notification-dispatcher.service.js'
 import { notificationsService } from './notifications.service.js'
 
 /**
@@ -780,7 +781,12 @@ export async function reportExtensionRun(
           updatedAppStatus = targetAppStatus
 
           if (targetAppStatus === 'submitted') {
-            await notifyApplicationStatus(db as any, notificationsService, { userId, applicationId: appRow.id }).catch(() => undefined)
+            await notifyApplicationStatus(
+              db as any,
+              notificationsService,
+              { userId, applicationId: appRow.id },
+              { dispatcher: notificationDispatcher }
+            ).catch(() => undefined)
           }
         } else {
           updatedAppStatus = appRow.status as ApplicationStatus
@@ -803,4 +809,81 @@ export async function reportExtensionRun(
     lateQuotaExceeded,
     lateExpired: late.expired,
   }
+}
+
+export const EXTENSION_REVOCATION_TABLE = 'user_extension_revocations'
+
+const isMissingTable = (err: { code?: string } | null | undefined): boolean =>
+  err?.code === '42P01' || err?.code === 'PGRST205'
+
+let warnedMissingRevocationTable = false
+
+/** Baca versi token minimum pengguna (bawaan 1 bila tabel belum dimigrasi agar rollout tetap mulus). */
+export async function getUserMinTokenVersion(db: GuardDb, userId: string): Promise<number> {
+  try {
+    const { data, error } = await db
+      .from(EXTENSION_REVOCATION_TABLE)
+      .select('min_token_version')
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (error) {
+      if (isMissingTable(error)) {
+        if (!warnedMissingRevocationTable) {
+          warnedMissingRevocationTable = true
+          console.warn('[extension-token] tabel user_extension_revocations belum dimigrasi; memakai versi minimum 1')
+        }
+        return 1
+      }
+      throw new ExtensionRunnerError(503, 'revocation_check_failed', 'Gagal memeriksa status pencabutan token ekstensi')
+    }
+    const ver = Number(data?.min_token_version ?? 1)
+    return Number.isInteger(ver) && ver >= 1 ? ver : 1
+  } catch (err) {
+    if (err instanceof ExtensionRunnerError) throw err
+    throw new ExtensionRunnerError(503, 'revocation_check_failed', 'Gagal memeriksa status pencabutan token ekstensi')
+  }
+}
+
+/** Cabut seluruh token ekstensi lama milik pengguna dengan menaikkan `min_token_version` (+1). */
+export async function revokeAllExtensionTokens(
+  db: GuardDb,
+  userId: string,
+  now: Date = new Date()
+): Promise<{ revoked: true; minTokenVersion: number }> {
+  const current = await (async () => {
+    const { data, error } = await db
+      .from(EXTENSION_REVOCATION_TABLE)
+      .select('min_token_version')
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (error) {
+      if (isMissingTable(error)) {
+        throw new ExtensionRunnerError(503, 'revocation_unavailable', 'Tabel pencabutan token belum dimigrasi di database')
+      }
+      throw new ExtensionRunnerError(500, 'revocation_lookup_failed', 'Gagal membaca versi token pengguna')
+    }
+    const v = Number(data?.min_token_version ?? 1)
+    return Number.isInteger(v) && v >= 1 ? v : 1
+  })()
+
+  const nextVersion = current + 1
+  const tableApi = db.from(EXTENSION_REVOCATION_TABLE)
+  const writeRes =
+    typeof tableApi.upsert === 'function'
+      ? await tableApi.upsert({ user_id: userId, min_token_version: nextVersion, updated_at: now.toISOString() }, { onConflict: 'user_id' })
+      : await (async () => {
+          const { data: existing } = await db.from(EXTENSION_REVOCATION_TABLE).select('user_id').eq('user_id', userId).maybeSingle()
+          return existing
+            ? db.from(EXTENSION_REVOCATION_TABLE).update({ min_token_version: nextVersion, updated_at: now.toISOString() }).eq('user_id', userId)
+            : db.from(EXTENSION_REVOCATION_TABLE).insert({ user_id: userId, min_token_version: nextVersion, updated_at: now.toISOString() })
+        })()
+
+  if (writeRes?.error) {
+    if (isMissingTable(writeRes.error)) {
+      throw new ExtensionRunnerError(503, 'revocation_unavailable', 'Tabel pencabutan token belum dimigrasi di database')
+    }
+    throw new ExtensionRunnerError(500, 'revocation_update_failed', 'Gagal memperbarui versi pencabutan token')
+  }
+
+  return { revoked: true, minTokenVersion: nextVersion }
 }

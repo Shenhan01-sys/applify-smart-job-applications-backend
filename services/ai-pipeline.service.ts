@@ -202,6 +202,7 @@ interface AnswerQuestionParams {
   options?: string[]
   jobDescription: string
   userProfile: any
+  userId?: string
 }
 
 type CvProfile = ProfileLike & {
@@ -707,6 +708,7 @@ Candidate Info: ${JSON.stringify(candidateInfo, null, 2)}
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
     return this.callAI({
+      tier: await this.tierFor(params.userId),
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.6,
@@ -735,7 +737,7 @@ Candidate Info: ${JSON.stringify(candidateInfo, null, 2)}
     })
   }
 
-  async extractSkills(jobDescription: string): Promise<string[]> {
+  async extractSkills(jobDescription: string, userId?: string): Promise<string[]> {
     const prompt = `Extract the top 10 most important skills from this job description. Return ONLY a comma-separated list of skills.
 
 Job Description:
@@ -744,6 +746,7 @@ ${jobDescription}`
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
     const response = await this.callAI({
+      tier: await this.tierFor(userId),
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.3,
@@ -753,7 +756,7 @@ ${jobDescription}`
     return response.split(',').map((s: string) => s.trim()).filter(Boolean)
   }
 
-  async analyzeJobMatch(jobDescription: string, userSkills: string[]): Promise<{
+  async analyzeJobMatch(jobDescription: string, userSkills: string[], userId?: string): Promise<{
     matchScore: number
     skillGaps: string[]
     missingSkills: string[]
@@ -775,6 +778,7 @@ RECOMMENDATION: [1-2 sentence recommendation]`
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
     const response = await this.callAI({
+      tier: await this.tierFor(userId),
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
@@ -903,6 +907,7 @@ Generate the CV now:`
     const allowedContext = [source.text, company, jobTitle, jobDescription].join(' ')
     const requireEducation = (userProfile.education || []).length > 0
     const result = await this.callAIDetailed({
+      tier: await this.tierFor(userId),
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
@@ -1019,6 +1024,7 @@ Output ONLY the evaluation in the format above. Do not output your reasoning or 
 
     // A reply without readable scores is rejected (next model) instead of silently becoming "50 / Review needed.".
     const response = await this.callAI({
+      tier: await this.tierFor(userId),
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
