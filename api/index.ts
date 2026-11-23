@@ -24,8 +24,8 @@ import { llmKeysRoutes } from './routes/llm-keys.js'
 import { extensionRoutes } from './routes/extension.js'
 import { authMiddleware } from './middleware/auth.js'
 import { sessionKeyProblem } from '../services/session-crypto.js'
-import { deployConfigWarnings, isOriginAllowed, parseAllowedOrigins } from '../services/deploy-config.js'
-import { isExtensionOriginAllowed } from '../services/extension-token.js'
+import { deployConfigWarnings, parseAllowedOrigins } from '../services/deploy-config.js'
+import { buildCorsOptions } from '../services/cors-options.js'
 
 // Produksi (Railway, Docker): log JSON polos ke stdout supaya mudah dibaca penampung log.
 // Lokal: pino-pretty berwarna.
@@ -53,12 +53,7 @@ export const supabase = createClient(
 // FRONTEND_URL berisi satu atau beberapa origin dipisah koma (mis. URL Vercel dan localhost untuk uji).
 const allowedOrigins = parseAllowedOrigins(process.env.FRONTEND_URL)
 
-await app.register(cors, {
-  origin: (origin, cb) => {
-    cb(null, isOriginAllowed(origin, allowedOrigins) || isExtensionOriginAllowed(origin))
-  },
-  credentials: true,
-})
+await app.register(cors, buildCorsOptions(allowedOrigins))
 
 await app.register(swagger, {
   openapi: {
