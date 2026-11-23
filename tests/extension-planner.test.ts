@@ -78,11 +78,11 @@ test('sanitizePendingQuestions: kunci dihitung ulang, rahasia dan bentuk rusak d
   assert.equal(sanitizePendingQuestions(many).length, 20)
   assert.deepEqual(sanitizePendingQuestions('bukan array'), [])
   assert.deepEqual(sanitizePendingQuestions([{ key: '__proto__', label: 'Normal label', kind: 'select', options: [] }]), [
-    { key: 'normal label', label: 'Normal label', kind: 'select' },
+    { key: 'normal label', label: 'Normal label', kind: 'select', required: true },
   ])
   assert.deepEqual(sanitizePendingQuestions([{ label: 'Enter your PIN', kind: 'text' }, { label: 'Kata sandi', kind: 'text' }]), [])
   assert.deepEqual(sanitizePendingQuestions([{ label: 'Text with options', kind: 'text', options: ['a'] }]), [
-    { key: 'text with options', label: 'Text with options', kind: 'text' },
+    { key: 'text with options', label: 'Text with options', kind: 'text', required: true },
   ])
 })
 

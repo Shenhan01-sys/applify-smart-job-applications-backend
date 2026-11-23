@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import { classifyJobChannel, isLinkedInUrl, sanitizeHttpUrl } from './apply-channel.js'
-import { cleanLine, SECRET_LABEL_RE, sanitizePendingQuestions } from './extension-planner.js'
+import { cleanLine, isSecretLabel, sanitizePendingQuestions, sanitizeSecretSkips } from './extension-planner.js'
+import { EXT_FILE_KINDS, type ExtFileKind } from './extension-file-targets.js'
 import { pageMatchesJob } from './page-host.js'
 import type { GuardDb } from './queue-guard.js'
 import { DAILY_APPLY_LIMIT, COUNTED_ACTIONS, startOfUtcDay } from './rate-limit.service.js'
@@ -106,7 +107,7 @@ export interface ExtensionApprovalSummary {
   expiresAt: string
 }
 
-const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v)
+export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v)
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /** `runId` kiriman klien: kosong = server membuatkan; bentuk tidak sah = 400 (dipakai di path penyimpanan). */
@@ -532,7 +533,7 @@ export function sanitizeFilledFields(raw: unknown): FilledField[] {
     const kind = (typeof item.kind === 'string' && FILLED_KINDS.has(item.kind) ? item.kind : 'text') as FilledFieldKind
     const entry: FilledField = { label, kind }
     const rawValue = typeof item.value === 'number' && Number.isFinite(item.value) ? String(item.value) : item.value
-    if (kind !== 'check' && typeof rawValue === 'string' && !WORKER_SECRET_LABEL.test(label) && !SECRET_LABEL_RE.test(label)) {
+    if (kind !== 'check' && typeof rawValue === 'string' && !WORKER_SECRET_LABEL.test(label) && !isSecretLabel(label)) {
       const v = cleanLine(kind === 'upload' ? fileNameOnly(rawValue) : rawValue, 4000)
       if (v) entry.value = v.length > MAX_FILLED_VALUE ? `${v.slice(0, MAX_FILLED_VALUE - 1).trimEnd()}…` : v
     }
@@ -547,7 +548,22 @@ function fieldsByKind(fields: FilledField[]): Record<FilledFieldKind, number> {
   return counts
 }
 
-/** `remainingRequired`: daftar label (bentuk worker). Angka (kiriman lama) diganti label pertanyaan yang diketahui. */
+/** `filesAttached` kiriman ekstensi -> `details.documents_attached`: hanya empat jenis dikenal, nilainya boolean (nama berkas tidak disimpan). */
+export function sanitizeFilesAttached(raw: unknown): Record<ExtFileKind, boolean> | null {
+  const out: Record<ExtFileKind, boolean> = { resume: false, cover_letter: false, transcript: false, portfolio: false }
+  if (Array.isArray(raw)) {
+    for (const k of raw) if (typeof k === 'string' && (EXT_FILE_KINDS as readonly string[]).includes(k)) out[k as ExtFileKind] = true
+    return out
+  }
+  if (!isRecord(raw)) return null
+  for (const kind of EXT_FILE_KINDS) {
+    const v = raw[kind]
+    out[kind] = v === true || (typeof v === 'string' && v.trim() !== '')
+  }
+  return out
+}
+
+/** `remainingRequired`: daftar label (bentuk worker). Angka (kiriman lama) diganti label pertanyaan WAJIB yang diketahui. */
 function sanitizeRemainingRequired(raw: unknown, questionLabels: string[]): string[] {
   const labels: string[] = []
   const push = (v: unknown) => {
@@ -619,6 +635,8 @@ export interface ReportRunInput {
   reason?: string | null
   filledCount?: number
   filledFields?: unknown
+  /** Berkas yang terpasang: `{ resume, cover_letter, transcript, portfolio }` (boolean), disimpan ke `details.documents_attached`. */
+  filesAttached?: unknown
   /** Daftar label kolom wajib yang belum terisi (bentuk worker). Angka diterima sebagai kiriman lama. */
   remainingRequired?: number | unknown[]
   questions?: unknown[]
@@ -720,9 +738,15 @@ export async function reportExtensionRun(
 
   const filledFields = sanitizeFilledFields(input.filledFields)
   const questions = sent ? [] : sanitizePendingQuestions(input.questions)
+  // Kontrol rahasia dicatat terpisah (label saja): `details.questions` hanya berisi yang bisa dijawab di Applify.
+  const secretSkipped = sent ? [] : sanitizeSecretSkips(input.questions)
+  const documentsAttached = sanitizeFilesAttached(input.filesAttached)
   const rawCount = Math.max(0, Math.floor(Number(input.filledCount ?? 0) || 0))
   const filledCount = Math.max(rawCount, filledFields.length)
-  const remaining = sanitizeRemainingRequired(input.remainingRequired, questions.map((q) => q.label))
+  const remaining = sanitizeRemainingRequired(
+    input.remainingRequired,
+    [...questions, ...secretSkipped].filter((q) => q.required).map((q) => q.label)
+  )
   const targetAppStatus: ApplicationStatus | null =
     logStatus === 'success' ? 'submitted' : logStatus === 'ready' || logStatus === 'submit_unverified' || filledCount > 0 ? 'ready' : null
   const finalUrlClean = (() => {
@@ -741,6 +765,8 @@ export async function reportExtensionRun(
     filled_fields: filledFields,
     remaining_required: remaining,
     ...(questions.length > 0 ? { questions, questions_pending: questions.length } : {}),
+    ...(secretSkipped.length > 0 ? { secret_skipped: secretSkipped.map((q) => ({ key: q.key, label: q.label, required: q.required })) } : {}),
+    ...(documentsAttached ? { documents_attached: documentsAttached } : {}),
     submit_clicked: sent || outcome === 'validation_error',
     submit_check: buildSubmitCheck(input.submitCheck, outcome, pageUrl),
     screenshots: { filled: filledRef, after: afterRef },

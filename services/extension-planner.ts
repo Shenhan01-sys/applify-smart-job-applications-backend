@@ -17,6 +17,7 @@ import { deriveExperienceYears } from './experience-years.js'
 import { ACHIEVEMENT_GROUNDING_RULE, ACHIEVEMENT_HEADING, buildAchievementLines } from './profile-context.js'
 import type { GuardDb } from './queue-guard.js'
 import { resumeUrlForUser } from './resume-file.service.js'
+import { planFileTargets, type ExtFileTarget } from './extension-file-targets.js'
 
 /**
  * Perencana pengisian formulir untuk Ekstensi Browser Applify (`POST /api/extension/plan-form`).
@@ -46,6 +47,8 @@ export interface SanitizedExtControl {
   label: string
   groupLabel: string
   name: string
+  /** Atribut `id` elemen (opsional, hanya petunjuk untuk mencari target berkas). */
+  elementId?: string
   placeholder: string
   inputType: string
   required: boolean
@@ -65,18 +68,29 @@ export interface ExtFillAction {
 export interface ExtPendingQuestion {
   key: string
   label: string
-  kind: 'text' | 'textarea' | 'select' | 'check' | 'radio'
+  /** `secret_skip`: kontrol rahasia (kata sandi, PIN, OTP, nomor kartu, dan sejenisnya). Tidak diisi dan tidak ditanyakan, pengguna mengisinya sendiri. */
+  kind: 'text' | 'textarea' | 'select' | 'check' | 'radio' | 'secret_skip'
+  /** `true` bila kolom di formulir wajib; `false` untuk kolom opsional yang belum terisi. */
+  required: boolean
   options?: string[]
 }
+
+export type { ExtFileTarget }
 
 export interface PlanExtensionResult {
   blocked: ExtBlockerReason | null
   note: string | null
   actions: ExtFillAction[]
+  /** Kontrol berkas pertama (kontrak lama). Untuk beberapa berkas pakai `fileTargets`. */
   fileControlId: string | null
+  /** Kontrak lama: URL CV bertanda tangan. Ekstensi baru mengambil berkas lewat `GET /api/extension/documents/...`. */
   resumeUrl: string | null
+  /** Kontrol berkas -> jenis berkas, satu kontrol hanya satu jenis. */
+  fileTargets: ExtFileTarget[]
   submitControlId: string | null
   pendingQuestions: ExtPendingQuestion[]
+  /** `ai_failed` bila pemanggilan AI gagal (galat generik, tanpa teks galat penyedia). Isian faktual dan tersimpan tetap ada. */
+  aiError: 'ai_failed' | null
   model: string | null
 }
 
@@ -141,6 +155,7 @@ export function sanitizeExtensionControls(rawControls: unknown): SanitizedExtCon
       label: cleanLine(rec.label, 300),
       groupLabel: cleanLine(rec.groupLabel, 300),
       name: cleanLine(rec.name, 160),
+      elementId: cleanLine(rec.elementId, 160),
       placeholder: cleanLine(rec.placeholder, 160),
       inputType,
       required: Boolean(rec.required),
@@ -234,11 +249,65 @@ export function detectExtensionBlocker(args: {
   return null
 }
 
-export const SECRET_LABEL_RE = /(password|kata sandi|passcode|pin|otp|cvv|ktp|nik\b|npwp|ssn|passport|credit card|bank account)/i
+/**
+ * Kata kunci rahasia dengan batas kata. Batasnya dihitung dari HURUF: kata kunci tidak boleh menempel pada huruf
+ * lain, tetapi boleh menempel pada angka, garis bawah, atau tanda baca (`password1`, `user_pin`, `PIN:`).
+ * Jadi "Shipping address", "opinion", "Pinterest", dan "Spinner" lolos, sedangkan "Password", "Enter your PIN",
+ * "CVV", dan "card_number" tertangkap. Untuk camelCase (`userPin`) pakai `isSecretLabel`.
+ */
+const SECRET_KEYWORDS = [
+  'pass(?:word|code|phrase)s?',
+  'kata\\s*sandi',
+  'sandi',
+  'pin',
+  'otp',
+  'one[\\s-]*time\\s+(?:pass(?:word|code)|code|pin)',
+  'security\\s+code',
+  'verification\\s+code',
+  'cv[vc]2?',
+  'ssn',
+  'social\\s+security',
+  'card\\s+number',
+  'credit\\s+card',
+  'debit\\s+card',
+  'kartu\\s+kredit',
+  'iban',
+  'routing\\s+number',
+  'bank\\s+account',
+  'account\\s+number',
+  'nomor\\s+rekening',
+  'ktp',
+  'nik',
+  'npwp',
+  'passport',
+  'national\\s+id',
+  'tax\\s+id',
+]
+/**
+ * Kata yang tidak muncul di dalam kata lain: boleh menempel di huruf mana pun, supaya atribut seperti `newpassword`,
+ * `userpasscode`, atau `confirmcvv` (huruf kecil menyambung) tetap tertangkap.
+ */
+const SECRET_SUBSTRINGS = 'password|passcode|passphrase|cvv'
+export const SECRET_LABEL_RE = new RegExp(`${SECRET_SUBSTRINGS}|(?<![a-z])(?:${SECRET_KEYWORDS.join('|')})(?![a-z])`, 'i')
+
+/**
+ * Nama atribut jadi kata terpisah sebelum pemeriksaan: camelCase (`userPin` -> `user Pin`, `OTPCode` -> `OTP Code`)
+ * dan pemisah `_ - . [ ]` (`card_number` -> `card number`, `job_application[cvv]` -> `job application cvv`).
+ */
+const splitWords = (text: string): string =>
+  text
+    .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/[_\-.[\]]+/g, ' ')
+
+/** Apakah label, nama, atau placeholder kontrol menyebut data rahasia. Satu-satunya pemeriksaan rahasia untuk planner dan pelapor. */
+export function isSecretLabel(text: unknown): boolean {
+  const raw = String(text ?? '')
+  return SECRET_LABEL_RE.test(raw) || SECRET_LABEL_RE.test(splitWords(raw))
+}
 
 function isSecretControl(c: SanitizedExtControl): boolean {
-  const hay = `${c.groupLabel} ${c.label} ${c.name} ${c.placeholder}`
-  return SECRET_LABEL_RE.test(hay)
+  return isSecretLabel(`${c.groupLabel} ${c.label} ${c.name} ${c.elementId ?? ''} ${c.placeholder}`)
 }
 
 export { workAuthorizationFromUsCitizenship }
@@ -371,19 +440,27 @@ function directFactMatch(control: SanitizedExtControl, tokens: Record<string, st
   return null
 }
 
-function toPendingKind(kind: SanitizedExtControl['kind']): ExtPendingQuestion['kind'] {
+type AnswerableKind = Exclude<ExtPendingQuestion['kind'], 'secret_skip'>
+
+function toPendingKind(kind: SanitizedExtControl['kind']): AnswerableKind {
   if (kind === 'checkbox') return 'check'
   if (kind === 'textarea' || kind === 'select' || kind === 'radio') return kind
   return 'text'
 }
 
 export const EXT_MAX_PENDING_QUESTIONS = 20
-const PENDING_KINDS = new Set<ExtPendingQuestion['kind']>(['text', 'textarea', 'select', 'check', 'radio'])
+const PENDING_KINDS = new Set<AnswerableKind>(['text', 'textarea', 'select', 'check', 'radio'])
+
+/** `required` kiriman klien; tanpa nilai boolean dianggap wajib (klien lama hanya melaporkan kolom wajib). */
+const requiredOf = (rec: Record<string, unknown>): boolean => (typeof rec.required === 'boolean' ? rec.required : true)
 
 /**
  * Pertanyaan yang dilaporkan ekstensi (`details.questions`) divalidasi seketat keluaran perencana:
  * kunci selalu dihitung ulang dari label dengan `questionKey` (kunci kiriman klien tidak dipercaya),
- * label berisi rahasia dibuang, jenis tak dikenal menjadi teks, opsi hanya untuk select/radio, paling banyak 20.
+ * jenis tak dikenal menjadi teks, opsi hanya untuk select/radio, `required` selalu boolean, paling banyak 20.
+ *
+ * Hanya pertanyaan yang BISA DIJAWAB lewat Applify. Kontrol rahasia (`kind: 'secret_skip'` atau label rahasia)
+ * dibuang dari sini dan ditangani `sanitizeSecretSkips`, supaya kartu pertanyaan tidak pernah meminta kata sandi.
  */
 export function sanitizePendingQuestions(raw: unknown): ExtPendingQuestion[] {
   if (!Array.isArray(raw)) return []
@@ -394,14 +471,12 @@ export function sanitizePendingQuestions(raw: unknown): ExtPendingQuestion[] {
     if (!item || typeof item !== 'object') continue
     const rec = item as Record<string, unknown>
     const label = cleanLine(rec.label, 300)
-    if (!label || SECRET_LABEL_RE.test(label)) continue
+    if (!label || rec.kind === 'secret_skip' || isSecretLabel(label)) continue
     const key = questionKey(label)
     if (!key || key === '__proto__' || seen.has(key)) continue
     const rawKind = rec.kind === 'checkbox' ? 'check' : rec.kind
-    const kind: ExtPendingQuestion['kind'] =
-      typeof rawKind === 'string' && PENDING_KINDS.has(rawKind as ExtPendingQuestion['kind'])
-        ? (rawKind as ExtPendingQuestion['kind'])
-        : 'text'
+    const kind: AnswerableKind =
+      typeof rawKind === 'string' && PENDING_KINDS.has(rawKind as AnswerableKind) ? (rawKind as AnswerableKind) : 'text'
     const options: string[] = []
     if (kind === 'select' || kind === 'radio') {
       for (const opt of Array.isArray(rec.options) ? rec.options : []) {
@@ -411,7 +486,30 @@ export function sanitizePendingQuestions(raw: unknown): ExtPendingQuestion[] {
       }
     }
     seen.add(key)
-    out.push(options.length > 0 ? { key, label, kind, options } : { key, label, kind })
+    const required = requiredOf(rec)
+    out.push(options.length > 0 ? { key, label, kind, required, options } : { key, label, kind, required })
+  }
+  return out
+}
+
+/**
+ * Kontrol rahasia yang dilaporkan ekstensi: kiriman `kind: 'secret_skip'` atau label yang menyebut data rahasia.
+ * Hanya kunci, label, dan `required` yang disimpan (tanpa opsi, tanpa nilai). Paling banyak 20.
+ */
+export function sanitizeSecretSkips(raw: unknown): ExtPendingQuestion[] {
+  if (!Array.isArray(raw)) return []
+  const out: ExtPendingQuestion[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (out.length >= EXT_MAX_PENDING_QUESTIONS) break
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const label = cleanLine(rec.label, 300)
+    if (!label || !(rec.kind === 'secret_skip' || isSecretLabel(label))) continue
+    const key = questionKey(label)
+    if (!key || key === '__proto__' || seen.has(key)) continue
+    seen.add(key)
+    out.push({ key, label, kind: 'secret_skip', required: requiredOf(rec) })
   }
   return out
 }
@@ -482,8 +580,10 @@ export class ExtensionPlanner {
         actions: [],
         fileControlId: null,
         resumeUrl: null,
+        fileTargets: [],
         submitControlId: null,
         pendingQuestions: [],
+        aiError: null,
         model: null,
       }
     }
@@ -576,6 +676,7 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
     // 3. Kontrol tersisa -> serahkan ke AI pipeline dengan data faktual & prompt framing anti-injection.
     const remainingForAi = fillable.filter((c) => !plannedControlIds.has(c.controlId))
     let usedModel: string | null = null
+    let aiError: PlanExtensionResult['aiError'] = null
 
     if (remainingForAi.length > 0 && settings?.use_ai !== false) {
       const serializedControls = remainingForAi.map((c) => ({
@@ -662,28 +763,46 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
             })
             plannedControlIds.add(id)
           }
+        } else {
+          aiError = 'ai_failed'
         }
       } catch {
-        // Kegagalan AI tidak menggagalkan aksi deterministik/saved yang sudah siap.
+        // Kegagalan AI tidak menggagalkan aksi deterministik/saved yang sudah siap. Panel hanya diberi tanda generik.
+        aiError = 'ai_failed'
       }
     }
 
-    // 4. Kumpulkan pertanyaan wajib yang masih kosong agar tampil di UI ekstensi & tersimpan bila perlu.
-    const pendingQuestions: ExtPendingQuestion[] = []
+    // 4. Pertanyaan untuk panel ekstensi: kolom yang belum terisi, wajib lebih dulu, paling banyak 20.
+    //    - Kontrol rahasia tidak pernah diisi dan tidak dikirim ke AI; dilaporkan `secret_skip` (pengguna mengisi sendiri).
+    //    - Kolom opsional ikut bila relevan: bisa dijawab (bukan kotak centang), berlabel, dan belum berisi nilai.
+    const questionCandidates: ExtPendingQuestion[] = []
     const seenKeys = new Set<string>()
-    for (const c of fillable) {
-      if (!c.required || plannedControlIds.has(c.controlId)) continue
+    for (const c of controls) {
+      if (c.kind === 'file' || c.kind === 'submit') continue
+      const secret = isSecretControl(c)
+      if (!secret && plannedControlIds.has(c.controlId)) continue
+      if (!c.required && (c.currentValue || (!secret && c.kind === 'checkbox'))) continue
+      if (secret && c.currentValue) continue
       const label = controlQuestionLabel(c)
       const k = questionKey(label)
       if (!k || seenKeys.has(k)) continue
       seenKeys.add(k)
-      pendingQuestions.push({
-        key: k,
-        label,
-        kind: toPendingKind(c.kind),
-        ...(c.options.length ? { options: c.options } : {}),
-      })
+      questionCandidates.push(
+        secret
+          ? { key: k, label, kind: 'secret_skip', required: c.required }
+          : {
+              key: k,
+              label,
+              kind: toPendingKind(c.kind),
+              required: c.required,
+              ...(c.options.length ? { options: c.options } : {}),
+            }
+      )
     }
+    const pendingQuestions = [...questionCandidates.filter((q) => q.required), ...questionCandidates.filter((q) => !q.required)].slice(
+      0,
+      EXT_MAX_PENDING_QUESTIONS
+    )
 
     return {
       blocked: null,
@@ -691,8 +810,10 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       actions,
       fileControlId: fileControl?.controlId ?? null,
       resumeUrl,
+      fileTargets: planFileTargets(controls),
       submitControlId: submitControl?.controlId ?? null,
       pendingQuestions,
+      aiError,
       model: usedModel,
     }
   }

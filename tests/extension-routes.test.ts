@@ -137,8 +137,13 @@ test('POST /api/extension/plan-form: menolak LinkedIn, memblokir ai_prohibited t
   assert.deepEqual(planned.actions.find((a: any) => a.controlId === 'c-name'), { controlId: 'c-name', kind: 'text', value: 'Budi Santoso', source: 'fact' })
   assert.deepEqual(planned.actions.find((a: any) => a.controlId === 'c-reloc'), { controlId: 'c-reloc', kind: 'radio', value: 'Yes', source: 'saved' })
   assert.deepEqual(planned.actions.find((a: any) => a.controlId === 'c-city'), { controlId: 'c-city', kind: 'text', value: 'Jakarta Selatan', source: 'ai' })
-  assert.equal(planned.pendingQuestions.length, 1)
-  assert.equal(planned.pendingQuestions[0].key, 'describe a distributed system project')
+  // Kolom wajib yang tersisa lebih dulu, lalu kontrol rahasia opsional sebagai `secret_skip` (tidak diisi, tidak ke AI).
+  assert.deepEqual(planned.pendingQuestions, [
+    { key: 'describe a distributed system project', label: 'Describe a distributed system project', kind: 'textarea', required: true },
+    { key: 'account otp code', label: 'Account OTP Code', kind: 'secret_skip', required: false },
+  ])
+  assert.deepEqual(planned.fileTargets, [])
+  assert.equal(planned.aiError, null)
 })
 
 test('authorize-submit & report-run: 1 approval = 1 submission, validasi PNG magic bytes, upload ke folder userId, majukan ai_applications', async () => {

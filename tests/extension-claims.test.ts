@@ -552,13 +552,15 @@ test('report-run incomplete: questions divalidasi seperti keluaran perencana, re
   assert.equal(d.reason, 'no_fields_filled')
   assert.equal(d.application_status, 'unchanged')
   assert.deepEqual(d.questions, [
-    { key: 'why do you want to join', label: 'Why do you want to join? *', kind: 'textarea' },
-    { key: 'pick a team', label: 'Pick a team', kind: 'select', options: ['A', 'B', 'C'.repeat(120)] },
-    { key: 'remote', label: 'Remote?', kind: 'radio', options: ['Yes', 'No'] },
-    { key: 'unknown kind', label: 'Unknown kind', kind: 'text' },
-    { key: 'agree to terms', label: 'Agree to terms', kind: 'check' },
+    { key: 'why do you want to join', label: 'Why do you want to join? *', kind: 'textarea', required: true },
+    { key: 'pick a team', label: 'Pick a team', kind: 'select', required: true, options: ['A', 'B', 'C'.repeat(120)] },
+    { key: 'remote', label: 'Remote?', kind: 'radio', required: true, options: ['Yes', 'No'] },
+    { key: 'unknown kind', label: 'Unknown kind', kind: 'text', required: true },
+    { key: 'agree to terms', label: 'Agree to terms', kind: 'check', required: true },
   ])
   assert.equal(d.questions_pending, 5)
+  // Kolom rahasia tidak masuk daftar yang bisa dijawab; hanya kunci dan label yang dicatat terpisah.
+  assert.deepEqual(d.secret_skipped, [{ key: 'account password', label: 'Account password', required: true }])
   // Angka lama (2) diganti dua label pertanyaan pertama
   assert.deepEqual(d.remaining_required, ['Why do you want to join? *', 'Pick a team'])
   assert.equal(d.fields_filled, 0)
