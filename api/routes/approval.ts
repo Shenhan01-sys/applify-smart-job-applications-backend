@@ -7,6 +7,9 @@ import { regenerateApprovalCoverLetter } from '../../services/approval-regenerat
 import { resumeUrlForUser } from '../../services/resume-file.service.js'
 import { rerunApproval } from '../../services/rerun-guard.js'
 
+/** Masa berlaku permintaan persetujuan sejak dibuat: 24 jam. */
+export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000
+
 interface ApprovalRequest {
   id: string
   user_id: string
@@ -103,8 +106,9 @@ export async function approvalRoutes(
       cover_letter = (await coverLetterFromApplication(supabase, userId, application_id)) ?? cover_letter
     }
 
-    // Default expiry: 1 hour from now
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    // Masa berlaku persetujuan: 24 jam (APPROVAL_TTL_MS). Satu jam terlalu pendek: pengguna sering baru membuka
+    // halaman Persetujuan sesudahnya (uji Binance 23 November 2026, persetujuan kedaluwarsa sebelum diklik).
+    const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS).toISOString()
 
     // Jawaban formulir beserta skor keyakinan datang dari jalur pengisian yang nyata (FormAutofillService),
     // dihitung di server dari Pengaturan Otomasi pengguna. `answers` kiriman klien hanya dipakai bila ada
