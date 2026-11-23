@@ -1,7 +1,11 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { notificationsService } from '../../services/notifications.service.js'
 import { notifyApplicationStatus } from '../../services/application-status.service.js'
-import { kapsoWhatsAppService, verifyKapsoWebhookSignature } from '../../services/kapso-whatsapp.service.js'
+import {
+  extractInboundWebhookPhones,
+  kapsoWhatsAppService,
+  verifyKapsoWebhookRequest,
+} from '../../services/kapso-whatsapp.service.js'
 import {
   getUserNotificationSettings,
   notificationDispatcher,
@@ -191,9 +195,10 @@ export async function notificationRoutes(
 }
 
 /**
- * Webhook publik Kapso WhatsApp (didaftarkan di luar authMiddleware JWT Supabase, diproteksi oleh HMAC
- * `x-hub-signature-256` menggunakan `KAPSO_WEBHOOK_SECRET`). Memperbarui `whatsapp_last_inbound_at` agar
- * pesan teks bebas dalam jendela 24 jam Meta Cloud API tetap terbuka.
+ * Webhook publik Kapso WhatsApp (didaftarkan di luar authMiddleware JWT Supabase).
+ * Memverifikasi HMAC-SHA256 terhadap raw body bytes melalui header `X-Webhook-Signature` (Kapso native)
+ * atau `X-Hub-Signature-256` (Meta-forwarded) memakai `KAPSO_WEBHOOK_SECRET`, lalu memperbarui
+ * `whatsapp_last_inbound_at` hanya untuk pesan inbound (`whatsapp.message.received`).
  */
 export async function whatsappWebhookRoutes(app: FastifyInstance, opts: NotificationRoutesOptions = {}) {
   const getDb = async (): Promise<GuardDb> => opts.db ?? ((await import('../index.js')).supabase as unknown as GuardDb)
@@ -201,13 +206,12 @@ export async function whatsappWebhookRoutes(app: FastifyInstance, opts: Notifica
   const now = opts.now ?? (() => new Date())
 
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) => {
-    try {
-      const raw = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''), 'utf8')
-      const parsed = raw.length ? JSON.parse(raw.toString('utf8')) : {}
-      done(null, { parsed, raw })
-    } catch (err: any) {
-      done(err)
-    }
+    const raw = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''), 'utf8')
+    done(null, { raw })
+  })
+  app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, body, done) => {
+    const raw = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''), 'utf8')
+    done(null, { raw })
   })
 
   app.post('/whatsapp/webhook', async (request, reply) => {
@@ -215,29 +219,21 @@ export async function whatsappWebhookRoutes(app: FastifyInstance, opts: Notifica
     if (!secret) {
       return reply.status(503).send({ error: 'KAPSO_WEBHOOK_SECRET not configured' })
     }
-    const box = (request.body ?? {}) as { parsed?: any; raw?: Buffer }
-    const rawBuf = box.raw ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8')
-    const sig = request.headers['x-hub-signature-256']
-    if (!verifyKapsoWebhookSignature(rawBuf, sig, secret)) {
+    const rawBuf = (request.body as { raw?: Buffer } | undefined)?.raw
+    if (!Buffer.isBuffer(rawBuf) || !verifyKapsoWebhookRequest(rawBuf, request.headers as Record<string, unknown>, secret)) {
       return reply.status(401).send({ error: 'Invalid webhook signature' })
     }
 
-    const payload = box.parsed ?? request.body
-    const phones = new Set<string>()
-    const collect = (node: any) => {
-      if (!node || typeof node !== 'object') return
-      if (typeof node.from === 'string') phones.add(node.from)
-      if (Array.isArray(node.messages)) {
-        for (const m of node.messages) if (typeof m?.from === 'string') phones.add(m.from)
-      }
-      if (Array.isArray(node.entry)) {
-        for (const e of node.entry) {
-          for (const ch of Array.isArray(e?.changes) ? e.changes : []) collect(ch?.value)
-        }
+    let payload: unknown = {}
+    if (rawBuf.length > 0) {
+      try {
+        payload = JSON.parse(rawBuf.toString('utf8'))
+      } catch {
+        return reply.status(400).send({ error: 'Invalid JSON payload' })
       }
     }
-    collect(payload)
 
+    const phones = extractInboundWebhookPhones(payload, request.headers['x-webhook-event'])
     const db = await getDb()
     let updated = 0
     for (const phone of phones) {
