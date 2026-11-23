@@ -138,6 +138,8 @@ export async function rerunApproval(
     // Consent that lapsed between the checks above and the enqueue is a client-side condition (403).
     const client = clientErrorReply(err)
     if (client) return { status: client.statusCode, body: client.body }
-    return { status: 500, body: { error: `Failed to queue rerun: ${err?.message ?? 'unknown error'}` } }
+    // The database or queue message goes to the server log only, never to the client.
+    console.error('[rerun] failed to queue rerun:', String(err?.message ?? err))
+    return { status: 500, body: { error: 'Failed to queue rerun', code: 'rerun_failed' } }
   }
 }

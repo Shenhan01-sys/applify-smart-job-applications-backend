@@ -243,7 +243,7 @@ test('rerun: baris antrean persetujuan lain dan user lain tidak dihitung ke bata
   assert.equal((await run(db)).status, 200)
 })
 
-test('rerun: kesalahan database dijawab 500 dengan pesan, tidak ada baris antrean', async () => {
+test('rerun: kesalahan database dijawab 500 generik tanpa teks galat, tidak ada baris antrean', async () => {
   for (const [table, op] of [
     ['approval_requests', 'select'],
     ['application_logs', 'select'],
@@ -254,7 +254,8 @@ test('rerun: kesalahan database dijawab 500 dengan pesan, tidak ada baris antrea
     db.failOn(table, op, 'db mati')
     const res = await run(db)
     assert.equal(res.status, 500, `${table}.${op}`)
-    assert.match(String(res.body.error), /db mati/)
+    assert.doesNotMatch(JSON.stringify(res.body), /db mati/) // teks galat database tidak sampai ke klien
+    assert.equal((res.body as any).code, 'rerun_failed')
     assert.equal(db.rows('automation_queue').length, 0)
   }
 })
@@ -271,7 +272,7 @@ test('rerun: persetujuan yang lapuk di antara pengecekan dan antrean dijawab 403
   assert.equal((res.body as any).code, 'approval_required')
 })
 
-test('rerun: kegagalan antrean lain dijawab 500 dengan pesan', async () => {
+test('rerun: kegagalan antrean lain dijawab 500 generik tanpa teks galat', async () => {
   const db = new FakeDb({ approval_requests: [approvalRow()] })
   const queue = {
     addApprovedApplyJob: async () => {
@@ -280,7 +281,8 @@ test('rerun: kegagalan antrean lain dijawab 500 dengan pesan', async () => {
   }
   const res = await rerunApproval(db, queue, 'u1', 'a1', NOW)
   assert.equal(res.status, 500)
-  assert.match(String(res.body.error), /antrean penuh/)
+  assert.doesNotMatch(JSON.stringify(res.body), /antrean penuh/)
+  assert.equal((res.body as any).code, 'rerun_failed')
 })
 
 test('rerun dua kali berturut-turut: yang kedua ditolak karena job pertama masih pending', async () => {

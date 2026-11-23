@@ -1,4 +1,4 @@
-import { FastifyInstance, FastifyPluginOptions } from 'fastify'
+import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify'
 import { queueService } from '../../services/queue.service.js'
 import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
@@ -9,6 +9,8 @@ import { rerunApproval } from '../../services/rerun-guard.js'
 import { markApprovalSent } from '../../services/manual-submit-guard.js'
 import { notifyApplicationStatus } from '../../services/application-status.service.js'
 import { notificationsService } from '../../services/notifications.service.js'
+import { afterReplyFor, runAfterReplyTasks } from '../../services/after-reply.js'
+import { isUuid } from '../../services/uuid.js'
 import { ClaimRecoveryError, getClaimStatuses, resolveLockedClaim, type ClaimResolution } from '../../services/approval-claim-recovery.js'
 
 /** Masa berlaku permintaan persetujuan sejak dibuat: 24 jam. */
@@ -37,6 +39,15 @@ interface ApprovalRequest {
   rejection_reason?: string
 }
 
+/**
+ * Jawaban 500 untuk semua rute persetujuan: teks galat database tidak pernah sampai ke klien (bisa memuat nama
+ * kolom, tabel, atau nilai). Detailnya hanya masuk log server.
+ */
+function failServer(request: FastifyRequest, reply: FastifyReply, err: unknown, code = 'internal_error') {
+  request.log.error({ err: String((err as any)?.message ?? err), dbCode: (err as any)?.code, route: request.routeOptions?.url }, 'approval route failed')
+  return reply.status(500).send({ error: 'Terjadi kesalahan pada server', code })
+}
+
 export interface ApprovalRoutesOptions extends FastifyPluginOptions {
   db?: any
   guard?: Pick<AiGuardService, 'checkActionRateLimit'>
@@ -49,6 +60,18 @@ export async function approvalRoutes(
   // Dimuat di dalam handler agar import file ini di tes offline tidak memicu api/index.ts.
   const getDb = async (): Promise<any> => opts.db ?? (await import('../index.js')).supabase
   const guard = opts.guard ?? aiGuardService
+
+  // Semua rute `/:id/*` menerima id persetujuan. Id yang bukan UUID ditolak 400 sebelum menyentuh Postgres (kolom
+  // bertipe uuid melempar galat sintaks, yang dulu menjadi 500 berisi teks galat database). Pengguna tanpa login
+  // dibiarkan lewat ke handler supaya tetap dijawab 401.
+  app.addHook('preHandler', async (request, reply) => {
+    const params = request.params as Record<string, unknown> | undefined
+    if (params && 'id' in params && (request as any).user?.id && !isUuid(params.id)) {
+      return reply.status(400).send({ error: 'ID persetujuan tidak valid', code: 'invalid_id' })
+    }
+    return undefined
+  })
+
   // Get pending approvals for user
   app.get('/pending', async (request, reply) => {
     const userId = (request as any).user?.id
@@ -66,7 +89,7 @@ export async function approvalRoutes(
       .order('created_at', { ascending: false })
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      return failServer(request, reply, error)
     }
 
     return data || []
@@ -167,7 +190,7 @@ export async function approvalRoutes(
       .select()
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      return failServer(request, reply, error)
     }
 
     // TODO: Send Telegram notification if user has Telegram linked
@@ -234,7 +257,7 @@ export async function approvalRoutes(
       .select('id')
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      return failServer(request, reply, error)
     }
     if (!updated || updated.length === 0) {
       return reply.status(409).send({ error: 'Approval request was already processed' })
@@ -260,7 +283,8 @@ export async function approvalRoutes(
         .from('approval_requests')
         .update({ status: 'pending', reviewed_at: null })
         .eq('id', id)
-      return reply.status(500).send({ error: `Failed to queue submission (approval reverted to pending): ${err.message}` })
+      request.log.error({ err: String(err?.message ?? err) }, 'approval queueing failed, approval reverted to pending')
+      return reply.status(500).send({ error: 'Failed to queue submission (approval reverted to pending)', code: 'queue_failed' })
     }
   })
 
@@ -283,7 +307,7 @@ export async function approvalRoutes(
   // because the site is not on the auto-send allowlist). Records a 'success' log row marked manual, which also
   // uses the approval up for the worker, and moves the application to 'submitted'. Nothing is sent anywhere.
   // Expiry is not checked: consent for the agent no longer matters. Rules: manual-submit-guard.ts.
-  app.post('/:id/mark-sent', async (request, reply) => {
+  app.post('/:id/mark-sent', { onResponse: runAfterReplyTasks }, async (request, reply) => {
     const userId = (request as any).user?.id
     if (!userId) {
       return reply.status(401).send({ error: 'Unauthorized' })
@@ -291,9 +315,11 @@ export async function approvalRoutes(
 
     const { id } = request.params as { id: string }
     const supabase = await getDb()
-    const result = await markApprovalSent(supabase as any, userId, id, new Date(), (applicationId) =>
-      notifyApplicationStatus(supabase as any, notificationsService, { userId, applicationId })
-    )
+    // Notifikasi jalan sesudah balasan terkirim (hook onResponse), tidak menahan jawaban ke pengguna.
+    const afterReply = afterReplyFor(request)
+    const result = await markApprovalSent(supabase as any, userId, id, new Date(), async (applicationId) => {
+      afterReply(() => notifyApplicationStatus(supabase as any, notificationsService, { userId, applicationId }))
+    })
     return reply.status(result.status).send(result.body)
   })
 
@@ -331,7 +357,7 @@ export async function approvalRoutes(
       .select()
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      return failServer(request, reply, error)
     }
 
     // Log rejection for preference learning
@@ -374,8 +400,10 @@ export async function approvalRoutes(
         if (error.extra.retryAfterSec) reply.header('Retry-After', String(error.extra.retryAfterSec))
         return reply.status(error.statusCode).send({ error: error.message, code: error.code })
       }
-      // 404 unknown request, 410 expired, 502 AI gave nothing; anything else is a server fault.
+      // 404 unknown request, 410 expired, 502 AI gave nothing: the messages of these errors are fixed texts.
+      // Anything else is a server fault and gets a generic answer (details only in the server log).
       const status = typeof error?.statusCode === 'number' ? error.statusCode : 500
+      if (status >= 500 && status !== 502) return failServer(request, reply, error, 'regenerate_failed')
       return reply.status(status).send({ error: error?.message ?? 'Regenerate failed' })
     }
   })
@@ -392,7 +420,7 @@ export async function approvalRoutes(
       if (error instanceof ClaimRecoveryError) {
         return reply.status(error.statusCode).send({ error: error.message, code: error.code })
       }
-      return reply.status(500).send({ error: error?.message ?? 'Failed to inspect claims' })
+      return failServer(request, reply, error, 'claims_lookup_failed')
     }
   })
 
@@ -408,7 +436,7 @@ export async function approvalRoutes(
       if (error instanceof ClaimRecoveryError) {
         return reply.status(error.statusCode).send({ error: error.message, code: error.code })
       }
-      return reply.status(500).send({ error: error?.message ?? 'Failed to resolve locked claim' })
+      return failServer(request, reply, error, 'claim_resolve_failed')
     }
   })
 
@@ -431,7 +459,7 @@ export async function approvalRoutes(
       .range(Number(offset), Number(offset) + Number(limit) - 1)
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      return failServer(request, reply, error)
     }
 
     return data || []

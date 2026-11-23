@@ -240,6 +240,8 @@ export async function markApprovalSent(
       body: 'alreadyMarked' in verdict && verdict.alreadyMarked ? { success: true, already_marked: true } : { success: true },
     }
   } catch (err: any) {
-    return { status: 500, body: { error: `Failed to mark as sent: ${err?.message ?? 'unknown error'}`, code: 'mark_failed' } }
+    // The database message goes to the server log only, never to the client.
+    console.error('[mark-sent] failed to mark as sent:', String(err?.message ?? err))
+    return { status: 500, body: { error: 'Failed to mark as sent', code: 'mark_failed' } }
   }
 }

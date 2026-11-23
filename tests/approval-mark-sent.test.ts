@@ -386,7 +386,7 @@ test('tandai terkirim: pengumuman yang gagal tidak mengubah jawaban', async () =
   assert.deepEqual(res.body, { success: true })
 })
 
-test('tandai terkirim: kesalahan database dijawab 500 dengan pesan, tidak ada log bila pembacaan gagal', async () => {
+test('tandai terkirim: kesalahan database dijawab 500 generik tanpa teks galat, tidak ada log bila pembacaan gagal', async () => {
   for (const [table, op] of [
     ['approval_requests', 'select'],
     ['application_logs', 'select'],
@@ -397,7 +397,7 @@ test('tandai terkirim: kesalahan database dijawab 500 dengan pesan, tidak ada lo
     db.failOn(table, op, 'db mati')
     const res = await run(db)
     assert.equal(res.status, 500, `${table}.${op}`)
-    assert.match(String(res.body.error), /db mati/)
+    assert.doesNotMatch(JSON.stringify(res.body), /db mati/) // teks galat database tidak sampai ke klien
     assert.equal((res.body as any).code, 'mark_failed')
     assert.equal(db.writes.length, 0, `${table}.${op}`)
   }
@@ -408,7 +408,8 @@ test('tandai terkirim: log gagal ditulis: 500 dan kartu tidak berubah', async ()
   db.failOn('application_logs', 'insert', 'log mati')
   const res = await run(db)
   assert.equal(res.status, 500)
-  assert.match(String(res.body.error), /log mati/)
+  assert.doesNotMatch(JSON.stringify(res.body), /log mati/)
+  assert.equal((res.body as any).code, 'mark_failed')
   assert.equal(db.rows('ai_applications')[0].status, 'ready')
 })
 

@@ -85,7 +85,9 @@ export async function regenerateApprovalCoverLetter(
       userId: args.userId,
     })
   } catch (e: any) {
-    throw new AiFailedError(`AI tidak bisa menulis ulang saat ini: ${String(e?.message ?? e).slice(0, 200)}`)
+    // Teks galat penyedia AI hanya untuk log server; klien menerima pesan tetap.
+    console.warn('[regenerate] AI gagal menulis ulang:', String(e?.message ?? e).slice(0, 200))
+    throw new AiFailedError('AI tidak bisa menulis ulang saat ini. Coba lagi nanti.')
   }
   const coverLetter = cleanLetter(drafted ?? '')
   if (!coverLetter) throw new EmptyDraftError('AI returned an empty cover letter')
