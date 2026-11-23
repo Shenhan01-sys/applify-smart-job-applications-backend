@@ -16,6 +16,7 @@ import {
   authorizeExtensionSubmit,
   ExtensionRunnerError,
   listPendingExtensionApprovals,
+  REPORT_RUN_BODY_LIMIT,
   reportExtensionRun,
   verifyExtensionApproval,
 } from '../../services/extension-runner.js'
@@ -153,6 +154,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
           jobId: typeof body.jobId === 'string' ? body.jobId : '',
           pageUrl: typeof body.pageUrl === 'string' ? body.pageUrl : '',
           missingRequiredCount: Number(body.missingRequiredCount ?? 0),
+          runId: typeof body.runId === 'string' ? body.runId : null,
         },
         new Date(now())
       )
@@ -165,7 +167,9 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
   })
 
   // 5. Laporkan hasil eksekusi ekstensi + unggah bukti PNG privat ke agent-screenshots.
-  app.post('/report-run', async (request, reply) => {
+  //    Batas badan diperbesar hanya di sini: dua PNG base64 melewati 1 MiB bawaan Fastify, dan laporan kirim yang
+  //    ditolak 413 sesudah klik Submit membuat pengguna menekan Kirim lagi (temuan keamanan 3).
+  app.post('/report-run', { bodyLimit: REPORT_RUN_BODY_LIMIT }, async (request, reply) => {
     const userId = requireExtensionUser(request, reply)
     if (!userId) return reply
     const body = (request.body ?? {}) as Record<string, unknown>
@@ -178,10 +182,14 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
           jobId: typeof body.jobId === 'string' ? body.jobId : '',
           pageUrl: typeof body.pageUrl === 'string' ? body.pageUrl : '',
           outcome: body.outcome as any,
+          runId: typeof body.runId === 'string' ? body.runId : null,
           reason: typeof body.reason === 'string' ? body.reason : null,
           filledCount: typeof body.filledCount === 'number' ? body.filledCount : 0,
-          remainingRequired: typeof body.remainingRequired === 'number' ? body.remainingRequired : 0,
+          filledFields: Array.isArray(body.filledFields) ? body.filledFields : [],
+          remainingRequired:
+            Array.isArray(body.remainingRequired) || typeof body.remainingRequired === 'number' ? body.remainingRequired : 0,
           questions: Array.isArray(body.questions) ? body.questions : [],
+          submitCheck: body.submitCheck,
           filledScreenshot: body.filledScreenshot,
           afterScreenshot: body.afterScreenshot,
         },

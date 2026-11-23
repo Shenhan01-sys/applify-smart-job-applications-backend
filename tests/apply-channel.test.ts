@@ -86,10 +86,13 @@ test('extractPublicAtsUrl: menolak skema non-http(s) seperti javascript:', () =>
 
 test('GET /api/jobs/:id/channel: butuh auth, validasi id, kembalikan 404 atau klasifikasi kanal', async () => {
   const app = Fastify()
+  const selectedColumns: string[] = []
   const fakeDb: any = {
     from() {
       return {
-        select() {
+        select(cols: string) {
+          // jobs tidak punya kolom `platform` (kolomnya `platform_source`): memilihnya membuat PostgREST menolak kueri.
+          selectedColumns.push(cols)
           return this
         },
         eq(_col: string, val: string) {
@@ -137,4 +140,9 @@ test('GET /api/jobs/:id/channel: butuh auth, validasi id, kembalikan 404 atau kl
   assert.equal(body.channel, 'auth_portal')
   assert.equal(body.extensionSupported, true)
   assert.equal(body.manualOnly, false)
+  assert.ok(selectedColumns.length > 0)
+  for (const cols of selectedColumns) {
+    assert.ok(cols.split(',').map((c) => c.trim()).includes('platform_source'), cols)
+    assert.ok(!cols.split(',').map((c) => c.trim()).includes('platform'), cols)
+  }
 })

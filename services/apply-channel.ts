@@ -291,7 +291,7 @@ export async function resolveApplyChannel(
 ): Promise<ChannelClassification | null> {
   const { data: job, error } = await db
     .from('jobs')
-    .select('id, platform, title, company, external_url, description')
+    .select('id, platform_source, title, company, external_url, description')
     .eq('id', jobId)
     .maybeSingle()
 

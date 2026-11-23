@@ -1,164 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import Fastify from 'fastify'
-import { extensionRoutes } from '../api/routes/extension.js'
 import { ExtensionPlanner } from '../services/extension-planner.js'
-
-const VALID_PNG_BASE64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]).toString('base64')
-const USER_ID = '11111111-2222-3333-4444-555555555555'
-const OTHER_USER_ID = '99999999-2222-3333-4444-555555555555'
-const ENV = { SESSION_ENCRYPTION_KEY: 'super_secret_session_key_minimum_32_characters_long' }
-
-function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>) {
-  const tables: Record<string, any[]> = {
-    approval_requests: [],
-    jobs: [],
-    profiles: [],
-    user_automation_settings: [],
-    user_skills: [],
-    work_experiences: [],
-    achievements: [],
-    user_form_answers: [],
-    application_logs: [],
-    ai_applications: [],
-    subscriptions: [],
-    ...seed,
-  }
-  const uploads: Array<{ bucket: string; path: string; contentType: string; size: number }> = []
-
-  const matchesContains = (obj: any, needle: Record<string, unknown>) => {
-    if (!obj || typeof obj !== 'object') return false
-    return Object.entries(needle).every(([k, v]) => obj[k] === v)
-  }
-
-  class QueryBuilder {
-    private filters: Array<(row: any) => boolean> = []
-    private limitN: number | null = null
-    private orderCol: string | null = null
-    private orderAsc = true
-    private countHead = false
-    private pendingInsert: any[] | null = null
-    private pendingUpdate: Record<string, unknown> | null = null
-
-    constructor(private readonly table: string) {}
-
-    select(_cols?: string, opts?: { count?: string; head?: boolean }) {
-      if (opts?.head) this.countHead = true
-      return this
-    }
-    eq(col: string, val: unknown) {
-      this.filters.push((r) => r?.[col] === val)
-      return this
-    }
-    in(col: string, vals: unknown[]) {
-      this.filters.push((r) => vals.includes(r?.[col]))
-      return this
-    }
-    gt(col: string, val: string) {
-      this.filters.push((r) => String(r?.[col] ?? '') > val)
-      return this
-    }
-    gte(col: string, val: string) {
-      this.filters.push((r) => String(r?.[col] ?? '') >= val)
-      return this
-    }
-    contains(col: string, needle: Record<string, unknown>) {
-      this.filters.push((r) => matchesContains(r?.[col], needle))
-      return this
-    }
-    order(col: string, opts?: { ascending?: boolean }) {
-      this.orderCol = col
-      this.orderAsc = opts?.ascending !== false
-      return this
-    }
-    limit(n: number) {
-      this.limitN = n
-      return this
-    }
-    insert(rows: any) {
-      this.pendingInsert = Array.isArray(rows) ? rows : [rows]
-      return this
-    }
-    update(patch: Record<string, unknown>) {
-      this.pendingUpdate = patch
-      return this
-    }
-
-    private run() {
-      const list = tables[this.table] ?? (tables[this.table] = [])
-      if (this.pendingInsert) {
-        for (const r of this.pendingInsert) {
-          list.push({ id: r.id ?? `log-${list.length + 1}`, created_at: r.created_at ?? new Date().toISOString(), ...r })
-        }
-        return { data: this.pendingInsert, error: null, count: null }
-      }
-      let rows = list.filter((r) => this.filters.every((f) => f(r)))
-      if (this.pendingUpdate) {
-        for (const r of rows) Object.assign(r, this.pendingUpdate)
-        return { data: rows, error: null, count: rows.length }
-      }
-      if (this.orderCol) {
-        const c = this.orderCol
-        rows = [...rows].sort((a, b) => (String(a?.[c] ?? '') < String(b?.[c] ?? '') ? (this.orderAsc ? -1 : 1) : this.orderAsc ? 1 : -1))
-      }
-      const total = rows.length
-      if (this.limitN !== null) rows = rows.slice(0, this.limitN)
-      if (this.countHead) return { data: null, error: null, count: total }
-      return { data: rows, error: null, count: total }
-    }
-
-    async maybeSingle() {
-      const res = this.run()
-      return { data: Array.isArray(res.data) ? res.data[0] ?? null : null, error: null }
-    }
-
-    then<TResult1 = any, TResult2 = never>(
-      onfulfilled?: ((value: any) => TResult1 | PromiseLike<TResult1>) | null,
-      onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null
-    ) {
-      return Promise.resolve(this.run()).then(onfulfilled, onrejected)
-    }
-  }
-
-  return {
-    tables,
-    uploads,
-    db: {
-      from: (table: string) => new QueryBuilder(table),
-      storage: {
-        from(bucket: string) {
-          return {
-            async upload(path: string, buf: Buffer, opts: { contentType: string }) {
-              uploads.push({ bucket, path, contentType: opts.contentType, size: buf.length })
-              return { error: null }
-            },
-          }
-        },
-      },
-    } as any,
-  }
-}
-
-function buildApp(opts: {
-  db: any
-  primaryUserId?: string | null
-  planner?: ExtensionPlanner
-  now?: () => number
-}) {
-  const app = Fastify()
-  app.register(extensionRoutes, {
-    prefix: '/api/extension',
-    db: opts.db,
-    env: ENV,
-    now: opts.now,
-    planner: opts.planner,
-    authenticatePrimary: async (req: any, reply: any) => {
-      if (!opts.primaryUserId) return reply.status(401).send({ error: 'Unauthorized' })
-      req.user = { id: opts.primaryUserId }
-    },
-  })
-  return app
-}
+import { buildApp, makeExtensionTestDb, OTHER_USER_ID, USER_ID, VALID_PNG_BASE64 } from './extension-test-db.js'
 
 test('POST /api/extension/token & GET /pending-approvals: mengeluarkan token scoped dan memfilter LinkedIn/yang terpakai', async () => {
   const now = new Date('2026-11-23T12:00:00Z')
@@ -170,9 +13,9 @@ test('POST /api/extension/token & GET /pending-approvals: mengeluarkan token sco
       { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3', user_id: USER_ID, job_id: 'job-used', application_id: 'app-3', status: 'approved', expires_at: future },
     ],
     jobs: [
-      { id: 'job-kalibrr', title: 'Backend Engineer', company: 'Acme', platform: 'kalibrr', external_url: 'https://www.kalibrr.com/c/acme/jobs/1', description: '' },
-      { id: 'job-linkedin', title: 'Staff Dev', company: 'Beta', platform: 'linkedin', external_url: 'https://www.linkedin.com/jobs/view/123', description: '' },
-      { id: 'job-used', title: 'QA', company: 'Gamma', platform: 'glints', external_url: 'https://glints.com/id/opportunities/jobs/1', description: '' },
+      { id: 'job-kalibrr', title: 'Backend Engineer', company: 'Acme', platform_source: 'kalibrr', external_url: 'https://www.kalibrr.com/c/acme/jobs/1', description: '' },
+      { id: 'job-linkedin', title: 'Staff Dev', company: 'Beta', platform_source: 'linkedin', external_url: 'https://www.linkedin.com/jobs/view/123', description: '' },
+      { id: 'job-used', title: 'QA', company: 'Gamma', platform_source: 'glints', external_url: 'https://glints.com/id/opportunities/jobs/1', description: '' },
     ],
     application_logs: [
       { user_id: USER_ID, job_id: 'job-used', action: 'apply', status: 'success', details: { approval_request_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3' } },
@@ -308,7 +151,7 @@ test('authorize-submit & report-run: 1 approval = 1 submission, validasi PNG mag
       { id: approvalId, user_id: USER_ID, job_id: 'job-1', application_id: 'app-1', status: 'approved', expires_at: future },
       { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2', user_id: OTHER_USER_ID, job_id: 'job-2', application_id: 'app-2', status: 'approved', expires_at: future },
     ],
-    jobs: [{ id: 'job-1', platform: 'kalibrr', title: 'BE', company: 'Acme' }],
+    jobs: [{ id: 'job-1', platform_source: 'kalibrr', title: 'BE', company: 'Acme', external_url: 'https://www.kalibrr.com/c/acme/jobs/1' }],
     ai_applications: [{ id: 'app-1', user_id: USER_ID, job_id: 'job-1', status: 'draft' }],
     subscriptions: [{ user_id: USER_ID, ai_model_tier: 'free' }],
   })
@@ -335,7 +178,7 @@ test('authorize-submit & report-run: 1 approval = 1 submission, validasi PNG mag
   assert.equal(okAuth.statusCode, 200)
   assert.equal(okAuth.json().authorized, true)
 
-  // File bukan PNG asli ditolak (400)
+  // Laporan non-kirim dengan file bukan PNG asli ditolak (400) dan tidak menulis log.
   const badPngRes = await app.inject({
     method: 'POST',
     url: '/api/extension/report-run',
@@ -344,13 +187,14 @@ test('authorize-submit & report-run: 1 approval = 1 submission, validasi PNG mag
       approvalId,
       jobId: 'job-1',
       pageUrl: 'https://www.kalibrr.com/apply',
-      outcome: 'submitted',
+      outcome: 'ready',
       filledCount: 5,
       filledScreenshot: Buffer.from('<script>alert(1)</script>').toString('base64'),
     },
   })
   assert.equal(badPngRes.statusCode, 400)
   assert.equal(badPngRes.json().code, 'invalid_screenshot_png')
+  assert.equal(store.tables.application_logs.length, 0)
 
   // Pelaporan submitted pertama berhasil + upload ke `${USER_ID}/ext-...` + status app maju ke `submitted`
   const firstReport = await app.inject({
