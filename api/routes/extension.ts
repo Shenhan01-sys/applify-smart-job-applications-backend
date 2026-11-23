@@ -17,12 +17,15 @@ import {
   authorizeExtensionSubmit,
   ExtensionRunnerError,
   getUserMinTokenVersion,
+  isUuid,
   listPendingExtensionApprovals,
   REPORT_RUN_BODY_LIMIT,
   reportExtensionRun,
   revokeAllExtensionTokens,
   verifyExtensionApproval,
 } from '../../services/extension-runner.js'
+import { isExtDocumentKind, loadExtensionDocument } from '../../services/extension-documents.js'
+import { saveExtensionAnswers } from '../../services/extension-answers.js'
 
 export interface ExtensionRoutesOptions extends FastifyPluginOptions {
   /** Injeksi tes offline (DB tiruan). */
@@ -185,6 +188,61 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
       }
       const status = typeof err?.statusCode === 'number' ? err.statusCode : 400
       return reply.status(status).send({ error: err?.message ?? 'Gagal merencanakan pengisian', ...(err?.code ? { code: err.code } : {}) })
+    }
+  })
+
+  // 3b. Berkas lamaran (CV, surat lamaran PDF, transkrip, portofolio) untuk dipasang ekstensi ke kontrol file.
+  //     Lewat backend supaya ekstensi tidak butuh izin host Supabase. Hanya milik pemilik persetujuan yang sudah disetujui.
+  app.get('/documents/:approvalId/:kind', async (request, reply) => {
+    const userId = await requireExtensionUser(request, reply)
+    if (!userId) return reply
+    const { approvalId, kind } = request.params as { approvalId: string; kind: string }
+    if (!isUuid(approvalId)) {
+      return reply.status(400).send({ error: 'approvalId tidak valid', code: 'invalid_id' })
+    }
+    if (!isExtDocumentKind(kind)) {
+      return reply.status(400).send({ error: 'Jenis berkas tidak dikenal. Pilih resume, cover_letter, transcript, atau portfolio.', code: 'invalid_kind' })
+    }
+    try {
+      const db = await getDb()
+      const check = await verifyExtensionApproval(db, { userId, approvalId, now: new Date(now()) })
+      if ('code' in check) {
+        // Persetujuan milik pengguna lain tampil sama dengan berkas yang tidak ada (404), tanpa membocorkan keberadaannya.
+        if (check.code === 'approval_not_found') {
+          return reply.status(404).send({ error: 'Berkas tidak ditemukan', code: 'document_not_found' })
+        }
+        if (check.code === 'approval_not_approved') {
+          return reply.status(409).send({ error: check.error, code: 'not_approved' })
+        }
+        return reply.status(check.statusCode).send({ error: check.error, code: check.code })
+      }
+      const doc = await loadExtensionDocument(db, { userId, kind, approval: check.row })
+      reply
+        .header('Content-Type', doc.contentType)
+        .header('Content-Disposition', `attachment; filename="${doc.filename}"`)
+        .header('Cache-Control', 'no-store')
+        .header('X-Content-Type-Options', 'nosniff')
+      return reply.send(doc.bytes)
+    } catch (err: any) {
+      if (err instanceof ExtensionRunnerError) {
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+      }
+      return reply.status(500).send({ error: 'Gagal mengambil berkas', code: 'documents_failed' })
+    }
+  })
+
+  // 3c. Jawaban dari panel ekstensi -> bank jawaban (`user_form_answers`), dipakai ulang untuk isi ulang dan lowongan lain.
+  app.post('/answers', async (request, reply) => {
+    const userId = await requireExtensionUser(request, reply)
+    if (!userId) return reply
+    const body = (request.body ?? {}) as Record<string, unknown>
+    try {
+      return await saveExtensionAnswers(await getDb(), userId, { approvalId: body.approvalId, answers: body.answers }, new Date(now()))
+    } catch (err: any) {
+      if (err instanceof ExtensionRunnerError) {
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+      }
+      return reply.status(500).send({ error: 'Jawaban belum bisa disimpan. Coba lagi.', code: 'answers_save_failed' })
     }
   })
 

@@ -37,6 +37,10 @@ export interface FakeDbOptions {
   uniqueKeys?: Record<string, string>
   /** Pengguna Supabase Auth tiruan untuk `auth.admin.getUserById` (kunci: id pengguna). */
   authUsers?: Record<string, { email?: string; email_confirmed_at?: string | null }>
+  /** Isi bucket storage tiruan: kunci `<bucket>/<path>`. Objek yang tidak ada mengembalikan galat 404 seperti Supabase Storage. */
+  storageObjects?: Record<string, Buffer>
+  /** Galat `download` untuk kunci `<bucket>/<path>` tertentu (mis. gangguan storage): teks galat tidak boleh sampai ke klien. */
+  storageDownloadErrors?: Record<string, { message: string; statusCode?: string }>
 }
 
 export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, options: FakeDbOptions = {}) {
@@ -58,6 +62,8 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
   }
   const uniqueKeys = { approval_submit_claims: 'approval_request_id', ...options.uniqueKeys }
   const uploads: Array<{ bucket: string; path: string; contentType: string; size: number }> = []
+  /** Kunci `<bucket>/<path>` setiap `download` yang dipanggil, supaya tes bisa memastikan path pengguna lain tidak pernah diunduh. */
+  const downloads: string[] = []
   const calls: Array<{ table: string; op: string }> = []
 
   const colValue = (row: any, col: string): unknown => {
@@ -81,6 +87,7 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
     private countHead = false
     private pendingInsert: any[] | null = null
     private pendingUpdate: Record<string, unknown> | null = null
+    private pendingUpsert: { rows: any[]; conflict: string[] } | null = null
     private pendingDelete = false
 
     constructor(private readonly table: string) {}
@@ -132,6 +139,10 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
       this.pendingInsert = Array.isArray(rows) ? rows : [rows]
       return this
     }
+    upsert(rows: any, opts?: { onConflict?: string }) {
+      this.pendingUpsert = { rows: Array.isArray(rows) ? rows : [rows], conflict: String(opts?.onConflict ?? 'id').split(',').map((c) => c.trim()) }
+      return this
+    }
     update(patch: Record<string, unknown>) {
       this.pendingUpdate = patch
       return this
@@ -143,9 +154,21 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
 
     private run() {
       const failure = options.failTables?.[this.table]
-      calls.push({ table: this.table, op: this.pendingInsert ? 'insert' : this.pendingDelete ? 'delete' : this.pendingUpdate ? 'update' : 'select' })
+      calls.push({
+        table: this.table,
+        op: this.pendingInsert ? 'insert' : this.pendingUpsert ? 'upsert' : this.pendingDelete ? 'delete' : this.pendingUpdate ? 'update' : 'select',
+      })
       if (failure) return { data: null, error: { code: failure.code, message: failure.message }, count: null }
       const list = tables[this.table] ?? (tables[this.table] = [])
+      if (this.pendingUpsert) {
+        const { rows, conflict } = this.pendingUpsert
+        for (const r of rows) {
+          const existing = list.find((x) => conflict.every((c) => x[c] === r[c]))
+          if (existing) Object.assign(existing, r)
+          else list.push({ id: r.id ?? `row-${list.length + 1}`, created_at: r.created_at ?? new Date().toISOString(), ...r })
+        }
+        return { data: rows, error: null, count: null }
+      }
       if (this.pendingInsert) {
         const key = (uniqueKeys as Record<string, string>)[this.table]
         for (const r of this.pendingInsert) {
@@ -193,6 +216,7 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
   return {
     tables,
     uploads,
+    downloads,
     calls,
     db: {
       from: (table: string) => new QueryBuilder(table),
@@ -222,6 +246,15 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
             async upload(path: string, buf: Buffer, opts: { contentType: string }) {
               uploads.push({ bucket, path, contentType: opts.contentType, size: buf.length })
               return { error: null }
+            },
+            async download(path: string) {
+              const key = `${bucket}/${path}`
+              downloads.push(key)
+              const forced = options.storageDownloadErrors?.[key]
+              if (forced) return { data: null, error: forced }
+              const obj = options.storageObjects?.[key]
+              if (!obj) return { data: null, error: { message: 'Object not found', statusCode: '404' } }
+              return { data: new Blob([obj]), error: null }
             },
             async createSignedUrl(path: string) {
               return { data: { signedUrl: `https://storage.test/${bucket}/${path}?token=t` }, error: null }
