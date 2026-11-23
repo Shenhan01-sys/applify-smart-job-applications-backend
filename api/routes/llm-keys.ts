@@ -258,7 +258,13 @@ export async function llmKeysRoutes(app: FastifyInstance, opts: LlmKeysRouteOpti
       last_validated_at: stamp,
       updated_at: stamp,
     }
-    const upd = await db.from(LLM_KEYS_TABLE).update(patch).eq('user_id', userId).eq('provider', provider)
+    // key_encrypted filter: if the user replaced the key during the 8 s check, the old result must not land on the new row.
+    const upd = await db
+      .from(LLM_KEYS_TABLE)
+      .update(patch)
+      .eq('user_id', userId)
+      .eq('provider', provider)
+      .eq('key_encrypted', found.data.key_encrypted)
     if (upd.error) return dbFailure(request, reply, 'update', upd.error)
 
     request.log.info({ provider, result }, 'llm key tested')

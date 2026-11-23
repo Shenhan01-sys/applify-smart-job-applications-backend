@@ -823,6 +823,25 @@ test('test: a key the provider now refuses is marked invalid with a short error 
   }
 })
 
+test('test: a key replaced while the check runs is not overwritten by the old result', async () => {
+  const seed = new FakeDb({ [LLM_KEYS_TABLE]: [storedRow('u1', 'openai', OPENAI_KEY)] })
+  // The provider refuses the OLD key, but before it answers the user stores a new key (new ciphertext).
+  const provider = makeProvider(401)
+  const inner = provider.fetchImpl
+  provider.fetchImpl = (async (url: any, init: any) => {
+    seed.rows(LLM_KEYS_TABLE)[0].key_encrypted = 'bmV3LWNpcGhlcnRleHQ='
+    seed.rows(LLM_KEYS_TABLE)[0].status = 'valid'
+    return inner(url, init)
+  }) as typeof fetch
+  const b = await build({ db: seed, provider })
+  const res = await test_(b, 'openai')
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().result, 'invalid')
+  assert.equal(rows(b)[0].key_encrypted, 'bmV3LWNpcGhlcnRleHQ=')
+  assert.equal(rows(b)[0].status, 'valid')
+  await b.app.close()
+})
+
 test('test: provider trouble answers unavailable and changes nothing in the row', async () => {
   for (const status of [429, 500, new Error('network down')] as Array<number | Error>) {
     const seed = new FakeDb({ [LLM_KEYS_TABLE]: [storedRow('u1', 'anthropic', KEY)] })
