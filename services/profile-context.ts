@@ -31,7 +31,7 @@ const CATEGORY_LABEL: Record<string, string> = { award: 'Penghargaan', publicati
 /** Satu baris tanpa karakter kontrol dan spasi ganda, dipotong ke `max` karakter. */
 function oneLine(v: unknown, max: number): string {
   if (typeof v !== 'string') return ''
-  const s = v.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
+  const s = v.replace(/[\u0000-\u001f\u007f-\u009f\u{2028}\u{2029}]+/gu, ' ').replace(/\s+/g, ' ').trim()
   return s.length > max ? `${s.slice(0, max - 3).trimEnd()}...` : s
 }
 
