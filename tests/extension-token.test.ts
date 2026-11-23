@@ -63,3 +63,16 @@ test('isExtensionOriginAllowed: hanya mengizinkan origin chrome-extension valid,
   assert.equal(isExtensionOriginAllowed('chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', pinnedEnv), true)
   assert.equal(isExtensionOriginAllowed('chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', pinnedEnv), false)
 })
+
+test('isExtensionOriginAllowed: tanpa EXTENSION_ORIGINS, produksi menolak semua origin ekstensi; non-produksi mengizinkan format resmi', () => {
+  const origin = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
+  assert.equal(isExtensionOriginAllowed(origin, { NODE_ENV: 'production' }), false)
+  assert.equal(isExtensionOriginAllowed(origin, { NODE_ENV: ' Production ' }), false)
+  assert.equal(isExtensionOriginAllowed(origin, { NODE_ENV: 'development' }), true)
+  assert.equal(isExtensionOriginAllowed(origin, { NODE_ENV: 'test' }), true)
+  // Dengan daftar eksplisit, produksi hanya menerima yang terdaftar
+  const pinned = { NODE_ENV: 'production', EXTENSION_ORIGINS: `${origin}, chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb` }
+  assert.equal(isExtensionOriginAllowed(origin, pinned), true)
+  assert.equal(isExtensionOriginAllowed('chrome-extension://cccccccccccccccccccccccccccccccc', pinned), false)
+  assert.equal(isExtensionOriginAllowed('https://evil.example', pinned), false)
+})

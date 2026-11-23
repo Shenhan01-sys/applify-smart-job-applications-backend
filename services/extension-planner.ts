@@ -93,7 +93,7 @@ export function questionKey(label: string): string {
 
 const VALID_KINDS = new Set<ExtControlKind>(['text', 'textarea', 'select', 'checkbox', 'radio', 'file', 'submit'])
 
-const cleanLine = (raw: unknown, max: number): string => {
+export const cleanLine = (raw: unknown, max: number): string => {
   if (typeof raw !== 'string') return ''
   return raw
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
@@ -101,6 +101,12 @@ const cleanLine = (raw: unknown, max: number): string => {
     .trim()
     .slice(0, max)
 }
+
+/**
+ * Teks dari situs luar tidak boleh menutup pembungkus `<untrusted_form_controls>` / `<job_posting>`.
+ * `<` diganti `\u003c`: di dalam JSON tetap terbaca sebagai `<` oleh pengurai, di teks biasa tidak lagi menjadi tag.
+ */
+export const escapeAngle = (text: string): string => text.replace(/</g, '\\u003c')
 
 export function sanitizeExtensionControls(rawControls: unknown): SanitizedExtControl[] {
   if (!Array.isArray(rawControls)) return []
@@ -152,12 +158,14 @@ const AI_PROHIBITION_PATTERNS = [
   /\bdilarang\s+menggunakan\s+(?:ai|kecerdasan buatan|chatgpt)\b/i,
 ]
 
-const CAPTCHA_PATTERNS = [
-  /\b(?:recaptcha|hcaptcha|turnstile|arkose)\b/i,
-  /\bverify you are human\b/i,
-  /\bi'?m not a robot\b/i,
-  /\bselesaikan captcha\b/i,
-]
+/**
+ * Tantangan CAPTCHA yang sedang aktif. Salinan `CAPTCHA_ACTIVE_RE` dan `CAPTCHA_URL_RE` di
+ * `worker/src/lib/pageGuard.ts`. Kata "reCAPTCHA" saja tidak dihitung: formulir Greenhouse dan Lever memuat
+ * "protected by reCAPTCHA" di kaki halaman (temuan keamanan 6).
+ */
+const CAPTCHA_ACTIVE_RE =
+  /\b(?:verify\s+you\s+are\s+human|just\s+a\s+moment|checking\s+your\s+browser|attention\s+required!\s*\|\s*cloudflare|i'?m\s+not\s+a\s+robot|complete\s+the\s+(?:security\s+)?captcha|solve\s+this\s+puzzle|cloudflare\s+turnstile|verifikasi\s+bahwa\s+anda\s+manusia|selesaikan\s+captcha)\b/i
+const CAPTCHA_URL_RE = /\/cdn-cgi\/challenge|challenges\.cloudflare\.com|arkoselabs\.com|\/captcha(?:\/|\?|$)/i
 
 const CLOSED_PATTERNS = [
   /\bjob\s+(?:is\s+)?(?:closed|no longer accepting|expired)\b/i,
@@ -191,7 +199,8 @@ export function detectExtensionBlocker(args: {
 
   const formControlsCount = controls.filter((c) => c.kind !== 'submit').length
 
-  if (CAPTCHA_PATTERNS.some((p) => p.test(noticeText))) {
+  // Teks tantangan hanya memblokir bila tidak ada kontrol formulir yang bisa diisi; URL tantangan selalu memblokir.
+  if (CAPTCHA_URL_RE.test(pageUrl) || (formControlsCount === 0 && CAPTCHA_ACTIVE_RE.test(noticeText))) {
     return {
       reason: 'captcha_blocked',
       note: 'Halaman menampilkan CAPTCHA atau verifikasi manusia. Selesaikan verifikasi di tab browser, lalu klik "Lanjutkan setelah Login/CAPTCHA".',
@@ -223,7 +232,7 @@ export function detectExtensionBlocker(args: {
   return null
 }
 
-const SECRET_LABEL_RE = /(password|kata sandi|passcode|pin|otp|cvv|ktp|nik\b|npwp|ssn|passport|credit card|bank account)/i
+export const SECRET_LABEL_RE = /(password|kata sandi|passcode|pin|otp|cvv|ktp|nik\b|npwp|ssn|passport|credit card|bank account)/i
 
 function isSecretControl(c: SanitizedExtControl): boolean {
   const hay = `${c.groupLabel} ${c.label} ${c.name} ${c.placeholder}`
@@ -356,6 +365,45 @@ function toPendingKind(kind: SanitizedExtControl['kind']): ExtPendingQuestion['k
   if (kind === 'checkbox') return 'check'
   if (kind === 'textarea' || kind === 'select' || kind === 'radio') return kind
   return 'text'
+}
+
+export const EXT_MAX_PENDING_QUESTIONS = 20
+const PENDING_KINDS = new Set<ExtPendingQuestion['kind']>(['text', 'textarea', 'select', 'check', 'radio'])
+
+/**
+ * Pertanyaan yang dilaporkan ekstensi (`details.questions`) divalidasi seketat keluaran perencana:
+ * kunci selalu dihitung ulang dari label dengan `questionKey` (kunci kiriman klien tidak dipercaya),
+ * label berisi rahasia dibuang, jenis tak dikenal menjadi teks, opsi hanya untuk select/radio, paling banyak 20.
+ */
+export function sanitizePendingQuestions(raw: unknown): ExtPendingQuestion[] {
+  if (!Array.isArray(raw)) return []
+  const out: ExtPendingQuestion[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (out.length >= EXT_MAX_PENDING_QUESTIONS) break
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const label = cleanLine(rec.label, 300)
+    if (!label || SECRET_LABEL_RE.test(label)) continue
+    const key = questionKey(label)
+    if (!key || key === '__proto__' || seen.has(key)) continue
+    const rawKind = rec.kind === 'checkbox' ? 'check' : rec.kind
+    const kind: ExtPendingQuestion['kind'] =
+      typeof rawKind === 'string' && PENDING_KINDS.has(rawKind as ExtPendingQuestion['kind'])
+        ? (rawKind as ExtPendingQuestion['kind'])
+        : 'text'
+    const options: string[] = []
+    if (kind === 'select' || kind === 'radio') {
+      for (const opt of Array.isArray(rec.options) ? rec.options : []) {
+        if (options.length >= EXT_MAX_OPTIONS) break
+        const cleaned = cleanLine(opt, 120)
+        if (cleaned && !options.includes(cleaned)) options.push(cleaned)
+      }
+    }
+    seen.add(key)
+    out.push(options.length > 0 ? { key, label, kind, options } : { key, label, kind })
+  }
+  return out
 }
 
 export class ExtensionPlanRateLimitError extends Error {
@@ -543,15 +591,15 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
 
       const userPrompt = [
         `<job_posting>`,
-        `Judul: ${cleanLine(job?.title, 160) || '-'}`,
-        `Perusahaan: ${cleanLine(job?.company, 120) || '-'}`,
+        `Judul: ${escapeAngle(cleanLine(job?.title, 160)) || '-'}`,
+        `Perusahaan: ${escapeAngle(cleanLine(job?.company, 120)) || '-'}`,
         `URL: ${pageUrl}`,
         `</job_posting>`,
         `<candidate_facts>`,
         ...summaryLines,
         `</candidate_facts>`,
         `<untrusted_form_controls>`,
-        JSON.stringify(serializedControls),
+        escapeAngle(JSON.stringify(serializedControls)),
         `</untrusted_form_controls>`,
       ].join('\n')
 

@@ -177,7 +177,10 @@ export function extractBearerToken(authHeader: unknown): string | null {
  * Validasi origin khusus Chrome/Edge Extension di CORS server:
  *   - Tidak pernah melonggarkan origin web (`https://`, `http://`, `*`).
  *   - Jika `EXTENSION_ORIGINS` diisi (daftar dipisah koma), wajib cocok persis dengan daftar tersebut.
- *   - Jika kosong, izinkan format resmi ID ekstensi Chromium (`chrome-extension://<32-char a-p>`).
+ *   - Jika kosong dan `NODE_ENV` bukan `production` (pengembangan, uji), izinkan format resmi ID ekstensi
+ *     Chromium (`chrome-extension://<32-char a-p>`) supaya ekstensi yang dimuat lokal langsung bisa dipakai.
+ *   - Jika kosong di produksi, tidak ada origin ekstensi yang diizinkan: `EXTENSION_ORIGINS` wajib diisi dengan
+ *     ID ekstensi Applify sendiri, supaya ekstensi pihak lain tidak bisa memanggil API dari browser pengguna.
  */
 export function isExtensionOriginAllowed(origin: string | undefined, env: Env = process.env): boolean {
   if (!origin) return false
@@ -188,5 +191,6 @@ export function isExtensionOriginAllowed(origin: string | undefined, env: Env = 
   if (configured.length > 0) {
     return configured.includes(origin)
   }
+  if ((env.NODE_ENV ?? '').trim().toLowerCase() === 'production') return false
   return /^chrome-extension:\/\/[a-p]{32}$/.test(origin)
 }
