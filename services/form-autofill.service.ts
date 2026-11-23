@@ -1,6 +1,7 @@
 import { aiPipelineService } from './ai-pipeline.service.js'
 import { UNCONFIRMED_DEFAULT_CONFIDENCE, isUnconfirmedVisaDefault } from './applicant-fallbacks.js'
 import { citizenshipFormAnswer } from './us-work-authorization.js'
+import { matchOptionStrict } from './option-match.js'
 
 export interface FormField {
   type: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox' | 'file'
@@ -74,12 +75,14 @@ export class FormAutofillService {
           },
         })
 
+        const parsed = this.parseAnswer(aiAnswer, type, options)
         return {
           field,
-          value: this.parseAnswer(aiAnswer, type, options),
-          confidence: 0.75,
+          value: parsed.value,
+          // Jawaban AI yang tidak punya pilihan padanan dikosongkan dengan keyakinan 0 dan wajib dicek (pengguna ditanya).
+          confidence: parsed.matched ? 0.75 : 0,
           source: 'ai',
-          needsReview: settings.pause_at_failed_question ?? true,
+          needsReview: parsed.matched ? (settings.pause_at_failed_question ?? true) : true,
         }
       } catch (error) {
         console.error('AI answer generation failed:', error)
@@ -87,10 +90,11 @@ export class FormAutofillService {
     }
 
     // 3. Fallback to default/generic answers
+    const defaultValue = this.getDefaultAnswer(type)
     return {
       field,
-      value: this.getDefaultAnswer(type, options),
-      confidence: 0.3,
+      value: defaultValue,
+      confidence: (type === 'select' || type === 'radio') && defaultValue === '' ? 0 : 0.3,
       source: 'default',
       needsReview: true,
     }
@@ -192,24 +196,25 @@ export class FormAutofillService {
       // produksi 20 November 2026), jadi tanpa data nilainya kosong dengan keyakinan 0, sama seperti kota.
       if (!visa) return { value: '', confidence: 0 }
       // "No" persis adalah nilai bawaan kolom di database, bukan pilihan pengguna: jawab, tetapi tidak dengan yakin.
+      const picked = this.pickOption(options, visa)
       return {
-        value: this.findOption(options, visa),
-        confidence: isUnconfirmedVisaDefault(visa) ? UNCONFIRMED_DEFAULT_CONFIDENCE : 0.95,
+        value: picked.value,
+        confidence: !picked.matched ? 0 : isUnconfirmedVisaDefault(visa) ? UNCONFIRMED_DEFAULT_CONFIDENCE : 0.95,
       }
     }
 
     // Demographics
     if (label.includes('gender') || label.includes('sex')) {
-      return { value: this.findOption(options, settings.gender || 'Decline'), confidence: 0.9 }
+      return this.demographicAnswer(options, settings.gender)
     }
     if (label.includes('ethnicity') || label.includes('race')) {
-      return { value: this.findOption(options, settings.ethnicity || 'Decline'), confidence: 0.9 }
+      return this.demographicAnswer(options, settings.ethnicity)
     }
     if (label.includes('disability') || label.includes('handicapped')) {
-      return { value: this.findOption(options, settings.disability_status || 'Decline'), confidence: 0.9 }
+      return this.demographicAnswer(options, settings.disability_status)
     }
     if (label.includes('veteran')) {
-      return { value: this.findOption(options, settings.veteran_status || 'Decline'), confidence: 0.9 }
+      return this.demographicAnswer(options, settings.veteran_status)
     }
 
     // LinkedIn / Website
@@ -253,35 +258,39 @@ export class FormAutofillService {
     return null
   }
 
-  private findOption(options: string[] | undefined, value: string): string {
-    if (!options || options.length === 0) return value
-    const exact = options.find((o) => o.toLowerCase() === value.toLowerCase())
-    if (exact) return exact
-    // Try partial match
-    const partial = options.find((o) =>
-      o.toLowerCase().includes(value.toLowerCase()) ||
-      value.toLowerCase().includes(o.toLowerCase())
-    )
-    return partial || options[0] || value
+  /**
+   * Pilih opsi untuk `value` tanpa menebak (option-match.ts). Tanpa daftar pilihan (teks bebas) nilainya dipakai apa
+   * adanya. Dengan daftar pilihan: hanya opsi yang persis sama atau tepat satu opsi berawalan nilai pada batas kata;
+   * selain itu kosong (`matched: false`) supaya pemanggil memberi keyakinan 0 dan pengguna ditanya. Tidak ada
+   * cadangan "opsi pertama".
+   */
+  private pickOption(options: string[] | undefined, value: string): { value: string; matched: boolean } {
+    if (!options || options.length === 0) return { value, matched: true }
+    const hit = matchOptionStrict(value, options)
+    return hit === null ? { value: '', matched: false } : { value: hit, matched: true }
   }
 
-  private parseAnswer(answer: string, type: string, options: string[] | undefined): any {
+  /** Pertanyaan demografi: data pengguna bila ada, kalau tidak "Decline" (hanya bila ada opsi yang jelas cocok). */
+  private demographicAnswer(options: string[] | undefined, saved: unknown): { value: string; confidence: number } {
+    const picked = this.pickOption(options, String(saved ?? '').trim() || 'Decline')
+    return { value: picked.value, confidence: picked.matched ? 0.9 : 0 }
+  }
+
+  private parseAnswer(answer: string, type: string, options: string[] | undefined): { value: any; matched: boolean } {
     if (type === 'checkbox') {
-      return answer.split(',').map((s) => s.trim()).filter(Boolean)
+      return { value: answer.split(',').map((s) => s.trim()).filter(Boolean), matched: true }
     }
     if (type === 'radio' || type === 'select') {
-      return this.findOption(options, answer.trim())
+      return this.pickOption(options, answer.trim())
     }
-    return answer.trim()
+    return { value: answer.trim(), matched: true }
   }
 
-  private getDefaultAnswer(type: string, options: string[] | undefined): any {
+  /** Jawaban bawaan terakhir. Radio/select tidak pernah diisi dengan opsi pertama: kosong, pengguna ditanya. */
+  private getDefaultAnswer(type: string): any {
     switch (type) {
       case 'checkbox':
         return []
-      case 'radio':
-      case 'select':
-        return options?.[0] || ''
       case 'file':
         return null
       default:

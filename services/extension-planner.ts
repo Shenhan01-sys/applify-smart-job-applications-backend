@@ -11,6 +11,7 @@ export interface CompleteJsonRequest {
 import { stripCodeFence, stripReasoning } from './ai-output-guard.js'
 import { cityFromLocation, countryFromLocation, isUnconfirmedVisaDefault } from './applicant-fallbacks.js'
 import { isYesLike, workAuthorizationFromUsCitizenship } from './us-work-authorization.js'
+import { matchOptionStrict } from './option-match.js'
 import { isLinkedInUrl, sanitizeHttpUrl } from './apply-channel.js'
 import { deriveExperienceYears } from './experience-years.js'
 import { ACHIEVEMENT_GROUNDING_RULE, ACHIEVEMENT_HEADING, buildAchievementLines } from './profile-context.js'
@@ -247,15 +248,14 @@ const controlQuestionLabel = (c: SanitizedExtControl): string => {
   return c.label || c.placeholder || c.name
 }
 
+/**
+ * Pilihan untuk `answer` pada select/radio. Tanpa daftar pilihan jawabannya dipakai apa adanya. Dengan daftar:
+ * hanya yang persis sama atau tepat satu pilihan berawalan jawaban pada batas kata (option-match.ts); tidak cocok
+ * atau ambigu menghasilkan null, sehingga kontrol dibiarkan kosong dan masuk daftar pertanyaan untuk pengguna.
+ */
 function matchOption(answer: string, options: string[]): string | null {
   if (!options.length) return answer
-  const lower = answer.trim().toLowerCase()
-  const exact = options.find((o) => o.trim().toLowerCase() === lower)
-  if (exact) return exact
-  const starts = options.find((o) => o.trim().toLowerCase().startsWith(lower))
-  if (starts) return starts
-  const contains = options.find((o) => o.trim().toLowerCase().includes(lower) || lower.includes(o.trim().toLowerCase()))
-  return contains ?? null
+  return matchOptionStrict(answer, options)
 }
 
 function buildFactTokens(args: {
