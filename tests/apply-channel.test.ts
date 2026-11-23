@@ -1,0 +1,140 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import Fastify from 'fastify'
+import { classifyJobChannel, extractApplyEmail, extractPublicAtsUrl } from '../services/apply-channel.js'
+import { jobRoutes } from '../api/routes/jobs.js'
+
+test('classifyJobChannel: Greenhouse / Lever URL diklasifikasikan sebagai public_ats dan mendukung worker', () => {
+  const gh = classifyJobChannel({
+    platform: 'greenhouse',
+    external_url: 'https://boards.greenhouse.io/acme/jobs/12345',
+  })
+  assert.equal(gh.channel, 'public_ats')
+  assert.equal(gh.autoWorkerSupported, true)
+  assert.equal(gh.extensionSupported, true)
+  assert.equal(gh.manualOnly, false)
+
+  const lever = classifyJobChannel({
+    platform: 'career',
+    external_url: 'https://jobs.lever.co/acme/ab12-cd34',
+  })
+  assert.equal(lever.channel, 'public_ats')
+  assert.equal(lever.autoWorkerSupported, true)
+})
+
+test('classifyJobChannel: lowongan portal dengan tautan ATS publik di deskripsi ditingkatkan menjadi public_ats', () => {
+  const res = classifyJobChannel({
+    platform: 'jobstreet',
+    external_url: 'https://id.jobstreet.com/job/999999',
+    description: 'Please apply via our ATS at https://jobs.ashbyhq.com/acme/backend-engineer.',
+  })
+  assert.equal(res.channel, 'public_ats')
+  assert.equal(res.resolvedApplyUrl, 'https://jobs.ashbyhq.com/acme/backend-engineer')
+  assert.equal(res.applyUrl, 'https://jobs.ashbyhq.com/acme/backend-engineer')
+  assert.equal(res.autoWorkerSupported, true)
+})
+
+test('classifyJobChannel: lowongan LinkedIn selalu manualOnly dan menonaktifkan worker maupun ekstensi', () => {
+  const li = classifyJobChannel({
+    platform: 'linkedin',
+    external_url: 'https://www.linkedin.com/jobs/view/4012345678/',
+    description: 'Kirim lamaran atau kontak jobs@acme.io',
+  })
+  assert.equal(li.manualOnly, true)
+  assert.equal(li.autoWorkerSupported, false)
+  assert.equal(li.extensionSupported, false)
+  assert.equal(li.channel, 'auth_portal')
+})
+
+test('classifyJobChannel: JobStreet/Glints/Kalibrr tanpa ATS/email diklasifikasikan sebagai auth_portal (pakai ekstensi)', () => {
+  for (const url of [
+    'https://id.jobstreet.com/id/job/123',
+    'https://www.kalibrr.com/c/acme/jobs/123',
+    'https://glints.com/id/opportunities/jobs/abc/123',
+    'https://acme.wd5.myworkdayjobs.com/en-US/Careers/job/SWE_1',
+  ]) {
+    const res = classifyJobChannel({ external_url: url })
+    assert.equal(res.channel, 'auth_portal')
+    assert.equal(res.autoWorkerSupported, false)
+    assert.equal(res.extensionSupported, true)
+    assert.equal(res.manualOnly, false)
+  }
+})
+
+test('classifyJobChannel: email rekruter valid di deskripsi diklasifikasikan sebagai email_direct dan mengabaikan noreply/example', () => {
+  assert.equal(
+    extractApplyEmail('No-reply: noreply@company.com or privacy@company.com. Send CV to talent@acme.co.id!'),
+    'talent@acme.co.id'
+  )
+  assert.equal(extractApplyEmail('Test sample@example.com or sentry@sentry.io'), null)
+
+  const res = classifyJobChannel({
+    platform: 'dealls',
+    external_url: 'https://dealls.com/loker/backend',
+    description: 'Kirim CV dan portofolio ke hiring@startup.id sebelum Jumat.',
+  })
+  assert.equal(res.channel, 'email_direct')
+  assert.equal(res.applyEmail, 'hiring@startup.id')
+  assert.equal(res.emailApplySupported, true)
+  assert.equal(res.autoWorkerSupported, false)
+})
+
+test('extractPublicAtsUrl: menolak skema non-http(s) seperti javascript:', () => {
+  assert.equal(extractPublicAtsUrl('javascript:alert(1) https://apply.workable.com/j/ABC123'), 'https://apply.workable.com/j/ABC123')
+  assert.equal(classifyJobChannel({ external_url: 'javascript:alert(1)' }).applyUrl, null)
+})
+
+test('GET /api/jobs/:id/channel: butuh auth, validasi id, kembalikan 404 atau klasifikasi kanal', async () => {
+  const app = Fastify()
+  const fakeDb: any = {
+    from() {
+      return {
+        select() {
+          return this
+        },
+        eq(_col: string, val: string) {
+          this._id = val
+          return this
+        },
+        async maybeSingle() {
+          if (this._id === 'job-1') {
+            return {
+              data: {
+                id: 'job-1',
+                platform: 'kalibrr',
+                external_url: 'https://www.kalibrr.com/c/acme/jobs/1',
+                description: 'Apply online',
+              },
+              error: null,
+            }
+          }
+          return { data: null, error: null }
+        },
+      }
+    },
+  }
+
+  let currentUser: string | null = 'user-1'
+  app.addHook('preHandler', async (req: any) => {
+    if (currentUser) req.user = { id: currentUser }
+  })
+  await app.register(jobRoutes, { prefix: '/api/jobs', db: fakeDb })
+
+  currentUser = null
+  const r401 = await app.inject({ method: 'GET', url: '/api/jobs/job-1/channel' })
+  assert.equal(r401.statusCode, 401)
+
+  currentUser = 'user-1'
+  const rBadId = await app.inject({ method: 'GET', url: '/api/jobs/bad%20id!/channel' })
+  assert.equal(rBadId.statusCode, 404)
+
+  const rMissing = await app.inject({ method: 'GET', url: '/api/jobs/unknown/channel' })
+  assert.equal(rMissing.statusCode, 404)
+
+  const rOk = await app.inject({ method: 'GET', url: '/api/jobs/job-1/channel' })
+  assert.equal(rOk.statusCode, 200)
+  const body = rOk.json()
+  assert.equal(body.channel, 'auth_portal')
+  assert.equal(body.extensionSupported, true)
+  assert.equal(body.manualOnly, false)
+})

@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { enrichJob } from '../../services/job-detail.service.js'
+import { resolveApplyChannel } from '../../services/apply-channel.js'
 import { salaryBenchmark } from '../../services/salary-benchmark.service.js'
 import { backfillState, isBackfillAdmin, runBackfill, selectBackfillTargets } from '../../services/job-backfill.service.js'
 
@@ -100,6 +101,22 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
       return result
     } catch (error: any) {
       return reply.status(500).send({ error: error?.message ?? 'Failed to compute salary benchmark' })
+    }
+  })
+
+  // Klasifikasi kanal lamaran (public_ats | email_direct | auth_portal | external_web) beserta aturan LinkedIn manual.
+  app.get('/:id/channel', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+    const { id } = request.params as { id: string }
+    if (!validId(id)) return reply.status(404).send({ error: 'Job not found' })
+
+    try {
+      const channel = await resolveApplyChannel(await getDb(), id)
+      if (!channel) return reply.status(404).send({ error: 'Job not found' })
+      return channel
+    } catch (error: any) {
+      return reply.status(500).send({ error: error?.message ?? 'Failed to classify job channel' })
     }
   })
 }

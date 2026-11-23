@@ -20,9 +20,11 @@ import { notificationRoutes } from './routes/notifications.js'
 import { jobRoutes } from './routes/jobs.js'
 import { profileImportRoutes } from './routes/profile-import.js'
 import { agentCodeRoutes } from './routes/agent-code.js'
+import { extensionRoutes } from './routes/extension.js'
 import { authMiddleware } from './middleware/auth.js'
 import { sessionKeyProblem } from '../services/session-crypto.js'
 import { deployConfigWarnings, isOriginAllowed, parseAllowedOrigins } from '../services/deploy-config.js'
+import { isExtensionOriginAllowed } from '../services/extension-token.js'
 
 // Produksi (Railway, Docker): log JSON polos ke stdout supaya mudah dibaca penampung log.
 // Lokal: pino-pretty berwarna.
@@ -52,7 +54,7 @@ const allowedOrigins = parseAllowedOrigins(process.env.FRONTEND_URL)
 
 await app.register(cors, {
   origin: (origin, cb) => {
-    cb(null, isOriginAllowed(origin, allowedOrigins))
+    cb(null, isOriginAllowed(origin, allowedOrigins) || isExtensionOriginAllowed(origin))
   },
   credentials: true,
 })
@@ -103,6 +105,8 @@ await app.register(platformRoutes, { prefix: '/api/platforms' })
 // OAuth: google start + callback are browser redirects (public); status/disconnect verify
 // the bearer token internally.
 await app.register(oauthRoutes, { prefix: '/api/oauth' })
+// Extension: POST /token mewajibkan JWT Supabase utama; rute lain memakai token scoped `ext_tok_v1.*`.
+await app.register(extensionRoutes, { prefix: '/api/extension' })
 
 const start = async () => {
   try {
