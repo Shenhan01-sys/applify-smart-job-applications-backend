@@ -31,7 +31,7 @@ export class FakeDb {
   tables: Record<string, Row[]>;
   /** Every write, in order: { table, op, payload } — for assertions. */
   writes: Array<{ table: string; op: "insert" | "update" | "delete"; payload?: any }> = [];
-  private errors = new Map<string, { message: string }>();
+  private errors = new Map<string, { message: string; code?: string }>();
   private seq = 0;
 
   constructor(seed: Record<string, Row[]> = {}) {
@@ -40,8 +40,8 @@ export class FakeDb {
   }
 
   /** Make every `table.op` call fail with this message (op: select|insert|update|delete). */
-  failOn(table: string, op: "select" | "insert" | "update" | "delete", message = "boom") {
-    this.errors.set(`${table}.${op}`, { message });
+  failOn(table: string, op: "select" | "insert" | "update" | "delete", message = "boom", code?: string) {
+    this.errors.set(`${table}.${op}`, { message, code });
   }
 
   rows(table: string): Row[] {
@@ -120,7 +120,7 @@ class Query implements PromiseLike<Result> {
 
   private run(): Result {
     const err = this.db.errorFor(this.table, this.op);
-    if (err) return { data: null, error: { message: err.message } };
+    if (err) return { data: null, error: { message: err.message, ...(err.code ? { code: err.code } : {}) } };
     const all = this.db.rows(this.table);
 
     if (this.op === "insert") {

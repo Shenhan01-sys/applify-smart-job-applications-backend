@@ -19,6 +19,7 @@ import { oauthRoutes } from './routes/oauth.js'
 import { notificationRoutes } from './routes/notifications.js'
 import { jobRoutes } from './routes/jobs.js'
 import { profileImportRoutes } from './routes/profile-import.js'
+import { agentCodeRoutes } from './routes/agent-code.js'
 import { authMiddleware } from './middleware/auth.js'
 import { sessionKeyProblem } from '../services/session-crypto.js'
 import { deployConfigWarnings, isOriginAllowed, parseAllowedOrigins } from '../services/deploy-config.js'
@@ -94,6 +95,7 @@ await app.register(async (app) => {
   await app.register(notificationRoutes, { prefix: '/api/notifications' })
   await app.register(jobRoutes, { prefix: '/api/jobs' })
   await app.register(profileImportRoutes, { prefix: '/api/profile' })
+  await app.register(agentCodeRoutes, { prefix: '/api/agent' })
 })
 
 // Public routes
