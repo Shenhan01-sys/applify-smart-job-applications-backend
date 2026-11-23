@@ -17,13 +17,22 @@ import { APPROVAL_TTL_MS } from '../api/routes/approval.js'
  *       1) `mark_sent`: catat log `success` (`manual_recovery`) & majukan lamaran ke `submitted` (klaim tetap).
  *       2) `create_fresh_approval`: biarkan klaim lama tetap terkunci selamanya, catat log `incomplete`
  *          (`reason: abandoned_locked_claim`), dan buat `approval_requests` baru berstatus `pending`.
+ *
+ * Penjaga pemulihan (temuan keamanan review v2):
+ *   - Kedua jalan hanya diterima bila status klaim SAAT ITU `locked_stuck`. Klaim `in_progress` (worker atau ekstensi
+ *     masih mengirim) ditolak 409, supaya pemulihan tidak menimbulkan lamaran ganda.
+ *   - Log `abandoned_locked_claim` dihitung sebagai klaim yang sudah diselesaikan (`abandoned`), jadi banner hilang
+ *     dan klik ulang dijawab 409, bukan membuat persetujuan baru lagi.
+ *   - Persetujuan baru memakai id turunan dari id lama, sehingga dua permintaan paralel tidak bisa membuat dua.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export const EXTENSION_CLAIM_STALE_MS = 2 * 60 * 1000
 export const MAX_CLAIM_STATUS_IDS = 50
+/** Nilai `details.reason` pada log `incomplete` yang menandai klaim lama ditinggalkan oleh `create_fresh_approval`. */
+export const ABANDONED_REASON = 'abandoned_locked_claim'
 
-export type ClaimStatusKind = 'none' | 'in_progress' | 'submitted' | 'locked_stuck'
+export type ClaimStatusKind = 'none' | 'in_progress' | 'submitted' | 'abandoned' | 'locked_stuck'
 
 export interface ClaimStatusInfo {
   approvalId: string
@@ -61,7 +70,7 @@ export async function getClaimStatuses(
 
   const [claimsRes, logsRes, queueRes] = await Promise.all([
     db.from(APPROVAL_CLAIM_TABLE).select('approval_request_id, channel, queue_job_id, run_id, created_at').eq('user_id', userId).in('approval_request_id', ids),
-    db.from('application_logs').select('status, details').eq('user_id', userId).in('status', ['success', 'submit_unverified']).in('details->>approval_request_id', ids),
+    db.from('application_logs').select('status, details').eq('user_id', userId).in('status', ['success', 'submit_unverified', 'incomplete']).in('details->>approval_request_id', ids),
     db.from('automation_queue').select('id, status, payload').eq('user_id', userId).eq('job_type', 'apply').in('status', ['pending', 'processing']).in('payload->>approval_request_id', ids),
   ])
 
@@ -71,10 +80,17 @@ export async function getClaimStatuses(
     throw new ClaimRecoveryError(500, 'claims_lookup_failed', 'Gagal memeriksa status klaim pengiriman')
   }
 
+  // Bukti tidak bisa dibaca (log atau antrean): jangan menyatakan `locked_stuck`, karena pengiriman mungkin sudah
+  // terjadi atau masih berjalan. Status jatuh ke `in_progress` (tidak ada tombol pemulihan) sampai bukti terbaca.
+  const evidenceUnknown = Boolean(logsRes.error) || Boolean(queueRes.error)
+
   const submittedIds = new Set<string>()
+  const abandonedIds = new Set<string>()
   for (const row of Array.isArray(logsRes.data) ? logsRes.data : []) {
     const aid = row?.details?.approval_request_id
-    if (typeof aid === 'string') submittedIds.add(aid)
+    if (typeof aid !== 'string') continue
+    if (row.status === 'success' || row.status === 'submit_unverified') submittedIds.add(aid)
+    else if (row.status === 'incomplete' && row.details?.reason === ABANDONED_REASON) abandonedIds.add(aid)
   }
 
   const activeQueueIds = new Set<string>()
@@ -107,10 +123,22 @@ export async function getClaimStatuses(
       continue
     }
 
+    if (abandonedIds.has(id)) {
+      out[id] = {
+        approvalId: id,
+        state: 'abandoned',
+        channel,
+        claimedAt: claim.created_at ?? null,
+        queueJobId: claim.queue_job_id ?? null,
+        runId: claim.run_id ?? null,
+      }
+      continue
+    }
+
     const claimedMs = claim.created_at ? new Date(claim.created_at).getTime() : 0
     const staleExt = channel === 'extension' && (!Number.isFinite(claimedMs) || now.getTime() - claimedMs >= EXTENSION_CLAIM_STALE_MS)
     const workerStillRunning = channel === 'worker' && activeQueueIds.has(id)
-    const isStuck = channel === 'worker' ? !workerStillRunning : staleExt
+    const isStuck = !evidenceUnknown && (channel === 'worker' ? !workerStillRunning : staleExt)
 
     out[id] = {
       approvalId: id,
@@ -149,26 +177,21 @@ export async function resolveLockedClaim(
   if (appErr) throw new ClaimRecoveryError(500, 'approval_lookup_failed', 'Gagal membaca persetujuan')
   if (!approval) throw new ClaimRecoveryError(404, 'approval_not_found', 'Persetujuan tidak ditemukan')
 
-  const { data: claim, error: claimErr } = await db
-    .from(APPROVAL_CLAIM_TABLE)
-    .select('approval_request_id, channel, queue_job_id, run_id')
-    .eq('approval_request_id', approvalId)
-    .eq('user_id', userId)
-    .maybeSingle()
-
-  if (claimErr) throw new ClaimRecoveryError(503, 'claim_unavailable', 'Tabel klaim persetujuan belum tersedia')
-  if (!claim) throw new ClaimRecoveryError(409, 'claim_not_found', 'Persetujuan ini tidak sedang terkunci oleh klaim aktif')
-
-  const { data: sent } = await db
-    .from('application_logs')
-    .select('id')
-    .eq('user_id', userId)
-    .in('status', ['success', 'submit_unverified'])
-    .contains('details', { approval_request_id: approvalId })
-    .limit(1)
-
-  if (Array.isArray(sent) && sent.length > 0) {
-    throw new ClaimRecoveryError(409, 'already_logged', 'Persetujuan ini sudah memiliki catatan pengiriman.')
+  // Status klaim dihitung ulang di sini (bukan dipercaya dari klien): hanya `locked_stuck` yang boleh dipulihkan.
+  const statuses = await getClaimStatuses(db, userId, [approvalId], now)
+  const claim = statuses[approvalId]
+  if (!claim) throw new ClaimRecoveryError(503, 'claim_unavailable', 'Tabel klaim persetujuan belum tersedia')
+  if (claim.state !== 'locked_stuck') {
+    switch (claim.state) {
+      case 'in_progress':
+        throw new ClaimRecoveryError(409, 'claim_in_progress', 'Pengiriman untuk persetujuan ini masih berjalan atau statusnya belum bisa dipastikan. Coba lagi nanti.')
+      case 'submitted':
+        throw new ClaimRecoveryError(409, 'already_logged', 'Persetujuan ini sudah memiliki catatan pengiriman.')
+      case 'abandoned':
+        throw new ClaimRecoveryError(409, 'already_resolved', 'Klaim ini sudah ditinggalkan dan persetujuan baru sudah dibuat.')
+      default:
+        throw new ClaimRecoveryError(409, 'claim_not_found', 'Persetujuan ini tidak sedang terkunci oleh klaim aktif')
+    }
   }
 
   if (resolution === 'mark_sent') {
@@ -203,26 +226,10 @@ export async function resolveLockedClaim(
     return { ok: true, resolution, newApprovalId: null }
   }
 
-  // `create_fresh_approval`: KLAIM LAMA TIDAK PERNAH DIHAPUS. Log mencatat abandonment eksplisit dan
-  // dibuatkan permintaan persetujuan baru berstatus `pending` agar pengguna memeriksa & menyetujui ulang secara sadar.
-  await db.from('application_logs').insert({
-    user_id: userId,
-    job_id: approval.job_id,
-    job_title: approval.job_title ?? null,
-    company: approval.company ?? null,
-    action: 'apply',
-    platform: String(approval.platform ?? 'web'),
-    status: 'incomplete',
-    details: {
-      approval_request_id: approvalId,
-      reason: 'abandoned_locked_claim',
-      previous_channel: claim.channel,
-      queue_job_id: claim.queue_job_id ?? null,
-      run_id: claim.run_id ?? null,
-    },
-  })
-
-  const newId = crypto.randomUUID()
+  // `create_fresh_approval`: KLAIM LAMA TIDAK PERNAH DIHAPUS. Dibuat dulu permintaan persetujuan baru berstatus `pending`
+  // (id turunan dari id lama: permintaan paralel kedua bentrok di kunci utama dan dijawab 409), baru log abandonment
+  // eksplisit ditulis. Bila log gagal, klaim tetap `locked_stuck` (banner tetap ada) dan klik ulang dijawab 409.
+  const newId = freshApprovalId(approvalId)
   const { data: insertedRows, error: insErr } = await db
     .from('approval_requests')
     .insert({
@@ -241,10 +248,43 @@ export async function resolveLockedClaim(
     })
     .select('id')
 
-  const created = Array.isArray(insertedRows) ? insertedRows[0] : insertedRows
   if (insErr) {
+    if (insErr.code === '23505') {
+      throw new ClaimRecoveryError(409, 'already_resolved', 'Persetujuan baru untuk klaim ini sudah dibuat.')
+    }
     throw new ClaimRecoveryError(500, 'fresh_approval_failed', 'Gagal membuat permintaan persetujuan baru')
+  }
+  const created = Array.isArray(insertedRows) ? insertedRows[0] : insertedRows
+
+  const { error: abandonErr } = await db.from('application_logs').insert({
+    user_id: userId,
+    job_id: approval.job_id,
+    job_title: approval.job_title ?? null,
+    company: approval.company ?? null,
+    action: 'apply',
+    platform: String(approval.platform ?? 'web'),
+    status: 'incomplete',
+    details: {
+      approval_request_id: approvalId,
+      reason: ABANDONED_REASON,
+      previous_channel: claim.channel,
+      queue_job_id: claim.queueJobId ?? null,
+      run_id: claim.runId ?? null,
+      fresh_approval_id: String(created?.id ?? newId),
+    },
+  })
+  if (abandonErr) {
+    throw new ClaimRecoveryError(500, 'log_insert_failed', 'Persetujuan baru dibuat, tetapi catatan pelepasan klaim gagal disimpan')
   }
 
   return { ok: true, resolution, newApprovalId: String(created?.id ?? newId) }
+}
+
+/** UUID deterministik (bentuk v5) dari id persetujuan lama: satu klaim hanya bisa melahirkan satu persetujuan baru. */
+function freshApprovalId(oldApprovalId: string): string {
+  const bytes = crypto.createHash('sha256').update(`applify:fresh-approval:${oldApprovalId.toLowerCase()}`).digest().subarray(0, 16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Buffer.from(bytes).toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
 }

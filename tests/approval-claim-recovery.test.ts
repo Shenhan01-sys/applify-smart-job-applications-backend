@@ -111,5 +111,153 @@ test('resolveLockedClaim: mark_sent & create_fresh_approval memulihkan tanpa per
   })
   assert.equal(httpClaims.statusCode, 200)
   assert.equal(httpClaims.json().claims[A1].state, 'submitted')
-  assert.equal(httpClaims.json().claims[A2].state, 'locked_stuck')
+  // Sesudah create_fresh_approval klaim lama dihitung selesai ('abandoned'), bukan lagi 'locked_stuck'.
+  assert.equal(httpClaims.json().claims[A2].state, 'abandoned')
+})
+
+function seedApproval(id: string, extra: Record<string, unknown> = {}) {
+  return {
+    id,
+    user_id: USER_ID,
+    job_id: `job-${id.slice(-1)}`,
+    application_id: `app-${id.slice(-1)}`,
+    job_title: 'BE',
+    company: 'Acme',
+    platform: 'greenhouse',
+    cover_letter: 'Surat',
+    answers: [],
+    status: 'approved',
+    expires_at: '2026-11-24T12:00:00Z',
+    ...extra,
+  }
+}
+
+const NOW = new Date('2026-11-23T12:10:00Z')
+
+test('resolveLockedClaim: klaim in_progress ditolak 409 untuk kedua jalan pulih dan tidak menulis apa pun', async () => {
+  const store = makeExtensionTestDb({
+    approval_requests: [seedApproval(A1), seedApproval(A2)],
+    approval_submit_claims: [
+      // worker masih memproses antrean
+      { approval_request_id: A1, user_id: USER_ID, channel: 'worker', queue_job_id: 'q1', created_at: '2026-11-23T12:00:00Z' },
+      // ekstensi baru 20 detik lalu
+      { approval_request_id: A2, user_id: USER_ID, channel: 'extension', run_id: 'r2', created_at: '2026-11-23T12:09:40Z' },
+    ],
+    automation_queue: [{ id: 'q1', user_id: USER_ID, job_type: 'apply', status: 'processing', payload: { approval_request_id: A1 } }],
+    ai_applications: [{ id: 'app-1', user_id: USER_ID, status: 'ready' }, { id: 'app-2', user_id: USER_ID, status: 'ready' }],
+  })
+
+  for (const id of [A1, A2]) {
+    for (const resolution of ['mark_sent', 'create_fresh_approval'] as const) {
+      await assert.rejects(
+        () => resolveLockedClaim(store.db, USER_ID, id, resolution, NOW),
+        (err: any) => err.statusCode === 409 && err.code === 'claim_in_progress'
+      )
+    }
+  }
+  assert.equal(store.tables.approval_requests.length, 2) // tidak ada persetujuan baru
+  assert.equal(store.tables.application_logs.length, 0) // tidak ada log
+  assert.equal(store.tables.ai_applications[0].status, 'ready')
+  assert.equal(store.tables.approval_submit_claims.length, 2)
+})
+
+test('resolveLockedClaim: sesudah create_fresh_approval klaim selesai; ulangan dijawab 409 dan tidak membuat persetujuan baru', async () => {
+  const store = makeExtensionTestDb(
+    {
+      approval_requests: [seedApproval(A1)],
+      approval_submit_claims: [{ approval_request_id: A1, user_id: USER_ID, channel: 'worker', queue_job_id: 'q1', created_at: '2026-11-23T12:00:00Z' }],
+    },
+    { uniqueKeys: { approval_submit_claims: 'approval_request_id', approval_requests: 'id' } }
+  )
+
+  const first = await resolveLockedClaim(store.db, USER_ID, A1, 'create_fresh_approval', NOW)
+  assert.ok(first.newApprovalId)
+  assert.equal(store.tables.approval_requests.length, 2)
+
+  const states = await getClaimStatuses(store.db, USER_ID, [A1], NOW)
+  assert.equal(states[A1].state, 'abandoned') // banner hilang
+
+  for (const resolution of ['create_fresh_approval', 'create_fresh_approval', 'mark_sent'] as const) {
+    await assert.rejects(
+      () => resolveLockedClaim(store.db, USER_ID, A1, resolution, NOW),
+      (err: any) => err.statusCode === 409 && err.code === 'already_resolved'
+    )
+  }
+  assert.equal(store.tables.approval_requests.length, 2) // tetap satu persetujuan baru
+  assert.equal(store.tables.application_logs.filter((l) => l.details?.reason === 'abandoned_locked_claim').length, 1)
+  assert.equal(store.tables.approval_submit_claims.length, 1) // klaim lama tidak pernah dihapus
+})
+
+test('resolveLockedClaim: dua permintaan create_fresh_approval paralel hanya menghasilkan satu persetujuan baru', async () => {
+  const store = makeExtensionTestDb(
+    {
+      approval_requests: [seedApproval(A1)],
+      approval_submit_claims: [{ approval_request_id: A1, user_id: USER_ID, channel: 'worker', created_at: '2026-11-23T12:00:00Z' }],
+    },
+    { uniqueKeys: { approval_submit_claims: 'approval_request_id', approval_requests: 'id' } }
+  )
+  const results = await Promise.allSettled([
+    resolveLockedClaim(store.db, USER_ID, A1, 'create_fresh_approval', NOW),
+    resolveLockedClaim(store.db, USER_ID, A1, 'create_fresh_approval', NOW),
+  ])
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1)
+  const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
+  assert.equal((rejected.reason as any).statusCode, 409)
+  assert.equal(store.tables.approval_requests.length, 2)
+})
+
+test('resolveLockedClaim: sudah ada log kirim -> 409; klaim milik pengguna lain tidak ditemukan', async () => {
+  const store = makeExtensionTestDb({
+    approval_requests: [seedApproval(A1), seedApproval(A2, { user_id: 'other-user' })],
+    approval_submit_claims: [
+      { approval_request_id: A1, user_id: USER_ID, channel: 'worker', created_at: '2026-11-23T12:00:00Z' },
+      { approval_request_id: A2, user_id: 'other-user', channel: 'worker', created_at: '2026-11-23T12:00:00Z' },
+    ],
+    application_logs: [{ user_id: USER_ID, status: 'success', details: { approval_request_id: A1 } }],
+  })
+  await assert.rejects(() => resolveLockedClaim(store.db, USER_ID, A1, 'create_fresh_approval', NOW), (e: any) => e.statusCode === 409 && e.code === 'already_logged')
+  await assert.rejects(() => resolveLockedClaim(store.db, USER_ID, A2, 'mark_sent', NOW), (e: any) => e.statusCode === 404)
+})
+
+test('getClaimStatuses: bukti tidak terbaca (log atau antrean gagal) tidak pernah dinyatakan locked_stuck', async () => {
+  const claims = [{ approval_request_id: A1, user_id: USER_ID, channel: 'worker', created_at: '2026-11-23T12:00:00Z' }]
+  for (const failing of ['application_logs', 'automation_queue']) {
+    const store = makeExtensionTestDb({ approval_submit_claims: claims }, { failTables: { [failing]: { code: 'XX000', message: 'boom' } } })
+    const map = await getClaimStatuses(store.db, USER_ID, [A1], NOW)
+    assert.equal(map[A1].state, 'in_progress', failing)
+  }
+})
+
+test('resolve-claim (HTTP): klaim in_progress 409, klaim macet pulih sekali, ulangan 409', async () => {
+  const store = makeExtensionTestDb(
+    {
+      approval_requests: [seedApproval(A1), seedApproval(A2)],
+      approval_submit_claims: [
+        { approval_request_id: A1, user_id: USER_ID, channel: 'worker', queue_job_id: 'q1', created_at: '2026-11-23T12:00:00Z' },
+        { approval_request_id: A2, user_id: USER_ID, channel: 'worker', queue_job_id: 'q2', created_at: '2026-11-23T12:00:00Z' },
+      ],
+      automation_queue: [{ id: 'q1', user_id: USER_ID, job_type: 'apply', status: 'processing', payload: { approval_request_id: A1 } }],
+    },
+    { uniqueKeys: { approval_submit_claims: 'approval_request_id', approval_requests: 'id' } }
+  )
+  const app = Fastify()
+  app.addHook('preHandler', async (req: any) => {
+    req.user = { id: USER_ID }
+  })
+  await app.register(approvalRoutes, { prefix: '/api/approvals', db: store.db, guard: { checkActionRateLimit: async () => {} } })
+  const post = (id: string, resolution: string) =>
+    app.inject({ method: 'POST', url: `/api/approvals/${id}/resolve-claim`, payload: { resolution } })
+
+  const busy = await post(A1, 'create_fresh_approval')
+  assert.equal(busy.statusCode, 409)
+  assert.equal(busy.json().code, 'claim_in_progress')
+
+  const ok = await post(A2, 'create_fresh_approval')
+  assert.equal(ok.statusCode, 200)
+  assert.ok(ok.json().newApprovalId)
+
+  const again = await post(A2, 'create_fresh_approval')
+  assert.equal(again.statusCode, 409)
+  assert.equal(again.json().code, 'already_resolved')
+  assert.equal(store.tables.approval_requests.length, 3)
 })
