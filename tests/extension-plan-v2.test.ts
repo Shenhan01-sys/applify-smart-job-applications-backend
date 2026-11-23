@@ -120,6 +120,47 @@ test('planner: kontrol "Shipping address" dan "Pinterest" kembali diproses (tida
   ])
 })
 
+test('planner di portal login (JobStreet, Glints, Kalibrr, Dealls): kata sandi dan OTP tidak pernah diisi atau dikirim ke AI', async () => {
+  for (const pageUrl of [
+    'https://id.jobstreet.com/id/job/1/apply',
+    'https://glints.com/id/opportunities/jobs/abc/apply',
+    'https://www.kalibrr.com/c/acme/jobs/1/apply',
+    'https://dealls.com/loker/backend~acme',
+  ]) {
+    const store = makeExtensionTestDb({
+      jobs: [{ id: 'job-1', title: 'Backend', company: 'Acme', description: '', location: 'Jakarta', external_url: pageUrl }],
+      profiles: [{ id: USER_ID, full_name: 'Budi Santoso' }],
+    })
+    let aiPrompt = ''
+    const planner = new ExtensionPlanner(async (req) => {
+      aiPrompt = req.user
+      return { model: 'm', text: '{"actions":[]}' }
+    }, () => NOW.getTime())
+
+    const res = await planner.planForm({
+      db: store.db,
+      userId: USER_ID,
+      jobId: 'job-1',
+      pageUrl,
+      rawControls: [
+        { controlId: 'c1', kind: 'text', label: 'Your opinion', required: false },
+        { controlId: 'c2', kind: 'text', label: 'Kata sandi', required: true },
+        { controlId: 'c3', kind: 'text', label: 'Kode OTP', required: true },
+        { controlId: 'c4', kind: 'text', label: 'Confirm Password', required: false },
+      ],
+    })
+
+    assert.ok(!res.actions.some((a) => ['c2', 'c3', 'c4'].includes(a.controlId)), pageUrl)
+    assert.ok(!aiPrompt.includes('c2') && !aiPrompt.includes('c3') && !aiPrompt.includes('c4'), `${pageUrl}: kontrol rahasia ikut ke AI`)
+    assert.ok(!/kata sandi|otp|password/i.test(aiPrompt), `${pageUrl}: label rahasia ikut ke AI`)
+    assert.deepEqual(
+      res.pendingQuestions.filter((q) => q.kind === 'secret_skip').map((q) => q.label).sort(),
+      ['Confirm Password', 'Kata sandi', 'Kode OTP'],
+      pageUrl
+    )
+  }
+})
+
 // -------------------------------------------------------------------------------------------------------------
 // 2. pendingQuestions untuk kontrol opsional
 // -------------------------------------------------------------------------------------------------------------
