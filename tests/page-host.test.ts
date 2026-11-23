@@ -78,3 +78,45 @@ test('pageMatchesJob: tanpa URL lowongan atau tanpa baris lowongan ditolak', () 
   assert.deepEqual(pageMatchesJob('https://boards.greenhouse.io/x', null), { ok: false, rule: 'no_job_url' })
   assert.deepEqual(pageMatchesJob('not a url', job('https://a.com')), { ok: false, rule: 'invalid_page_url' })
 })
+
+test('pageMatchesJob: portal login (JobStreet, Glints, Kalibrr, Dealls) cocok di domain sendiri, termasuk subdomain', () => {
+  const cases: Array<[string, string]> = [
+    ['https://id.jobstreet.com/id/job/1', 'https://id.jobstreet.com/id/job/1/apply'],
+    ['https://id.jobstreet.com/id/job/1', 'https://www.jobstreet.com/id/job/1/apply'],
+    ['https://glints.com/id/opportunities/jobs/abc', 'https://glints.com/id/opportunities/jobs/abc/apply'],
+    ['https://www.kalibrr.com/c/acme/jobs/1', 'https://kalibrr.com/apply/1'],
+    ['https://dealls.com/loker/backend~acme', 'https://dealls.com/loker/backend~acme/apply'],
+  ]
+  for (const [jobUrl, pageUrl] of cases) assert.equal(pageMatchesJob(pageUrl, job(jobUrl)).ok, true, `${jobUrl} -> ${pageUrl}`)
+})
+
+test('pageMatchesJob: tautan lama jobstreet.co.id dan kalibrr.id yang dialihkan ke domain baru tetap cocok (satu keluarga portal)', () => {
+  assert.deepEqual(pageMatchesJob('https://id.jobstreet.com/id/job/1/apply', job('https://www.jobstreet.co.id/id/job/1')), { ok: true, rule: 'same_portal' })
+  assert.deepEqual(pageMatchesJob('https://www.jobstreet.co.id/id/job/1', job('https://id.jobstreet.com/id/job/1')), { ok: true, rule: 'same_portal' })
+  assert.deepEqual(pageMatchesJob('https://www.kalibrr.com/c/acme/jobs/1', job('https://www.kalibrr.id/c/acme/jobs/1')), { ok: true, rule: 'same_portal' })
+  assert.deepEqual(pageMatchesJob('https://kalibrr.id/c/acme/jobs/1', job('https://www.kalibrr.com/c/acme/jobs/1')), { ok: true, rule: 'same_portal' })
+})
+
+test('pageMatchesJob: portal login tidak tertukar dengan portal lain, ATS, situs perusahaan, atau host mirip', () => {
+  const glints = job('https://glints.com/id/opportunities/jobs/abc')
+  const dealls = job('https://dealls.com/loker/backend~acme')
+  const jobstreet = job('https://id.jobstreet.com/id/job/1')
+
+  // Portal lain bukan keluarga yang sama.
+  assert.equal(pageMatchesJob('https://dealls.com/loker/x', glints).ok, false)
+  assert.equal(pageMatchesJob('https://glints.com/id/opportunities/jobs/abc', dealls).ok, false)
+  assert.equal(pageMatchesJob('https://www.kalibrr.com/c/acme/jobs/1', jobstreet).ok, false)
+  assert.equal(pageMatchesJob('https://www.jobstreet.co.id/id/job/1', glints).ok, false)
+  // Host mirip: bukan portalnya.
+  assert.equal(pageMatchesJob('https://glints.com.evil.test/id/opportunities/jobs/abc', glints).ok, false)
+  assert.equal(pageMatchesJob('https://notdealls.com/loker/x', dealls).ok, false)
+  assert.equal(pageMatchesJob('https://jobstreet.com.evil.test/job/1', jobstreet).ok, false)
+  assert.equal(pageMatchesJob('https://kalibrr.id.evil.test/c/acme/jobs/1', job('https://www.kalibrr.com/c/acme/jobs/1')).ok, false)
+  // Lowongan di ATS atau situs perusahaan tidak boleh berpindah ke halaman portal login (portal bukan tujuan lompatan ATS).
+  assert.equal(pageMatchesJob('https://id.jobstreet.com/id/job/1/apply', job('https://boards.greenhouse.io/acme/jobs/1')).ok, false)
+  assert.equal(pageMatchesJob('https://glints.com/id/opportunities/jobs/abc', job('https://careers.acme.com/jobs/1')).ok, false)
+  // Portal login tidak ikut dikenali sebagai host ATS.
+  for (const host of ['id.jobstreet.com', 'jobstreet.co.id', 'glints.com', 'kalibrr.com', 'kalibrr.id', 'dealls.com']) {
+    assert.equal(isKnownAtsHostname(host), false, host)
+  }
+})

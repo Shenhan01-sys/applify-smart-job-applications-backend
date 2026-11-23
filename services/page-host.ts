@@ -18,6 +18,9 @@ import {
  *      karena domain terdaftarnya dipakai bersama ratusan perusahaan.
  *   3. Lowongan berasal dari situs non-ATS (agregator atau situs karier) dan halaman berada di host ATS yang
  *      dikenal. Bila lowongan sendiri sudah di sebuah ATS, halaman di vendor ATS lain ditolak.
+ *   4. Lowongan dan halaman sama-sama di keluarga domain satu portal login yang sama (`jobstreet.co.id` dan
+ *      `jobstreet.com`, `kalibrr.id` dan `kalibrr.com`): tautan lama dialihkan ke domain baru oleh portalnya.
+ *      Portal lain, atau portal dan situs perusahaan, tetap ditolak.
  * Lowongan tanpa satu pun URL ditolak. LinkedIn diblokir lebih awal oleh pemanggil.
  */
 
@@ -49,6 +52,16 @@ export const KNOWN_ATS_DOMAINS: readonly string[] = [
     'keka.com',
     'freshteam.com',
   ]),
+]
+
+/**
+ * Domain-domain satu portal login yang sama (alias lama dan baru); semuanya ada di `EXTENSION_LOGIN_PORTAL_DOMAINS`
+ * (`apply-channel.ts`). Portal login sengaja BUKAN bagian `KNOWN_ATS_DOMAINS`: daftar itu adalah ATS publik yang boleh
+ * menjadi tujuan lompatan dari situs non-ATS, dan portal login tidak pernah menjadi tujuan lompatan itu.
+ */
+const LOGIN_PORTAL_FAMILIES: ReadonlyArray<readonly string[]> = [
+  ['jobstreet.com', 'jobstreet.co.id'],
+  ['kalibrr.com', 'kalibrr.id'],
 ]
 
 /** ATS yang memberi tiap perusahaan subdomain sendiri: kecocokan domain saja tidak cukup, host harus sama persis. */
@@ -135,8 +148,12 @@ export const isKnownAtsHostname = (hostname: string): boolean => {
 const tenantAtsDomain = (hostname: string): string | null =>
   TENANT_SUBDOMAIN_ATS_DOMAINS.find((d) => hostMatchesDomain(normalizeHost(hostname), [d])) ?? null
 
+/** Keluarga portal login untuk host ini (mis. `id.jobstreet.com` -> `jobstreet.com`, `jobstreet.co.id`), atau null. */
+const portalFamily = (hostname: string): readonly string[] | null =>
+  LOGIN_PORTAL_FAMILIES.find((family) => hostMatchesDomain(normalizeHost(hostname), family)) ?? null
+
 export type PageJobMatch =
-  | { ok: true; rule: 'same_host' | 'same_site' | 'known_ats' }
+  | { ok: true; rule: 'same_host' | 'same_site' | 'same_portal' | 'known_ats' }
   | { ok: false; rule: 'no_job_url' | 'invalid_page_url' | 'different_site' }
 
 /** URL halaman lamaran yang sah untuk lowongan ini: `external_url` ditambah tautan yang dipilih penggolong kanal. */
@@ -172,6 +189,9 @@ export function pageMatchesJob(pageUrl: unknown, job: JobChannelInput | null | u
     if (tenantAtsDomain(jobHost) || tenantAtsDomain(pageHost)) continue
     return { ok: true, rule: 'same_site' }
   }
+
+  const pageFamily = portalFamily(pageHost)
+  if (pageFamily && jobHosts.some((h) => portalFamily(h) === pageFamily)) return { ok: true, rule: 'same_portal' }
 
   const jobOnAts = jobHosts.some((h) => isKnownAtsHostname(h))
   if (!jobOnAts && isKnownAtsHostname(pageHost)) return { ok: true, rule: 'known_ats' }
