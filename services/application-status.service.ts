@@ -57,10 +57,37 @@ export type NotifyOutcome =
   | { sent: true; status: ApplicationStatus }
   | { sent: false; reason: 'not_found' | 'draft' | 'duplicate' | 'send_failed' | 'unknown_status'; detail?: string }
 
+export interface UserChannelDispatcher {
+  dispatchUserNotification(
+    db: StatusDb,
+    args: {
+      userId: string
+      event: 'ready' | 'submitted' | 'follow_up'
+      title: string
+      plainMessage: string
+    }
+  ): Promise<{ deliveredChannels: string[] }>
+}
+
+function plainStatusText(p: { status: ApplicationStatus; title?: string | null; company?: string | null; followUpAt?: string | null }): string {
+  const headline = HEADLINE[p.status]
+  const job = [p.title, p.company].filter(Boolean).join(' — ')
+  const extra =
+    p.status === 'submitted' && p.followUpAt
+      ? `Pengingat follow-up dijadwalkan ${new Date(p.followUpAt).toLocaleDateString('id-ID')}.`
+      : p.status === 'ready'
+        ? 'Cek halaman Persetujuan di Applify untuk meninjau formulir.'
+        : p.status === 'follow_up'
+          ? 'Saatnya mengirim follow-up atau memeriksa balasan HR.'
+          : ''
+  return [`Applify: ${headline}`, job ? `Lowongan: ${job}` : '', extra].filter(Boolean).join('\n')
+}
+
 export async function notifyApplicationStatus(
   db: StatusDb,
   notifier: Notifier,
-  args: { userId: string; applicationId: string }
+  args: { userId: string; applicationId: string },
+  opts?: { dispatcher?: UserChannelDispatcher }
 ): Promise<NotifyOutcome> {
   const { data: app } = await db
     .from('ai_applications')
@@ -90,20 +117,35 @@ export async function notifyApplicationStatus(
     ? await db.from('jobs').select('title, company').eq('id', app.job_id).maybeSingle()
     : { data: null }
 
-  const res = await notifier.sendTelegram(
-    statusMessage({ status, title: job?.title, company: job?.company, followUpAt: app.follow_up_scheduled })
-  )
-  if (!res.ok) return { sent: false, reason: 'send_failed', detail: res.error }
+  const htmlMsg = statusMessage({ status, title: job?.title, company: job?.company, followUpAt: app.follow_up_scheduled })
+  const res = await notifier.sendTelegram(htmlMsg)
+
+  let userChannels: string[] = []
+  if (opts?.dispatcher && (status === 'ready' || status === 'submitted' || status === 'follow_up')) {
+    const out = await opts.dispatcher
+      .dispatchUserNotification(db, {
+        userId: args.userId,
+        event: status,
+        title: `Applify: ${HEADLINE[status]}`,
+        plainMessage: plainStatusText({ status, title: job?.title, company: job?.company, followUpAt: app.follow_up_scheduled }),
+      })
+      .catch(() => ({ deliveredChannels: [] }))
+    userChannels = out.deliveredChannels
+  }
+
+  if (!res.ok && userChannels.length === 0) {
+    return { sent: false, reason: 'send_failed', detail: res.error }
+  }
 
   await db.from('application_logs').insert({
     user_id: args.userId,
     action: 'status_notify',
-    platform: 'telegram',
+    platform: userChannels[0] ?? 'telegram',
     job_id: app.job_id ? String(app.job_id) : null,
     job_title: job?.title ?? null,
     company: job?.company ?? null,
     status,
-    details: { application_id: app.id },
+    details: { application_id: app.id, ...(userChannels.length > 0 ? { channels: userChannels } : {}) },
   })
   return { sent: true, status }
 }

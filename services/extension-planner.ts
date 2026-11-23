@@ -274,14 +274,21 @@ function buildFactTokens(args: {
   )
   const firstName = cleanLine(settings?.first_name || fullName.split(' ')[0] || '', 60)
   const lastName = cleanLine(settings?.last_name || fullName.split(' ').slice(1).join(' ') || '', 60)
-  const phone = cleanLine(settings?.phone || profile?.phone || '', 40)
+  // Kolom nyata `user_automation_settings` (database/schema.sql): phone_number, current_city, website, desired_salary, us_citizenship.
+  const phone = cleanLine(settings?.phone_number || settings?.phone || profile?.phone || '', 40)
   const rawLocation = cleanLine(settings?.location || profile?.location || '', 120)
   const country = cleanLine(settings?.country || countryFromLocation(rawLocation) || '', 80)
-  const city = cleanLine(settings?.city || cityFromLocation(rawLocation) || '', 80)
+  const city = cleanLine(settings?.current_city || settings?.city || cityFromLocation(rawLocation) || '', 80)
   const derivedExp = deriveExperienceYears(workExperiences)
+  const rawSettingExp =
+    typeof settings?.years_of_experience === 'number'
+      ? settings.years_of_experience
+      : typeof settings?.years_of_experience === 'string' && settings.years_of_experience.trim() !== ''
+        ? Number(settings.years_of_experience)
+        : NaN
   const expYears =
-    typeof settings?.years_of_experience === 'number' && settings.years_of_experience > 0
-      ? String(settings.years_of_experience)
+    Number.isFinite(rawSettingExp) && rawSettingExp > 0
+      ? String(rawSettingExp)
       : typeof profile?.experience_years === 'number' && profile.experience_years > 0
         ? String(profile.experience_years)
         : derivedExp
@@ -299,15 +306,21 @@ function buildFactTokens(args: {
   put('last_name', lastName)
   put('email', cleanLine(settings?.email || profile?.email || email, 160))
   put('phone', phone)
-  put('location', rawLocation)
+  put('location', rawLocation || [city, country].filter(Boolean).join(', '))
   put('city', city)
   put('country', country)
   put('linkedin_url', cleanLine(settings?.linkedin_url || profile?.linkedin_url || '', 240))
-  put('portfolio_url', cleanLine(settings?.portfolio_url || profile?.portfolio_url || '', 240))
+  put('portfolio_url', cleanLine(settings?.website || settings?.portfolio_url || profile?.portfolio_url || '', 240))
   put('github_url', cleanLine(settings?.github_url || profile?.github_url || '', 240))
-  put('expected_salary', settings?.expected_salary ? String(settings.expected_salary) : '')
+  const desiredSalary = settings?.desired_salary ?? settings?.expected_salary
+  put('expected_salary', desiredSalary != null && String(desiredSalary).trim() !== '' ? String(desiredSalary) : '')
   put('years_of_experience', expYears)
-  put('work_authorization', cleanLine(settings?.work_authorization || '', 120))
+  const authFromCitizen =
+    /\b(citizen|permanent resident|green card)\b/i.test(String(settings?.us_citizenship ?? '')) ||
+    isYesLike(String(settings?.us_citizenship ?? ''))
+      ? 'Yes'
+      : ''
+  put('work_authorization', cleanLine(settings?.work_authorization || authFromCitizen, 120))
   if (!isUnconfirmedVisaDefault(settings?.require_visa) && settings?.require_visa) {
     put('require_visa', cleanLine(settings.require_visa, 40))
   }

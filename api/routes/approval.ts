@@ -1,14 +1,15 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
-import { supabase } from '../index.js'
 import { queueService } from '../../services/queue.service.js'
 import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
+import { AiAccessError, aiGuardService, type AiGuardService } from '../../services/ai-guard.service.js'
 import { regenerateApprovalCoverLetter } from '../../services/approval-regenerate.service.js'
 import { resumeUrlForUser } from '../../services/resume-file.service.js'
 import { rerunApproval } from '../../services/rerun-guard.js'
 import { markApprovalSent } from '../../services/manual-submit-guard.js'
 import { notifyApplicationStatus } from '../../services/application-status.service.js'
 import { notificationsService } from '../../services/notifications.service.js'
+import { ClaimRecoveryError, getClaimStatuses, resolveLockedClaim, type ClaimResolution } from '../../services/approval-claim-recovery.js'
 
 /** Masa berlaku permintaan persetujuan sejak dibuat: 24 jam. */
 export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000
@@ -36,10 +37,18 @@ interface ApprovalRequest {
   rejection_reason?: string
 }
 
+export interface ApprovalRoutesOptions extends FastifyPluginOptions {
+  db?: any
+  guard?: Pick<AiGuardService, 'checkActionRateLimit'>
+}
+
 export async function approvalRoutes(
   app: FastifyInstance,
-  _opts: FastifyPluginOptions
+  opts: ApprovalRoutesOptions = {}
 ) {
+  // Dimuat di dalam handler agar import file ini di tes offline tidak memicu api/index.ts.
+  const getDb = async (): Promise<any> => opts.db ?? (await import('../index.js')).supabase
+  const guard = opts.guard ?? aiGuardService
   // Get pending approvals for user
   app.get('/pending', async (request, reply) => {
     const userId = (request as any).user?.id
@@ -47,7 +56,8 @@ export async function approvalRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
-    const { data, error } = await supabase
+    const db = await getDb()
+    const { data, error } = await db
       .from('approval_requests')
       .select('*')
       .eq('user_id', userId)
@@ -71,7 +81,8 @@ export async function approvalRoutes(
 
     const { id } = request.params as { id: string }
 
-    const { data, error } = await supabase
+    const db = await getDb()
+    const { data, error } = await db
       .from('approval_requests')
       .select('*')
       .eq('id', id)
@@ -100,6 +111,7 @@ export async function approvalRoutes(
       platform,
       answers,
     } = request.body as any
+    const supabase = await getDb()
     // resume_url kiriman klien diabaikan. CV diambil dari profil pengguna (bucket privat `resumes`).
     const resume_url = await resumeUrlForUser(supabase as any, userId)
     let cover_letter = (request.body as any).cover_letter as string | undefined
@@ -115,18 +127,27 @@ export async function approvalRoutes(
 
     // Jawaban formulir beserta skor keyakinan datang dari jalur pengisian yang nyata (FormAutofillService),
     // dihitung di server dari Pengaturan Otomasi pengguna. `answers` kiriman klien hanya dipakai bila ada
-    // dan bentuknya benar; kalau tidak, server menyiapkannya sendiri.
+    // dan bentuknya benar; kalau tidak, server menyiapkannya sendiri (melewati batas laju AI).
     const clientAnswers = sanitizeClientAnswers(answers)
-    const preparedAnswers =
-      clientAnswers.length > 0
-        ? clientAnswers
-        : await prepareApprovalAnswers(supabase, {
-            userId,
-            email: (request as any).user?.email,
-            jobId: job_id,
-            jobTitle: job_title,
-            company,
-          })
+    let preparedAnswers = clientAnswers
+    if (clientAnswers.length === 0) {
+      try {
+        await guard.checkActionRateLimit(userId, 'ai_approval_prepare', '/api/approvals')
+      } catch (err: any) {
+        if (err instanceof AiAccessError) {
+          if (err.extra.retryAfterSec) reply.header('Retry-After', String(err.extra.retryAfterSec))
+          return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+        }
+        return reply.status(503).send({ error: 'Batas laju AI gagal diperiksa' })
+      }
+      preparedAnswers = await prepareApprovalAnswers(supabase, {
+        userId,
+        email: (request as any).user?.email,
+        jobId: job_id,
+        jobTitle: job_title,
+        company,
+      })
+    }
 
     const { data, error } = await supabase
       .from('approval_requests')
@@ -163,9 +184,10 @@ export async function approvalRoutes(
     }
 
     const { id } = request.params as { id: string }
+    const db = await getDb()
 
     // Check if approval request exists and is still pending
-    const { data: requestData, error: fetchError } = await supabase
+    const { data: requestData, error: fetchError } = await db
       .from('approval_requests')
       .select('*')
       .eq('id', id)
@@ -179,7 +201,7 @@ export async function approvalRoutes(
 
     // Check if expired
     if (new Date(requestData.expires_at) < new Date()) {
-      await supabase
+      await db
         .from('approval_requests')
         .update({ status: 'expired' })
         .eq('id', id)
@@ -199,7 +221,7 @@ export async function approvalRoutes(
 
     // Update status to approved. Guarded on status 'pending' so a double click (or two tabs) approves,
     // and queues, exactly once.
-    const { data: updated, error } = await supabase
+    const { data: updated, error } = await db
       .from('approval_requests')
       .update({
         status: 'approved',
@@ -219,7 +241,7 @@ export async function approvalRoutes(
     }
 
     if (editedCoverLetter && requestData.application_id) {
-      await supabase
+      await db
         .from('ai_applications')
         .update({ cover_letter: editedCoverLetter })
         .eq('id', requestData.application_id)
@@ -234,7 +256,7 @@ export async function approvalRoutes(
       return { success: true, message: 'Application approved and queued for submission', queue_job_id: queued.id }
     } catch (err: any) {
       // Jangan biarkan status "approved" tanpa pekerjaan di antrean.
-      await supabase
+      await db
         .from('approval_requests')
         .update({ status: 'pending', reviewed_at: null })
         .eq('id', id)
@@ -253,7 +275,7 @@ export async function approvalRoutes(
     }
 
     const { id } = request.params as { id: string }
-    const result = await rerunApproval(supabase as any, queueService, userId, id)
+    const result = await rerunApproval(await getDb(), queueService, userId, id)
     return reply.status(result.status).send(result.body)
   })
 
@@ -283,8 +305,9 @@ export async function approvalRoutes(
 
     const { id } = request.params as { id: string }
     const { reason } = request.body as { reason?: string }
+    const db = await getDb()
 
-    const { data: requestData, error: fetchError } = await supabase
+    const { data: requestData, error: fetchError } = await db
       .from('approval_requests')
       .select('*')
       .eq('id', id)
@@ -296,7 +319,7 @@ export async function approvalRoutes(
       return reply.status(404).send({ error: 'Approval request not found or already processed' })
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('approval_requests')
       .update({
         status: 'rejected',
@@ -311,7 +334,7 @@ export async function approvalRoutes(
     }
 
     // Log rejection for preference learning
-    await supabase.from('application_logs').insert({
+    await db.from('application_logs').insert({
       user_id: userId,
       action: 'reject',
       platform: requestData.platform,
@@ -337,7 +360,8 @@ export async function approvalRoutes(
     const { instructions } = (request.body ?? {}) as { instructions?: unknown }
 
     try {
-      const { coverLetter, model, warnings } = await regenerateApprovalCoverLetter(supabase, aiPipelineService, {
+      await guard.checkActionRateLimit(userId, 'ai_regenerate', '/api/approvals/:id/regenerate')
+      const { coverLetter, model, warnings } = await regenerateApprovalCoverLetter(await getDb(), aiPipelineService, {
         userId,
         approvalId: id,
         instructions,
@@ -345,9 +369,45 @@ export async function approvalRoutes(
       // warnings: numbers added by the rewrite that the original letter did not have (shown on the approval screen).
       return { success: true, cover_letter: coverLetter, model, warnings }
     } catch (error: any) {
+      if (error instanceof AiAccessError) {
+        if (error.extra.retryAfterSec) reply.header('Retry-After', String(error.extra.retryAfterSec))
+        return reply.status(error.statusCode).send({ error: error.message, code: error.code })
+      }
       // 404 unknown request, 410 expired, 502 AI gave nothing; anything else is a server fault.
       const status = typeof error?.statusCode === 'number' ? error.statusCode : 500
       return reply.status(status).send({ error: error?.message ?? 'Regenerate failed' })
+    }
+  })
+
+  // Status klaim pengiriman untuk daftar persetujuan (menampilkan status "terkunci" bila worker/ekstensi crash sesudah klaim).
+  app.post('/claim-statuses', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+    const rawIds = (request.body as any)?.approval_ids
+    try {
+      const claims = await getClaimStatuses(await getDb(), userId, rawIds)
+      return { claims }
+    } catch (error: any) {
+      if (error instanceof ClaimRecoveryError) {
+        return reply.status(error.statusCode).send({ error: error.message, code: error.code })
+      }
+      return reply.status(500).send({ error: error?.message ?? 'Failed to inspect claims' })
+    }
+  })
+
+  // Pemulihan aman untuk klaim macet tanpa menghapus klaim lama (mark_sent atau create_fresh_approval).
+  app.post('/:id/resolve-claim', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+    const { id } = request.params as { id: string }
+    const resolution = (request.body as any)?.resolution as ClaimResolution
+    try {
+      return await resolveLockedClaim(await getDb(), userId, id, resolution)
+    } catch (error: any) {
+      if (error instanceof ClaimRecoveryError) {
+        return reply.status(error.statusCode).send({ error: error.message, code: error.code })
+      }
+      return reply.status(500).send({ error: error?.message ?? 'Failed to resolve locked claim' })
     }
   })
 
@@ -360,7 +420,8 @@ export async function approvalRoutes(
 
     const { limit = 50, offset = 0 } = request.query as any
 
-    const { data, error } = await supabase
+    const db = await getDb()
+    const { data, error } = await db
       .from('approval_requests')
       .select('*')
       .eq('user_id', userId)

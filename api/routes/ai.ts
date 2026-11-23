@@ -93,6 +93,7 @@ export async function aiRoutes(
         options,
         jobDescription,
         userProfile,
+        userId: (request as any).user?.id,
       })
 
       return { success: true, answer }
@@ -106,7 +107,7 @@ export async function aiRoutes(
     const { jobDescription } = request.body as any
 
     try {
-      const skills = await aiPipelineService.extractSkills(jobDescription)
+      const skills = await aiPipelineService.extractSkills(jobDescription, (request as any).user?.id)
       return { success: true, skills }
     } catch (error: any) {
       return reply.status(500).send({ success: false, error: error.message })
@@ -118,7 +119,7 @@ export async function aiRoutes(
     const { jobDescription, userSkills } = request.body as any
 
     try {
-      const analysis = await aiPipelineService.analyzeJobMatch(jobDescription, userSkills)
+      const analysis = await aiPipelineService.analyzeJobMatch(jobDescription, userSkills, (request as any).user?.id)
       return { success: true, analysis }
     } catch (error: any) {
       return reply.status(500).send({ success: false, error: error.message })
@@ -155,7 +156,7 @@ export async function aiRoutes(
       })
 
       // Peringatan dasar fakta (angka, proyek, sertifikasi, perusahaan yang tidak ada di profil) ikut dikirim,
-      // tidak disimpan diam-diam sebagai fakta.
+      // tidak disimpan diam-diam sebagai fakta. (Hanya /cover-letter yang dicatat sebagai `ai_draft`.)
       return { success: true, cv: doc.text, model: doc.model, language: doc.language, warnings: doc.warnings }
     } catch (error: any) {
       return sendAiError(reply, error)

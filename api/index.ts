@@ -16,7 +16,7 @@ import { approvalRoutes } from './routes/approval.js'
 import { rateLimitRoutes } from './routes/rate-limit.js'
 import { linkedinSessionRoutes } from './routes/linkedin-session.js'
 import { oauthRoutes } from './routes/oauth.js'
-import { notificationRoutes } from './routes/notifications.js'
+import { notificationRoutes, whatsappWebhookRoutes } from './routes/notifications.js'
 import { jobRoutes } from './routes/jobs.js'
 import { profileImportRoutes } from './routes/profile-import.js'
 import { agentCodeRoutes } from './routes/agent-code.js'
@@ -107,6 +107,8 @@ await app.register(platformRoutes, { prefix: '/api/platforms' })
 await app.register(oauthRoutes, { prefix: '/api/oauth' })
 // Extension: POST /token mewajibkan JWT Supabase utama; rute lain memakai token scoped `ext_tok_v1.*`.
 await app.register(extensionRoutes, { prefix: '/api/extension' })
+// Webhook publik Kapso WhatsApp (dilindungi signature HMAC `x-hub-signature-256`).
+await app.register(whatsappWebhookRoutes, { prefix: '/api/notifications' })
 
 const start = async () => {
   try {

@@ -38,12 +38,13 @@ export interface ExtensionTokenClaims {
   scope: typeof EXTENSION_SCOPE
   sub: string
   jti: string
+  ver: number
   iat: number
   exp: number
 }
 
 export type VerifyExtensionTokenResult =
-  | { ok: true; claims: ExtensionTokenClaims; userId: string }
+  | { ok: true; claims: ExtensionTokenClaims; userId: string; tokenVersion: number }
   | { ok: false; reason: 'missing' | 'malformed' | 'invalid_signature' | 'invalid_claims' | 'expired' }
 
 function resolveMasterSecret(env: Env = process.env): string {
@@ -80,11 +81,12 @@ function deriveHmacKey(secret: string): Buffer {
 
 export function createExtensionToken(
   userId: string,
-  opts?: { ttlSec?: number; now?: Date; env?: Env }
-): { token: string; expiresAt: string; scope: typeof EXTENSION_SCOPE; ttlSeconds: number } {
+  opts?: { ttlSec?: number; ver?: number; now?: Date; env?: Env }
+): { token: string; expiresAt: string; scope: typeof EXTENSION_SCOPE; ttlSeconds: number; tokenVersion: number } {
   if (!UUID_RE.test(userId)) {
     throw new Error('userId harus UUID valid untuk membuat token ekstensi')
   }
+  const ver = typeof opts?.ver === 'number' && Number.isInteger(opts.ver) && opts.ver >= 1 ? opts.ver : 1
   const secret = resolveMasterSecret(opts?.env)
   const key = deriveHmacKey(secret)
   const nowSec = Math.floor((opts?.now ?? new Date()).getTime() / 1000)
@@ -100,6 +102,7 @@ export function createExtensionToken(
     scope: EXTENSION_SCOPE,
     sub: userId,
     jti: crypto.randomBytes(12).toString('hex'),
+    ver,
     iat: nowSec,
     exp,
   }
@@ -111,6 +114,7 @@ export function createExtensionToken(
     expiresAt: new Date(exp * 1000).toISOString(),
     scope: EXTENSION_SCOPE,
     ttlSeconds: ttlSec,
+    tokenVersion: ver,
   }
 }
 
@@ -152,6 +156,7 @@ export function verifyExtensionToken(
     typeof parsed.sub !== 'string' ||
     !UUID_RE.test(parsed.sub) ||
     typeof parsed.jti !== 'string' ||
+    (parsed.ver !== undefined && (!Number.isInteger(parsed.ver) || parsed.ver < 1)) ||
     !Number.isFinite(parsed.iat) ||
     !Number.isFinite(parsed.exp)
   ) {
@@ -163,7 +168,8 @@ export function verifyExtensionToken(
     return { ok: false, reason: 'expired' }
   }
 
-  return { ok: true, claims: parsed as ExtensionTokenClaims, userId: parsed.sub }
+  const tokenVersion = typeof parsed.ver === 'number' ? parsed.ver : 1
+  return { ok: true, claims: { ...parsed, ver: tokenVersion } as ExtensionTokenClaims, userId: parsed.sub, tokenVersion }
 }
 
 export function extractBearerToken(authHeader: unknown): string | null {
