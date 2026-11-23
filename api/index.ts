@@ -20,6 +20,7 @@ import { notificationRoutes } from './routes/notifications.js'
 import { jobRoutes } from './routes/jobs.js'
 import { profileImportRoutes } from './routes/profile-import.js'
 import { agentCodeRoutes } from './routes/agent-code.js'
+import { llmKeysRoutes } from './routes/llm-keys.js'
 import { extensionRoutes } from './routes/extension.js'
 import { authMiddleware } from './middleware/auth.js'
 import { sessionKeyProblem } from '../services/session-crypto.js'
@@ -98,6 +99,7 @@ await app.register(async (app) => {
   await app.register(jobRoutes, { prefix: '/api/jobs' })
   await app.register(profileImportRoutes, { prefix: '/api/profile' })
   await app.register(agentCodeRoutes, { prefix: '/api/agent' })
+  await app.register(llmKeysRoutes, { prefix: '/api/llm-keys' })
 })
 
 // Public routes
