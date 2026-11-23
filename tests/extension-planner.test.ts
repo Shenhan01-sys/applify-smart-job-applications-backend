@@ -6,6 +6,7 @@ import {
   ExtensionPlanner,
   sanitizeExtensionControls,
   sanitizePendingQuestions,
+  workAuthorizationFromUsCitizenship,
 } from '../services/extension-planner.js'
 import { makeExtensionTestDb, USER_ID } from './extension-test-db.js'
 
@@ -83,4 +84,47 @@ test('sanitizePendingQuestions: kunci dihitung ulang, rahasia dan bentuk rusak d
   assert.deepEqual(sanitizePendingQuestions([{ label: 'Text with options', kind: 'text', options: ['a'] }]), [
     { key: 'text with options', label: 'Text with options', kind: 'text' },
   ])
+})
+
+test('workAuthorizationFromUsCitizenship: nilai persis saja; "Non-citizen" dan sejenisnya tidak pernah menjadi Yes', () => {
+  const us = 'San Francisco, CA, United States'
+  for (const v of ['US Citizen', 'u.s. citizen', 'Citizen', 'Permanent Resident', 'green-card holder', 'Green Card', 'yes', 'Ya']) {
+    assert.equal(workAuthorizationFromUsCitizenship(v, us), 'Yes', v)
+  }
+  for (const v of ['Non-citizen', 'non citizen', 'Not a citizen', 'No', 'no', 'Citizen of Indonesia', 'Decline', 'Visa holder (H-1B)', '', null, undefined, 42]) {
+    assert.equal(workAuthorizationFromUsCitizenship(v, us), '', String(v))
+  }
+})
+
+test('workAuthorizationFromUsCitizenship: hanya untuk lowongan di Amerika Serikat; negara lain atau tidak jelas dibiarkan kosong', () => {
+  assert.equal(workAuthorizationFromUsCitizenship('US Citizen', 'Austin, TX, USA'), 'Yes')
+  assert.equal(workAuthorizationFromUsCitizenship('US Citizen', 'Amerika Serikat'), 'Yes')
+  for (const loc of ['Jakarta, Indonesia', 'London, United Kingdom', 'Berlin, Germany', 'Remote', 'Austin, TX', '', null, undefined]) {
+    assert.equal(workAuthorizationFromUsCitizenship('US Citizen', loc), '', String(loc))
+  }
+})
+
+test('planForm: izin kerja dari us_citizenship hanya masuk fakta kandidat untuk lowongan AS dengan nilai persis', async () => {
+  const run = async (usCitizenship: string, location: string) => {
+    let captured = ''
+    const planner = new ExtensionPlanner(async (req) => {
+      captured = req.user
+      return { model: 'm', text: '{"actions":[]}' }
+    })
+    const store = makeExtensionTestDb({
+      jobs: [{ id: 'job-1', title: 'Engineer', company: 'Acme', description: '', location }],
+      user_automation_settings: [{ user_id: USER_ID, us_citizenship: usCitizenship }],
+    })
+    await planner.planForm({
+      db: store.db,
+      userId: USER_ID,
+      jobId: 'job-1',
+      pageUrl: 'https://boards.greenhouse.io/acme/jobs/1',
+      rawControls: [{ controlId: 'c1', kind: 'textarea', label: 'Why us?', required: true }],
+    })
+    return captured
+  }
+  assert.match(await run('US Citizen', 'New York, United States'), /Izin kerja: Yes/)
+  assert.doesNotMatch(await run('Non-citizen', 'New York, United States'), /Izin kerja/)
+  assert.doesNotMatch(await run('US Citizen', 'Jakarta, Indonesia'), /Izin kerja/)
 })

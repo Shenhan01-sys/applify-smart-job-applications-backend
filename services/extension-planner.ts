@@ -242,6 +242,45 @@ function isSecretControl(c: SanitizedExtControl): boolean {
 const YES_LIKE = new Set(['yes', 'ya', 'iya', 'true', 'y', 'setuju', 'i agree'])
 const isYesLike = (s: string): boolean => YES_LIKE.has(s.trim().toLowerCase().replace(/[.!\s]+$/, ''))
 
+/**
+ * Nilai persis (sesudah dinormalkan) kolom `us_citizenship` yang berarti pengguna berhak bekerja di Amerika Serikat
+ * tanpa sponsor visa. Sengaja daftar nilai persis, bukan pola `\bcitizen\b`: pola itu cocok dengan "Non-citizen" dan
+ * "Not a citizen" lalu menjawab Yes.
+ */
+const US_WORK_AUTHORIZED_VALUES = new Set([
+  'citizen',
+  'us citizen',
+  'united states citizen',
+  'american citizen',
+  'permanent resident',
+  'us permanent resident',
+  'lawful permanent resident',
+  'green card',
+  'green card holder',
+  'us green card holder',
+])
+
+const normalizeCitizenshipValue = (raw: unknown): string =>
+  String(raw ?? '')
+    .toLowerCase()
+    .replace(/\./g, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[!\s]+$/, '')
+
+/**
+ * Jawaban izin kerja yang boleh diturunkan dari `user_automation_settings.us_citizenship`. Kolom itu soal Amerika
+ * Serikat, jadi hanya dipakai untuk lowongan yang negaranya jelas Amerika Serikat. Negara lowongan tidak diketahui,
+ * negara lain, atau nilai kolom di luar daftar persis: kembali kosong (jangan diisi).
+ */
+export function workAuthorizationFromUsCitizenship(usCitizenship: unknown, jobLocation: unknown): string {
+  if (countryFromLocation(typeof jobLocation === 'string' ? jobLocation : '') !== 'United States') return ''
+  const value = normalizeCitizenshipValue(usCitizenship)
+  if (!value) return ''
+  return US_WORK_AUTHORIZED_VALUES.has(value) || isYesLike(value) ? 'Yes' : ''
+}
+
 const controlQuestionLabel = (c: SanitizedExtControl): string => {
   if (c.kind === 'radio' && c.groupLabel) return c.groupLabel
   return c.label || c.placeholder || c.name
@@ -266,8 +305,9 @@ function buildFactTokens(args: {
   achievements: string[]
   email: string
   coverLetter: string
+  jobLocation?: string | null
 }): { tokens: Record<string, string>; summaryLines: string[] } {
-  const { profile, settings, skills, workExperiences, achievements, email, coverLetter } = args
+  const { profile, settings, skills, workExperiences, achievements, email, coverLetter, jobLocation } = args
   const fullName = cleanLine(
     `${settings?.first_name ?? ''} ${settings?.last_name ?? ''}`.trim() || profile?.full_name || '',
     120
@@ -315,11 +355,7 @@ function buildFactTokens(args: {
   const desiredSalary = settings?.desired_salary ?? settings?.expected_salary
   put('expected_salary', desiredSalary != null && String(desiredSalary).trim() !== '' ? String(desiredSalary) : '')
   put('years_of_experience', expYears)
-  const authFromCitizen =
-    /\b(citizen|permanent resident|green card)\b/i.test(String(settings?.us_citizenship ?? '')) ||
-    isYesLike(String(settings?.us_citizenship ?? ''))
-      ? 'Yes'
-      : ''
+  const authFromCitizen = workAuthorizationFromUsCitizenship(settings?.us_citizenship, jobLocation)
   put('work_authorization', cleanLine(settings?.work_authorization || authFromCitizen, 120))
   if (!isUnconfirmedVisaDefault(settings?.require_visa) && settings?.require_visa) {
     put('require_visa', cleanLine(settings.require_visa, 40))
@@ -511,7 +547,7 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       { data: answerRows },
       resumeUrl,
     ] = await Promise.all([
-      db.from('jobs').select('id, title, company, description').eq('id', jobId).maybeSingle(),
+      db.from('jobs').select('id, title, company, description, location').eq('id', jobId).maybeSingle(),
       db.from('profiles').select('*').eq('id', userId).maybeSingle(),
       db.from('user_automation_settings').select('*').eq('user_id', userId).maybeSingle(),
       db.from('user_skills').select('name').eq('user_id', userId),
@@ -561,6 +597,7 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       achievements,
       email: args.userEmail ?? '',
       coverLetter: args.coverLetter ?? '',
+      jobLocation: typeof job?.location === 'string' ? job.location : null,
     })
 
     // 2. Pencocokan faktual deterministik sebelum memanggil model.
