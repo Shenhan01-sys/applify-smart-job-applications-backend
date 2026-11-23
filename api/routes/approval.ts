@@ -290,6 +290,7 @@ export async function approvalRoutes(
     }
 
     const { id } = request.params as { id: string }
+    const supabase = await getDb()
     const result = await markApprovalSent(supabase as any, userId, id, new Date(), (applicationId) =>
       notifyApplicationStatus(supabase as any, notificationsService, { userId, applicationId })
     )
