@@ -1,5 +1,6 @@
 import { aiPipelineService } from './ai-pipeline.service.js'
 import { UNCONFIRMED_DEFAULT_CONFIDENCE, isUnconfirmedVisaDefault } from './applicant-fallbacks.js'
+import { citizenshipFormAnswer } from './us-work-authorization.js'
 
 export interface FormField {
   type: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox' | 'file'
@@ -17,6 +18,11 @@ export interface FormContext {
   jobDescription: string
   userSettings: any
   userProfile: any
+  /**
+   * Teks lokasi lowongan (`jobs.location`). Dipakai hanya untuk pertanyaan kewarganegaraan: `us_citizenship` dijawab
+   * hanya untuk lowongan yang negaranya jelas Amerika Serikat. Kosong atau tidak jelas: pengguna ditanya.
+   */
+  jobLocation?: string | null
 }
 
 export interface FillResult {
@@ -117,6 +123,21 @@ export class FormAutofillService {
       return { value: context.userProfile?.email || '', confidence: 0.99 }
     }
 
+    // Citizenship dan izin kerja. Diperiksa SEBELUM aturan lokasi: "Are you eligible to work in the United States?"
+    // mengandung "state" dan "in this country" mengandung "country", sehingga dulu terjawab dengan nama negara bagian
+    // atau negara. `us_citizenship` hanya untuk lowongan di Amerika Serikat dan hanya nilai persis (aturan bersama dengan
+    // planner ekstensi: us-work-authorization.ts). Selain itu kosong dengan keyakinan 0, bukan "Decline" atau opsi pertama.
+    // "Country of citizenship" tetap lewat aturan negara di bawah seperti sebelumnya.
+    const asksEligible = label.includes('eligible to work')
+    if (asksEligible || (label.includes('citizenship') && !label.includes('country'))) {
+      return citizenshipFormAnswer({
+        usCitizenship: settings.us_citizenship,
+        jobLocation: context.jobLocation,
+        options,
+        eligibleToWork: asksEligible,
+      })
+    }
+
     // Location
     if (label.includes('city') && !label.includes('current')) {
       return { value: settings.current_city || '', confidence: settings.current_city ? 0.85 : 0 }
@@ -175,11 +196,6 @@ export class FormAutofillService {
         value: this.findOption(options, visa),
         confidence: isUnconfirmedVisaDefault(visa) ? UNCONFIRMED_DEFAULT_CONFIDENCE : 0.95,
       }
-    }
-
-    // Citizenship
-    if (label.includes('citizenship') || label.includes('eligible to work')) {
-      return { value: this.findOption(options, settings.us_citizenship || 'Decline'), confidence: 0.9 }
     }
 
     // Demographics

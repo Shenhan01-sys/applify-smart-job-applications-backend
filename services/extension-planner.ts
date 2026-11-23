@@ -10,6 +10,7 @@ export interface CompleteJsonRequest {
 }
 import { stripCodeFence, stripReasoning } from './ai-output-guard.js'
 import { cityFromLocation, countryFromLocation, isUnconfirmedVisaDefault } from './applicant-fallbacks.js'
+import { isYesLike, workAuthorizationFromUsCitizenship } from './us-work-authorization.js'
 import { isLinkedInUrl, sanitizeHttpUrl } from './apply-channel.js'
 import { deriveExperienceYears } from './experience-years.js'
 import { ACHIEVEMENT_GROUNDING_RULE, ACHIEVEMENT_HEADING, buildAchievementLines } from './profile-context.js'
@@ -239,47 +240,7 @@ function isSecretControl(c: SanitizedExtControl): boolean {
   return SECRET_LABEL_RE.test(hay)
 }
 
-const YES_LIKE = new Set(['yes', 'ya', 'iya', 'true', 'y', 'setuju', 'i agree'])
-const isYesLike = (s: string): boolean => YES_LIKE.has(s.trim().toLowerCase().replace(/[.!\s]+$/, ''))
-
-/**
- * Nilai persis (sesudah dinormalkan) kolom `us_citizenship` yang berarti pengguna berhak bekerja di Amerika Serikat
- * tanpa sponsor visa. Sengaja daftar nilai persis, bukan pola `\bcitizen\b`: pola itu cocok dengan "Non-citizen" dan
- * "Not a citizen" lalu menjawab Yes.
- */
-const US_WORK_AUTHORIZED_VALUES = new Set([
-  'citizen',
-  'us citizen',
-  'united states citizen',
-  'american citizen',
-  'permanent resident',
-  'us permanent resident',
-  'lawful permanent resident',
-  'green card',
-  'green card holder',
-  'us green card holder',
-])
-
-const normalizeCitizenshipValue = (raw: unknown): string =>
-  String(raw ?? '')
-    .toLowerCase()
-    .replace(/\./g, '')
-    .replace(/[-_]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[!\s]+$/, '')
-
-/**
- * Jawaban izin kerja yang boleh diturunkan dari `user_automation_settings.us_citizenship`. Kolom itu soal Amerika
- * Serikat, jadi hanya dipakai untuk lowongan yang negaranya jelas Amerika Serikat. Negara lowongan tidak diketahui,
- * negara lain, atau nilai kolom di luar daftar persis: kembali kosong (jangan diisi).
- */
-export function workAuthorizationFromUsCitizenship(usCitizenship: unknown, jobLocation: unknown): string {
-  if (countryFromLocation(typeof jobLocation === 'string' ? jobLocation : '') !== 'United States') return ''
-  const value = normalizeCitizenshipValue(usCitizenship)
-  if (!value) return ''
-  return US_WORK_AUTHORIZED_VALUES.has(value) || isYesLike(value) ? 'Yes' : ''
-}
+export { workAuthorizationFromUsCitizenship }
 
 const controlQuestionLabel = (c: SanitizedExtControl): string => {
   if (c.kind === 'radio' && c.groupLabel) return c.groupLabel

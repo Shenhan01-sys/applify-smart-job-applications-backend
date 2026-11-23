@@ -97,7 +97,7 @@ export interface AnswerInput {
   settings: Record<string, any>
   /** `achievements`: baris penghargaan dan publikasi (buildAchievementLines). Hanya dipakai untuk jawaban AI teks panjang. */
   profile: { email?: string | null; skills?: string[]; achievements?: string[] }
-  job: { title: string; company: string; description: string }
+  job: { title: string; company: string; description: string; location?: string | null }
   /** Baris `profiles` pengguna. Dipakai hanya untuk kolom Pengaturan Otomasi yang kosong. */
   profileRow?: Record<string, any> | null
   /** Baris `work_experiences` (start_date, end_date, is_current). Dasar tahun pengalaman bila kolom lain kosong atau 0. */
@@ -223,6 +223,7 @@ export async function buildApprovalAnswers(
     jobDescription: job.description,
     userSettings: settings,
     userProfile: profile,
+    jobLocation: job.location ?? null,
   }
 
   const out: ApprovalAnswer[] = []
@@ -330,7 +331,7 @@ export async function prepareApprovalAnswers(
       db.from('user_automation_settings').select('*').eq('user_id', args.userId).maybeSingle(),
       db.from('profiles').select('*').eq('id', args.userId).maybeSingle(),
       db.from('user_skills').select('name').eq('user_id', args.userId),
-      args.jobId ? db.from('jobs').select('description').eq('id', args.jobId).maybeSingle() : Promise.resolve({ data: null }),
+      args.jobId ? db.from('jobs').select('description, location').eq('id', args.jobId).maybeSingle() : Promise.resolve({ data: null }),
       loadAchievementLines(db, args.userId),
       loadWorkExperiences(db, args.userId),
     ])
@@ -344,7 +345,12 @@ export async function prepareApprovalAnswers(
           skills: (skills ?? []).map((s: any) => s.name).filter(Boolean),
           ...(achievements.length > 0 ? { achievements } : {}),
         },
-        job: { title: args.jobTitle, company: args.company, description: String(jobRow?.description ?? '') },
+        job: {
+          title: args.jobTitle,
+          company: args.company,
+          description: String(jobRow?.description ?? ''),
+          location: typeof jobRow?.location === 'string' ? jobRow.location : null,
+        },
       },
       filler
     )
