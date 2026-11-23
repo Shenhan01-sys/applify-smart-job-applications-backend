@@ -5,6 +5,7 @@ import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswe
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { regenerateApprovalCoverLetter } from '../../services/approval-regenerate.service.js'
 import { resumeUrlForUser } from '../../services/resume-file.service.js'
+import { rerunApproval } from '../../services/rerun-guard.js'
 
 interface ApprovalRequest {
   id: string
@@ -232,6 +233,21 @@ export async function approvalRoutes(
         .eq('id', id)
       return reply.status(500).send({ error: `Failed to queue submission (approval reverted to pending): ${err.message}` })
     }
+  })
+
+  // Run an approved application again, e.g. after the user answered the questions the worker could not.
+  // Queues the same approved apply job; the worker only sends if no earlier run of this approval was sent.
+  // Same protection as /approve: the auth preHandler of the /api scope plus the user_id filter on every read.
+  // On top of that, rerun-guard.ts refuses a rerun while a job is active and caps the runs per approval.
+  app.post('/:id/rerun', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' })
+    }
+
+    const { id } = request.params as { id: string }
+    const result = await rerunApproval(supabase as any, queueService, userId, id)
+    return reply.status(result.status).send(result.body)
   })
 
   // Reject application

@@ -12,6 +12,14 @@ function isSubset(sub: any, sup: any): boolean {
   return Object.entries(sub).every(([k, v]) => isSubset(v, sup[k]));
 }
 
+/** Column value; `payload->>key` reads one jsonb key as text, like PostgREST. */
+function colValue(r: Row, col: string): any {
+  const i = col.indexOf("->>");
+  if (i < 0) return r[col];
+  const v = r[col.slice(0, i)]?.[col.slice(i + 3)];
+  return v == null ? v : String(v);
+}
+
 /** SQL LIKE with % wildcards, case-insensitive (enough for ilike/or filters in tests). */
 function likeMatch(value: any, pattern: string): boolean {
   if (value == null) return false;
@@ -79,13 +87,13 @@ class Query implements PromiseLike<Result> {
   update(payload: Row) { this.op = "update"; this.payload = payload; return this; }
   delete() { this.op = "delete"; return this; }
 
-  eq(col: string, val: any) { this.filters.push((r) => r[col] === val); return this; }
+  eq(col: string, val: any) { this.filters.push((r) => colValue(r, col) === val); return this; }
   neq(col: string, val: any) { this.filters.push((r) => r[col] !== val); return this; }
   gt(col: string, val: any) { this.filters.push((r) => r[col] != null && r[col] > val); return this; }
   gte(col: string, val: any) { this.filters.push((r) => r[col] != null && r[col] >= val); return this; }
   lt(col: string, val: any) { this.filters.push((r) => r[col] != null && r[col] < val); return this; }
   lte(col: string, val: any) { this.filters.push((r) => r[col] != null && r[col] <= val); return this; }
-  in(col: string, vals: any[]) { this.filters.push((r) => vals.includes(r[col])); return this; }
+  in(col: string, vals: any[]) { this.filters.push((r) => vals.includes(colValue(r, col))); return this; }
   is(col: string, val: any) { this.filters.push((r) => (val === null ? r[col] == null : r[col] === val)); return this; }
   contains(col: string, obj: any) { this.filters.push((r) => isSubset(obj, r[col])); return this; }
   ilike(col: string, pattern: string) { this.filters.push((r) => likeMatch(r[col], pattern)); return this; }
