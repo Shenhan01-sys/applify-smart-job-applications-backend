@@ -13,7 +13,10 @@
     "mcp:jobs:http": "tsx mcp/server.ts --http",
     "smoke:portals": "tsx mcp/smoke-portals.ts",
     "test:portals": "tsx --test \"mcp/__tests__/*.test.ts\"",
-    "test": "tsx --test \"tests/*.test.ts\" \"mcp/__tests__/*.test.ts\""
+    "test": "tsx --test \"tests/*.test.ts\" \"mcp/__tests__/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "test:integration": "tsx --test --test-concurrency=1 \"tests/integration/*.test.ts\"",
+    "verify": "npm run typecheck && npm run test && npm run test:integration && npm run build"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",
