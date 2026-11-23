@@ -50,14 +50,27 @@ export const PUBLIC_ATS_DOMAINS = [
   'jazzhr.com',
 ] as const
 
+/**
+ * Portal lowongan Indonesia yang butuh login pengguna dan diisi oleh EKSTENSI browser (pengguna masuk sendiri,
+ * ekstensi mengisi formulir di tabnya). Ini bukan ATS publik: tidak pernah masuk `PUBLIC_ATS_DOMAINS`, tidak pernah
+ * `autoWorkerSupported`, dan worker tidak boleh mengirim lamaran di sana. Subdomain ikut (`id.jobstreet.com`).
+ *
+ * Daftar ini DISALIN ke `extension/src/lib/atsDomains.ts` (`LOGIN_PORTAL_DOMAINS`) dan `worker/src/lib/pageGuard.ts`
+ * (`LOGIN_PORTAL_HOSTS`, yang memblokir kirim). Ubah ketiganya bersamaan; tes ekstensi membandingkan salinannya.
+ */
+export const EXTENSION_LOGIN_PORTAL_DOMAINS = [
+  'jobstreet.com',
+  'jobstreet.co.id',
+  'glints.com',
+  'kalibrr.com',
+  'kalibrr.id',
+  'dealls.com',
+] as const
+
 export const AUTH_PORTAL_DOMAINS = [
   'linkedin.com',
-  'jobstreet.co.id',
-  'jobstreet.com',
-  'kalibrr.com',
-  'glints.com',
+  ...EXTENSION_LOGIN_PORTAL_DOMAINS,
   'karir.com',
-  'dealls.com',
   'techinasia.com',
   'indeed.com',
   'glassdoor.com',
@@ -133,6 +146,11 @@ export function sanitizeHttpUrl(raw: unknown): string | null {
   } catch {
     return null
   }
+}
+
+/** Host adalah portal login yang diisi ekstensi (JobStreet, Glints, Kalibrr, Dealls) atau subdomainnya. */
+export function isLoginPortalHost(hostname: string): boolean {
+  return hostMatchesDomain(hostname, EXTENSION_LOGIN_PORTAL_DOMAINS)
 }
 
 export function isLinkedInHost(hostname: string): boolean {
@@ -215,7 +233,10 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
     }
   }
 
-  if (resolvedAtsUrl || (platform && PUBLIC_ATS_PLATFORMS.has(platform) && primaryUrl)) {
+  // Label platform ATS pada URL portal login (data campur aduk) tidak boleh mengirim lowongan itu ke worker.
+  const primaryOnLoginPortal = Boolean(primaryUrl) && isLoginPortalHost(new URL(primaryUrl as string).hostname)
+
+  if (resolvedAtsUrl || (platform && PUBLIC_ATS_PLATFORMS.has(platform) && primaryUrl && !primaryOnLoginPortal)) {
     const targetUrl = resolvedAtsUrl ?? primaryUrl
     return {
       channel: 'public_ats',

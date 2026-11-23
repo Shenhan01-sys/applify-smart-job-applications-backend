@@ -1,7 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import Fastify from 'fastify'
-import { classifyJobChannel, extractApplyEmail, extractPublicAtsUrl } from '../services/apply-channel.js'
+import {
+  AUTH_PORTAL_DOMAINS,
+  EXTENSION_LOGIN_PORTAL_DOMAINS,
+  PUBLIC_ATS_DOMAINS,
+  classifyJobChannel,
+  extractApplyEmail,
+  extractPublicAtsUrl,
+  isLoginPortalHost,
+} from '../services/apply-channel.js'
+import { KNOWN_ATS_DOMAINS } from '../services/page-host.js'
 import { jobRoutes } from '../api/routes/jobs.js'
 
 test('classifyJobChannel: Greenhouse / Lever URL diklasifikasikan sebagai public_ats dan mendukung worker', () => {
@@ -144,5 +153,104 @@ test('GET /api/jobs/:id/channel: butuh auth, validasi id, kembalikan 404 atau kl
   for (const cols of selectedColumns) {
     assert.ok(cols.split(',').map((c) => c.trim()).includes('platform_source'), cols)
     assert.ok(!cols.split(',').map((c) => c.trim()).includes('platform'), cols)
+  }
+})
+
+// ---- Portal login yang diisi ekstensi: JobStreet, Glints, Kalibrr, Dealls ------------------------------------------
+
+test('EXTENSION_LOGIN_PORTAL_DOMAINS: enam domain portal, termasuk di AUTH_PORTAL_DOMAINS, tidak pernah di daftar ATS publik', () => {
+  assert.deepEqual([...EXTENSION_LOGIN_PORTAL_DOMAINS].sort(), [
+    'dealls.com',
+    'glints.com',
+    'jobstreet.co.id',
+    'jobstreet.com',
+    'kalibrr.com',
+    'kalibrr.id',
+  ])
+  for (const d of EXTENSION_LOGIN_PORTAL_DOMAINS) {
+    assert.ok((AUTH_PORTAL_DOMAINS as readonly string[]).includes(d), `${d} harus ada di AUTH_PORTAL_DOMAINS`)
+    assert.equal((PUBLIC_ATS_DOMAINS as readonly string[]).includes(d), false, `${d} tidak boleh jadi ATS publik (jalur worker)`)
+    assert.equal(KNOWN_ATS_DOMAINS.includes(d), false, `${d} tidak boleh jadi KNOWN_ATS_DOMAINS (daftar ATS yang dikenal worker)`)
+  }
+  // Tidak ada domain portal login yang diam-diam menumpang di daftar ATS atau sebaliknya.
+  for (const d of KNOWN_ATS_DOMAINS) assert.equal(isLoginPortalHost(d), false, d)
+})
+
+test('isLoginPortalHost: domain, subdomain, dan www cocok; host mirip dan awalan menempel ditolak', () => {
+  for (const host of [
+    'id.jobstreet.com',
+    'www.jobstreet.com',
+    'jobstreet.com',
+    'jobstreet.co.id',
+    'www.jobstreet.co.id',
+    'glints.com',
+    'www.glints.com',
+    'kalibrr.com',
+    'www.kalibrr.com',
+    'kalibrr.id',
+    'dealls.com',
+    'api.dealls.com',
+    'ID.JobStreet.COM',
+  ]) {
+    assert.equal(isLoginPortalHost(host), true, host)
+  }
+  for (const host of [
+    'glints.com.evil.test',
+    'notdealls.com',
+    'evil-glints.com',
+    'jobstreet.com.evil.test',
+    'jobstreet.co.id.evil.test',
+    'kalibrr.id.evil.test',
+    'kalibrr.net',
+    'dealls.co',
+    'linkedin.com',
+    '',
+  ]) {
+    assert.equal(isLoginPortalHost(host), false, host)
+  }
+})
+
+test('classifyJobChannel: tiap portal login (termasuk id.jobstreet.com, jobstreet.co.id, kalibrr.id) menuju ekstensi, bukan worker', () => {
+  for (const url of [
+    'https://id.jobstreet.com/id/job/123',
+    'https://www.jobstreet.co.id/id/job/123',
+    'https://glints.com/id/opportunities/jobs/abc/123',
+    'https://www.kalibrr.com/c/acme/jobs/123',
+    'https://www.kalibrr.id/c/acme/jobs/123',
+    'https://dealls.com/loker/backend-engineer~acme',
+  ]) {
+    const res = classifyJobChannel({ external_url: url })
+    assert.equal(res.channel, 'auth_portal', url)
+    assert.equal(res.autoWorkerSupported, false, `${url}: worker tidak boleh mengisi/mengirim di portal login`)
+    assert.equal(res.emailApplySupported, false, url)
+    assert.equal(res.extensionSupported, true, url)
+    assert.equal(res.manualOnly, false, url)
+    assert.equal(res.applyUrl, url)
+  }
+})
+
+test('classifyJobChannel: label platform ATS pada URL portal login tidak mengirim lowongan ke worker', () => {
+  for (const platform of ['greenhouse', 'lever', 'workable', 'bamboohr']) {
+    const res = classifyJobChannel({ platform, external_url: 'https://id.jobstreet.com/id/job/123' })
+    assert.equal(res.channel, 'auth_portal', platform)
+    assert.equal(res.autoWorkerSupported, false, platform)
+    assert.equal(res.extensionSupported, true, platform)
+  }
+  // Kontrol: label ATS pada URL ATS tetap ke worker.
+  const ok = classifyJobChannel({ platform: 'greenhouse', external_url: 'https://boards.greenhouse.io/acme/jobs/1' })
+  assert.equal(ok.channel, 'public_ats')
+  assert.equal(ok.autoWorkerSupported, true)
+})
+
+test('classifyJobChannel: host mirip portal login bukan auth_portal dan tidak pernah mendukung worker', () => {
+  for (const url of [
+    'https://glints.com.evil.test/id/opportunities/jobs/abc',
+    'https://notdealls.com/loker/x',
+    'https://jobstreet.com.evil.test/job/1',
+    'https://kalibrr.id.evil.test/c/acme/jobs/1',
+  ]) {
+    const res = classifyJobChannel({ external_url: url })
+    assert.equal(res.channel, 'external_web', url)
+    assert.equal(res.autoWorkerSupported, false, url)
   }
 })
