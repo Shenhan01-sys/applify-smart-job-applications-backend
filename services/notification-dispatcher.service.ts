@@ -314,9 +314,9 @@ export async function requestWhatsappVerificationOtp(
   }
 
   const currentSettings = await getUserNotificationSettings(db, userId)
-  const sendRes = await whatsapp.sendMessage({
+  const sendRes = await whatsapp.sendOtp({
     to: norm.e164,
-    body: `Kode verifikasi Applify Anda: ${code} (berlaku 10 menit). Jangan bagikan kode ini kepada siapa pun.`,
+    code,
     lastInboundAt: currentSettings.whatsappLastInboundAt,
     now,
   })
