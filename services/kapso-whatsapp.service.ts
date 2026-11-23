@@ -1,4 +1,5 @@
 import crypto from 'crypto'
+import { networkErrorCode, notificationsEnabled, notifyTimeoutSignal } from './notifications-switch.js'
 
 /**
  * Integrasi WhatsApp resmi via Kapso (`https://docs.kapso.ai/docs/introduction`).
@@ -105,6 +106,9 @@ export class KapsoWhatsAppService {
     forceText?: boolean
     now?: Date
   }): Promise<KapsoSendResult> {
+    if (!notificationsEnabled(this.env)) {
+      return { ok: false, error: 'notifications_disabled' }
+    }
     const cfg = this.config()
     if (!isKapsoConfigured(cfg)) {
       return { ok: false, error: 'kapso_not_configured' }
@@ -165,6 +169,7 @@ export class KapsoWhatsAppService {
           'X-API-Key': cfg.apiKey,
         },
         body: JSON.stringify(payload),
+        signal: notifyTimeoutSignal(),
       })
       const text = await resp.text()
       let data: any = {}
@@ -174,12 +179,17 @@ export class KapsoWhatsAppService {
         data = {}
       }
       if (!resp.ok) {
-        return { ok: false, error: `kapso_${resp.status}: ${String(data?.error?.message ?? text).slice(0, 160)}` }
+        // Isi galat Kapso (bisa memuat nomor atau token) hanya masuk log server, tidak dikembalikan ke pemanggil.
+        const providerCode = typeof data?.error?.code === 'number' || typeof data?.error?.code === 'string' ? String(data.error.code).slice(0, 32) : ''
+        console.warn(`[kapso] kirim gagal: HTTP ${resp.status}${providerCode ? ` kode ${providerCode}` : ''}`)
+        return { ok: false, error: `kapso_http_${resp.status}` }
       }
       const messageId = Array.isArray(data?.messages) ? data.messages[0]?.id : data?.id
       return { ok: true, mode, ...(typeof messageId === 'string' ? { messageId } : {}) }
-    } catch (err: any) {
-      return { ok: false, error: String(err?.message ?? err) }
+    } catch (err: unknown) {
+      const code = networkErrorCode('kapso', err)
+      console.warn(`[kapso] kirim gagal: ${code}`)
+      return { ok: false, error: code }
     }
   }
 }

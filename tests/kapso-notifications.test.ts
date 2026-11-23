@@ -17,6 +17,8 @@ import { notificationRoutes, whatsappWebhookRoutes } from '../api/routes/notific
 import { makeExtensionTestDb } from './extension-test-db.js'
 
 const USER_ID = '11111111-2222-3333-4444-555555555555'
+/** Sakelar notifikasi hidup + pepper OTP, hanya untuk uji dengan fetch tiruan (tidak ada jaringan). */
+const ON = { NOTIFICATIONS_ENABLED: 'true', NOTIFY_OTP_PEPPER: 'test-pepper-not-a-secret' }
 
 test('normalizeWhatsAppPhone & KapsoWhatsAppService: normalisasi E.164, 24h window teks vs template luar window', async () => {
   assert.deepEqual(normalizeWhatsAppPhone('0812-3456-7890'), { e164: '+6281234567890', waDigits: '6281234567890' })
@@ -31,6 +33,7 @@ test('normalizeWhatsAppPhone & KapsoWhatsAppService: normalisasi E.164, 24h wind
   }) as typeof fetch
 
   const kapso = new KapsoWhatsAppService(fakeFetch, {
+    ...ON,
     KAPSO_API_KEY: 'kapso-test-key',
     KAPSO_PHONE_NUMBER_ID: 'pn-123',
     KAPSO_TEMPLATE_NAME: 'applify_status_id',
@@ -61,7 +64,7 @@ test('normalizeWhatsAppPhone & KapsoWhatsAppService: normalisasi E.164, 24h wind
   assert.equal(sentPayloads[1].template.name, 'applify_status_id')
 
   // Di luar 24 jam TANPA template dan TANPA sandbox -> tolak jujur
-  const noTpl = new KapsoWhatsAppService(fakeFetch, { KAPSO_API_KEY: 'k', KAPSO_PHONE_NUMBER_ID: 'p' })
+  const noTpl = new KapsoWhatsAppService(fakeFetch, { ...ON, KAPSO_API_KEY: 'k', KAPSO_PHONE_NUMBER_ID: 'p' })
   const r3 = await noTpl.sendMessage({ to: '08123456789', body: 'hi', lastInboundAt: null, now })
   assert.equal(r3.ok, false)
   assert.equal(r3.error, 'outside_24h_window_no_template')
@@ -78,6 +81,7 @@ test('Alur OTP WhatsApp & Webhook Kapso x-hub-signature-256 + Dispatcher status'
   }) as typeof fetch
 
   const kapso = new KapsoWhatsAppService(fakeFetch, {
+    ...ON,
     KAPSO_API_KEY: 'kapso-test-key',
     KAPSO_PHONE_NUMBER_ID: 'pn-123',
     KAPSO_SANDBOX_MODE: 'true',
@@ -91,15 +95,15 @@ test('Alur OTP WhatsApp & Webhook Kapso x-hub-signature-256 + Dispatcher status'
   })
 
   const t0 = new Date('2026-11-23T12:00:00Z')
-  const reqRes = await requestWhatsappVerificationOtp(store.db, kapso, USER_ID, '081234567890', t0)
+  const reqRes = await requestWhatsappVerificationOtp(store.db, kapso, USER_ID, '081234567890', t0, ON)
   assert.equal(reqRes.sent, true)
   assert.match(capturedOtp, /^\d{6}$/)
 
   // OTP salah ditolak
-  await assert.rejects(() => verifyWhatsappVerificationOtp(store.db, USER_ID, '081234567890', '000000', t0), /Kode OTP salah/)
+  await assert.rejects(() => verifyWhatsappVerificationOtp(store.db, USER_ID, '081234567890', '000000', t0, ON), /Kode OTP salah/)
 
   // OTP benar memverifikasi dan mengaktifkan whatsapp
-  const verified = await verifyWhatsappVerificationOtp(store.db, USER_ID, '+6281234567890', capturedOtp, t0)
+  const verified = await verifyWhatsappVerificationOtp(store.db, USER_ID, '+6281234567890', capturedOtp, t0, ON)
   assert.equal(verified.whatsappVerified, true)
   assert.equal(verified.whatsappEnabled, true)
 
@@ -135,7 +139,7 @@ test('Alur OTP WhatsApp & Webhook Kapso x-hub-signature-256 + Dispatcher status'
   assert.equal(store.tables.user_notification_settings[0].whatsapp_last_inbound_at, '2026-11-23T14:00:00.000Z')
 
   // notifyApplicationStatus mengirim ke WA user walaupun Telegram operator mati
-  const dispatcher = new NotificationDispatcherService(kapso, async () => ({ ok: false }))
+  const dispatcher = new NotificationDispatcherService(kapso, async () => ({ ok: false }), ON)
   const notifyRes = await notifyApplicationStatus(
     store.db,
     { sendTelegram: async () => ({ ok: false, error: 'telegram not configured' }) },

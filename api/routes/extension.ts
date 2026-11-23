@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { authMiddleware } from '../middleware/auth.js'
+import { afterReplyFor, runAfterReplyTasks } from '../../services/after-reply.js'
 import {
   createExtensionToken,
   ExtensionTokenConfigError,
@@ -216,7 +217,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
   // 5. Laporkan hasil eksekusi ekstensi + unggah bukti PNG privat ke agent-screenshots.
   //    Batas badan diperbesar hanya di sini: dua PNG base64 melewati 1 MiB bawaan Fastify, dan laporan kirim yang
   //    ditolak 413 sesudah klik Submit membuat pengguna menekan Kirim lagi (temuan keamanan 3).
-  app.post('/report-run', { bodyLimit: REPORT_RUN_BODY_LIMIT }, async (request, reply) => {
+  app.post('/report-run', { bodyLimit: REPORT_RUN_BODY_LIMIT, onResponse: runAfterReplyTasks }, async (request, reply) => {
     const userId = await requireExtensionUser(request, reply)
     if (!userId) return reply
     const body = (request.body ?? {}) as Record<string, unknown>
@@ -240,7 +241,8 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
           filledScreenshot: body.filledScreenshot,
           afterScreenshot: body.afterScreenshot,
         },
-        new Date(now())
+        new Date(now()),
+        afterReplyFor(request)
       )
     } catch (err: any) {
       if (err instanceof ExtensionRunnerError) {

@@ -11,6 +11,7 @@ import {
   updateUserNotificationSettings,
   verifyWhatsappVerificationOtp,
 } from '../../services/notification-dispatcher.service.js'
+import { notificationsEnabled } from '../../services/notifications-switch.js'
 import type { GuardDb } from '../../services/queue-guard.js'
 
 /** Minimum gap between two Telegram test messages from the same user. */
@@ -35,13 +36,15 @@ export async function notificationRoutes(
   const whatsapp = opts.whatsapp ?? kapsoWhatsAppService
   const dispatcher = opts.dispatcher ?? notificationDispatcher
   const now = opts.now ?? (() => new Date())
+  const env = opts.env ?? process.env
 
   // Get notification channel configuration status
   app.get('/status', async () => {
     return {
       ...notificationsService.status(),
+      notificationsEnabled: notificationsEnabled(env),
       whatsappKapso: whatsapp.isConfigured(),
-      email: Boolean((process.env.RESEND_API_KEY ?? '').trim() && (process.env.NOTIFY_FROM_EMAIL ?? '').trim()),
+      email: Boolean((env.RESEND_API_KEY ?? '').trim() && (env.NOTIFY_FROM_EMAIL ?? '').trim()),
     }
   })
 
@@ -50,12 +53,12 @@ export async function notificationRoutes(
     const userId = (request as any).user?.id
     if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
     try {
-      return await getUserNotificationSettings(await getDb(), userId)
+      return await getUserNotificationSettings(await getDb(), userId, { withAccountEmail: true })
     } catch (err: any) {
       if (err instanceof NotificationPreferenceError) {
         return reply.status(err.statusCode).send({ error: err.message, code: err.code })
       }
-      return reply.status(500).send({ error: err?.message ?? 'Gagal membaca preferensi notifikasi' })
+      return reply.status(500).send({ error: 'Gagal membaca preferensi notifikasi', code: 'preferences_failed' })
     }
   })
 
@@ -70,9 +73,8 @@ export async function notificationRoutes(
         {
           ...(typeof body.whatsappEnabled === 'boolean' ? { whatsappEnabled: body.whatsappEnabled } : {}),
           ...(typeof body.emailEnabled === 'boolean' ? { emailEnabled: body.emailEnabled } : {}),
-          ...(body.emailAddress !== undefined ? { emailAddress: body.emailAddress as string | null } : {}),
-          ...(typeof body.telegramEnabled === 'boolean' ? { telegramEnabled: body.telegramEnabled } : {}),
-          ...(body.telegramChatId !== undefined ? { telegramChatId: body.telegramChatId as string | null } : {}),
+          // `emailAddress`, `telegramEnabled`, dan `telegramChatId` dari klien diabaikan: email selalu email akun
+          // Auth (read-only) dan tidak ada chat Telegram per pengguna.
           ...(body.notifyEvents && typeof body.notifyEvents === 'object' ? { notifyEvents: body.notifyEvents as any } : {}),
         },
         now()
@@ -81,7 +83,7 @@ export async function notificationRoutes(
       if (err instanceof NotificationPreferenceError) {
         return reply.status(err.statusCode).send({ error: err.message, code: err.code })
       }
-      return reply.status(500).send({ error: err?.message ?? 'Gagal memperbarui preferensi notifikasi' })
+      return reply.status(500).send({ error: 'Gagal memperbarui preferensi notifikasi', code: 'preferences_failed' })
     }
   })
 
@@ -90,12 +92,12 @@ export async function notificationRoutes(
     if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
     const phone = String((request.body as any)?.phone ?? '')
     try {
-      return await requestWhatsappVerificationOtp(await getDb(), whatsapp, userId, phone, now())
+      return await requestWhatsappVerificationOtp(await getDb(), whatsapp, userId, phone, now(), env)
     } catch (err: any) {
       if (err instanceof NotificationPreferenceError) {
         return reply.status(err.statusCode).send({ error: err.message, code: err.code })
       }
-      return reply.status(500).send({ error: err?.message ?? 'Gagal mengirim OTP WhatsApp' })
+      return reply.status(500).send({ error: 'Gagal mengirim OTP WhatsApp', code: 'otp_request_failed' })
     }
   })
 
@@ -105,12 +107,12 @@ export async function notificationRoutes(
     const phone = String((request.body as any)?.phone ?? '')
     const code = String((request.body as any)?.code ?? '')
     try {
-      return await verifyWhatsappVerificationOtp(await getDb(), userId, phone, code, now())
+      return await verifyWhatsappVerificationOtp(await getDb(), userId, phone, code, now(), env)
     } catch (err: any) {
       if (err instanceof NotificationPreferenceError) {
         return reply.status(err.statusCode).send({ error: err.message, code: err.code })
       }
-      return reply.status(500).send({ error: err?.message ?? 'Gagal memverifikasi OTP WhatsApp' })
+      return reply.status(500).send({ error: 'Gagal memverifikasi OTP WhatsApp', code: 'otp_verify_failed' })
     }
   })
 
@@ -125,6 +127,9 @@ export async function notificationRoutes(
       const retryAfter = Math.ceil((TELEGRAM_TEST_COOLDOWN_MS - (tNow - prev)) / 1000)
       return reply.status(429).header('Retry-After', String(retryAfter)).send({ error: 'Too many test notifications', retry_after_seconds: retryAfter })
     }
+    if (!notificationsEnabled(env)) {
+      return reply.status(503).send({ success: false, error: 'Notifikasi sedang dinonaktifkan di server.', code: 'notifications_disabled' })
+    }
     const settings = await getUserNotificationSettings(await getDb(), userId)
     if (!settings.whatsappVerified || !settings.whatsappPhone) {
       return reply.status(400).send({ error: 'Nomor WhatsApp belum terverifikasi', code: 'whatsapp_not_verified' })
@@ -137,7 +142,7 @@ export async function notificationRoutes(
       now: now(),
     })
     if (!sent.ok) {
-      return reply.status(503).send({ success: false, error: sent.error })
+      return reply.status(503).send({ success: false, error: 'Pesan uji WhatsApp gagal dikirim.', code: sent.error ?? 'whatsapp_send_failed' })
     }
     return { success: true, mode: sent.mode }
   })
@@ -160,7 +165,7 @@ export async function notificationRoutes(
     lastTestAt.set(userId, nowMs)
     const result = await notificationsService.sendTelegram(TELEGRAM_TEST_MESSAGE)
     if (!result.ok) {
-      return reply.status(503).send({ success: false, error: result.error })
+      return reply.status(503).send({ success: false, error: 'Pesan uji Telegram gagal dikirim.', code: result.error ?? 'telegram_send_failed' })
     }
     return { success: true }
   })
@@ -179,8 +184,8 @@ export async function notificationRoutes(
     try {
       const db = await getDb()
       return await notifyApplicationStatus(db as any, notificationsService, { userId, applicationId: application_id }, { dispatcher })
-    } catch (error: any) {
-      return reply.status(500).send({ error: error.message })
+    } catch {
+      return reply.status(500).send({ error: 'Gagal mengirim notifikasi status', code: 'status_notify_failed' })
     }
   })
 }

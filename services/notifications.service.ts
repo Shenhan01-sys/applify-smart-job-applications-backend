@@ -1,3 +1,5 @@
+import { isTestRuntime, networkErrorCode, notifyTimeoutSignal } from './notifications-switch.js'
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID || ''
 
@@ -16,6 +18,7 @@ class NotificationsService {
 
   /** Send a plain-text message to the configured Telegram chat. Config-driven: skips silently if unset. */
   async sendTelegram(message: string): Promise<{ ok: boolean; error?: string }> {
+    if (isTestRuntime()) return { ok: false, error: 'telegram_disabled_in_test' }
     if (!this.isTelegramConfigured()) {
       console.warn('[notifications] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — skipping Telegram send')
       return { ok: false, error: 'telegram not configured' }
@@ -32,17 +35,19 @@ class NotificationsService {
             parse_mode: 'HTML',
             disable_web_page_preview: true,
           }),
+          signal: notifyTimeoutSignal(),
         }
       )
       if (!resp.ok) {
-        const text = await resp.text()
-        console.error('[notifications] Telegram error:', resp.status, text)
-        return { ok: false, error: `telegram ${resp.status}: ${text}` }
+        // Isi balasan Telegram hanya untuk log server; pemanggil (dan klien) menerima kode generik.
+        console.error('[notifications] Telegram error: HTTP', resp.status)
+        return { ok: false, error: `telegram_http_${resp.status}` }
       }
       return { ok: true }
-    } catch (e: any) {
-      console.error('[notifications] Telegram send failed:', e?.message)
-      return { ok: false, error: String(e?.message ?? e) }
+    } catch (e: unknown) {
+      const code = networkErrorCode('telegram', e)
+      console.error('[notifications] Telegram send failed:', code)
+      return { ok: false, error: code }
     }
   }
 }

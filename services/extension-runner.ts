@@ -7,6 +7,7 @@ import { DAILY_APPLY_LIMIT, COUNTED_ACTIONS, startOfUtcDay } from './rate-limit.
 import { APPLICATION_STATUSES, notifyApplicationStatus, type ApplicationStatus } from './application-status.service.js'
 import { notificationDispatcher } from './notification-dispatcher.service.js'
 import { notificationsService } from './notifications.service.js'
+import { runDetached, type AfterReply } from './after-reply.js'
 
 /**
  * Penjaga & pelapor eksekusi Ekstensi Browser Applify (`pending-approvals`, `authorize-submit`, `report-run`).
@@ -639,11 +640,16 @@ export interface ReportRunResult {
   lateExpired: boolean
 }
 
+/**
+ * `afterReply` menjadwalkan notifikasi SESUDAH balasan HTTP terkirim (rute memberikannya). Tanpa itu, notifikasi
+ * jalan terlepas dari alur ini (`runDetached`). Notifikasi tidak pernah ditunggu sebelum membalas.
+ */
 export async function reportExtensionRun(
   db: GuardDb & { storage?: any },
   userId: string,
   input: ReportRunInput,
-  now: Date = new Date()
+  now: Date = new Date(),
+  afterReply: AfterReply = runDetached
 ): Promise<ReportRunResult> {
   if (!VALID_OUTCOMES.has(input.outcome)) {
     throw new ExtensionRunnerError(400, 'invalid_outcome', 'Status hasil eksekusi ekstensi tidak valid')
@@ -781,12 +787,10 @@ export async function reportExtensionRun(
           updatedAppStatus = targetAppStatus
 
           if (targetAppStatus === 'submitted') {
-            await notifyApplicationStatus(
-              db as any,
-              notificationsService,
-              { userId, applicationId: appRow.id },
-              { dispatcher: notificationDispatcher }
-            ).catch(() => undefined)
+            const applicationId = String(appRow.id)
+            afterReply(() =>
+              notifyApplicationStatus(db as any, notificationsService, { userId, applicationId }, { dispatcher: notificationDispatcher })
+            )
           }
         } else {
           updatedAppStatus = appRow.status as ApplicationStatus

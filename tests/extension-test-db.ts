@@ -35,6 +35,8 @@ export interface FakeDbOptions {
   failTables?: Record<string, { code: string; message: string }>
   /** Kunci unik tunggal per tabel; sisipan ganda mengembalikan galat 23505. */
   uniqueKeys?: Record<string, string>
+  /** Pengguna Supabase Auth tiruan untuk `auth.admin.getUserById` (kunci: id pengguna). */
+  authUsers?: Record<string, { email?: string; email_confirmed_at?: string | null }>
 }
 
 export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, options: FakeDbOptions = {}) {
@@ -107,6 +109,10 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
     }
     gte(col: string, val: string) {
       this.filters.push((r) => String(r?.[col] ?? '') >= val)
+      return this
+    }
+    is(col: string, val: null | boolean) {
+      this.filters.push((r) => (val === null ? r?.[col] == null : r?.[col] === val))
       return this
     }
     contains(col: string, needle: Record<string, unknown>) {
@@ -190,6 +196,26 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
     calls,
     db: {
       from: (table: string) => new QueryBuilder(table),
+      auth: {
+        admin: {
+          async getUserById(id: string) {
+            const u = options.authUsers?.[id]
+            return { data: { user: u ? { id, ...u } : null }, error: null }
+          },
+        },
+      },
+      /** RPC tiruan: hanya `register_notification_otp_attempt`, dengan semantik atomik yang sama seperti fungsi SQL-nya. */
+      async rpc(name: string, args: Record<string, any>) {
+        if (name === 'register_notification_otp_attempt') {
+          const row = (tables.notification_verification_codes ?? []).find(
+            (r) => r.id === args.p_id && Number(r.attempts ?? 0) < Number(args.p_max) && !r.consumed_at
+          )
+          if (!row) return { data: null, error: null }
+          row.attempts = Number(row.attempts ?? 0) + 1
+          return { data: row.attempts, error: null }
+        }
+        return { data: null, error: { code: '42883', message: 'function does not exist' } }
+      },
       storage: {
         from(bucket: string) {
           return {
