@@ -11,7 +11,8 @@
     { "slug": "inmobi", "name": "InMobi", "source": "https://job-boards.greenhouse.io/inmobi/jobs/8055061" },
     { "slug": "datadog", "name": "Datadog", "source": "https://job-boards.greenhouse.io/datadog/jobs/7463727" },
     { "slug": "axon", "name": "Axon", "source": "https://job-boards.greenhouse.io/axon/jobs/7805976003" },
-    { "slug": "mixpanel", "name": "Mixpanel", "source": "https://job-boards.greenhouse.io/mixpanel/jobs/8080833" }
+    { "slug": "mixpanel", "name": "Mixpanel", "source": "https://job-boards.greenhouse.io/mixpanel/jobs/8080833" },
+    { "slug": "binance", "name": "Binance", "source": "https://job-boards.eu.greenhouse.io/binance/jobs/5010675101" }
   ],
   "lever": [
     { "slug": "GoToGroup", "name": "GoTo Group", "source": "https://jobs.lever.co/GoToGroup" },
