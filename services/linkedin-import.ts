@@ -1322,6 +1322,32 @@ function groundedUrl(raw: unknown, sourceText: string): string | null {
   return compact(sourceText).includes(compact(s)) ? s : null
 }
 
+/**
+ * Singkatan dan nama lengkap gelar yang sama (bentuk fold). Model sering menulis "Bachelor of Science" padahal PDF
+ * memuat "B.Sc.", atau sebaliknya. Gelar dari model dianggap ada di teks sumber bila salah satu bentuk lain dalam
+ * kelompok yang sama tertulis di sana. Hanya padanan yang pasti; singkatan dua huruf yang juga kata biasa ("be", "ms") tidak ikut.
+ */
+const DEGREE_SYNONYMS: string[][] = [
+  ['bachelor of science', 'bachelors of science', 'b sc', 'bsc', 'b s', 'bs'],
+  ['bachelor of arts', 'bachelors of arts', 'b a', 'ba'],
+  ['bachelor of engineering', 'bachelors of engineering', 'b eng', 'beng'],
+  ['bachelor of business administration', 'bba'],
+  ['bachelor of computer science', 'b comp sci', 'bcs'],
+  ['master of science', 'masters of science', 'm sc', 'msc', 'm s'],
+  ['master of arts', 'masters of arts', 'm a'],
+  ['master of engineering', 'masters of engineering', 'm eng', 'meng'],
+  ['master of business administration', 'mba'],
+  ['doctor of philosophy', 'ph d', 'phd'],
+  ['sarjana komputer', 's kom'],
+  ['magister komputer', 'm kom'],
+  // Jenjang umum: S1 = Sarjana = Bachelor, dan seterusnya.
+  ['s1', 's 1', 'strata 1', 'sarjana', 'sarjana strata 1', 'bachelor', 'bachelors', 'bachelor degree', 'bachelors degree', 'gelar sarjana'],
+  ['s2', 's 2', 'strata 2', 'magister', 'master', 'masters', 'master degree', 'masters degree', 'gelar magister'],
+  ['s3', 's 3', 'strata 3', 'doktor', 'doctor', 'doctorate', 'doctoral', 'gelar doktor'],
+  ['d3', 'd 3', 'd iii', 'diploma 3', 'diploma iii', 'diploma tiga'],
+  ['d4', 'd 4', 'd iv', 'diploma 4', 'diploma iv', 'diploma empat', 'sarjana terapan'],
+]
+
 export interface NormalizeContext {
   /** Teks sumber (sesudah cleanPdfText): semua fakta harus ada di sini. */
   sourceText: string
@@ -1345,6 +1371,13 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     const words = [...new Set(fold(d).split(' ').filter((w) => w.length >= 4))]
     if (words.length === 0) return true
     return words.filter((w) => sourceWords.has(w)).length / words.length >= 0.8
+  }
+  // Gelar: tulisan persis ada di sumber, atau salah satu padanannya (B.Sc. = Bachelor of Science, S1 = Sarjana).
+  const degreeGrounded = (v: string): boolean => {
+    if (grounded(v)) return true
+    const f = fold(v)
+    const family = DEGREE_SYNONYMS.find((forms) => forms.includes(f))
+    return !!family && family.some((form) => padded.includes(` ${form} `))
   }
   const dropped: DroppedCounts = { experiences: 0, education: 0, certifications: 0, achievements: 0, skills: 0 }
 
@@ -1410,7 +1443,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     const school = line(e?.school ?? e?.institution ?? e?.university ?? e?.school_name)
     let degree = line(e?.degree ?? e?.degree_level ?? e?.level)
     let field = line(e?.field ?? e?.field_of_study ?? e?.major)
-    if (degree && !grounded(degree)) degree = ''
+    if (degree && !degreeGrounded(degree)) degree = ''
     if (field && !grounded(field)) field = ''
     if (!degree && field) [degree, field] = [field, '']
     const yearsText = e ? educationYearsText(e) : ''
