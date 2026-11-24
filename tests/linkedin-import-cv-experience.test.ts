@@ -38,9 +38,9 @@ const FORMS: Array<[string, string, Row]> = [
   ['pipa, tahun saja', 'Sales Executive | Contoh Penjualan | Medan | 2018 - 2020', ['Contoh Penjualan', 'Sales Executive', '2018-01-01', '2020-12-01', false]],
   ['pipa, bulan awal tanpa tahun', 'Backend Engineer | Contoh Platform | Bandung | Aug - Dec 2025', ['Contoh Platform', 'Backend Engineer', '2025-08-01', '2025-12-01', false]],
   ['koma + konteks: jabatan, perusahaan | konteks bulan - bulan tahun', 'Project Manager and Lead Developer, SmartDev Contoh LMS | Software Engineering Course Aug - Dec 2025', ['SmartDev Contoh LMS', 'Project Manager and Lead Developer', '2025-08-01', '2025-12-01', false]],
-  ['koma + konteks berisi kurung', 'Lead Engineer, Contoh Program ERP | Synapse Contoh (national internship program) Feb - May 2026', ['Contoh Program ERP', 'Lead Engineer', '2026-02-01', '2026-05-01', false]],
+  ['koma + konteks berisi kurung', 'Lead Engineer, Contoh Program ERP | Contoh Mitra (national internship program) Feb - May 2026', ['Contoh Program ERP', 'Lead Engineer', '2026-02-01', '2026-05-01', false]],
   ['koma tanpa pipa, rentang dengan dua tahun', 'Teaching Assistant, Department of Contoh Systems, UCN Aug 2025 - Present', ['Department of Contoh Systems, UCN', 'Teaching Assistant', '2025-08-01', null, true]],
-  ['koma, perusahaan berkurung, bulan awal tanpa tahun', 'Web3 Developer Intern, Contoh Baliola (E-Signature) Feb - Aug 2026', ['Contoh Baliola (E-Signature)', 'Web3 Developer Intern', '2026-02-01', '2026-08-01', false]],
+  ['koma, perusahaan berkurung, bulan awal tanpa tahun', 'Web3 Developer Intern, Contoh Apps (E-Signature) Feb - Aug 2026', ['Contoh Apps (E-Signature)', 'Web3 Developer Intern', '2026-02-01', '2026-08-01', false]],
   ['"jabatan at perusahaan (rentang)"', 'Software Engineer at Contoh Labs (Jan 2020 - Present)', ['Contoh Labs', 'Software Engineer', '2020-01-01', null, true]],
   ['"jabatan di perusahaan, rentang"', 'Analis Data di PT Contoh Analitika, Mar 2018 – Jun 2020', ['PT Contoh Analitika', 'Analis Data', '2018-03-01', '2020-06-01', false]],
 ]
