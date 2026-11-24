@@ -107,6 +107,10 @@ export class AutomationService {
     if (!keywords) throw new SearchInputError(KEYWORDS_REQUIRED_MESSAGE, 'keywords_required')
     const location = params.location ?? settings?.search_location ?? 'Indonesia'
     const skills = (skillRows ?? []).map((s: any) => s.name).filter(Boolean)
+    const blacklistCompanies = (settings?.blacklist_companies ?? []).map((c: string) => c.toLowerCase())
+    const blacklistWords = (settings?.blacklist_words ?? []).map((w: string) => w.toLowerCase())
+    const workTypes: string[] = settings?.work_type_filter ?? []
+    const levels: string[] = settings?.experience_level_filter ?? []
 
     const result = await aggregateJobs({
       keywords,
@@ -114,15 +118,13 @@ export class AutomationService {
       platforms: params.platforms,
       companies: params.companies,
       skills,
+      workTypes,
+      experienceLevels: levels,
+      desiredSalary: typeof settings?.desired_salary === 'number' ? settings.desired_salary : null,
+      yearsOfExperience: settings?.years_of_experience ?? null,
       limitPerSource: params.limitPerSource,
       pages: params.pages,
     })
-
-    // Preferensi pengguna
-    const blacklistCompanies = (settings?.blacklist_companies ?? []).map((c: string) => c.toLowerCase())
-    const blacklistWords = (settings?.blacklist_words ?? []).map((w: string) => w.toLowerCase())
-    const workTypes: string[] = settings?.work_type_filter ?? []
-    const levels: string[] = settings?.experience_level_filter ?? []
 
     result.jobs = result.jobs.filter((j) => {
       if (blacklistCompanies.includes((j.company ?? '').toLowerCase())) return false

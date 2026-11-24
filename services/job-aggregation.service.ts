@@ -1,6 +1,7 @@
 import { mcpRegistry, BoardEntry } from './mcp-registry.js'
 import { JobPosting } from '../mcp/shared/types.js'
 import { mapWithConcurrency, matchScoreOf, matchesKeywords, matchesLocation, relevanceScore } from '../mcp/shared/utils.js'
+import { rankJobC1, type RankBreakdown } from './job-ranking.service.js'
 
 /**
  * Job Aggregation Service — mengagregasi lowongan lintas sumber (klien MCP),
@@ -22,6 +23,16 @@ export interface AggregateParams {
   companies?: Record<string, string[]>
   /** Skill kandidat untuk pembobotan relevansi. */
   skills?: string[]
+  /** Preferensi tipe kerja (remote/hybrid/on-site) untuk peringkat C1. */
+  workTypes?: string[]
+  /** Preferensi level pengalaman untuk penalti seniority mismatch C1. */
+  experienceLevels?: string[]
+  /** Target gaji kandidat (opsional). */
+  desiredSalary?: number | null
+  /** Tahun pengalaman kandidat untuk deteksi level senioritas. */
+  yearsOfExperience?: number | string | null
+  /** Timestamp acuan (ms) untuk determinisme freshness dalam pengujian. */
+  nowMs?: number
   /** Batas lowongan per sumber setelah filter (default 25). */
   limitPerSource?: number
   /** Batas papan per sumber ATS (default 8). */
@@ -38,6 +49,12 @@ const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, m
 export interface RankedJob extends JobPosting {
   platform: string
   relevance: number
+  /** Skor peringkat hybrid C1 (0..100). */
+  rank_score?: number
+  /** Alasan skor C1 yang mudah diaudit pengguna (camelCase & snake_case untuk kompatibilitas UI/API). */
+  score_reasons?: string[]
+  scoreReasons?: string[]
+  score_breakdown?: RankBreakdown
   /**
    * Nilai untuk kolom `jobs.match_score`: relevance bulat 0-100, atau null bila pencarian tidak punya kata
    * kunci dan pengguna tidak punya skill (tidak ada yang dibandingkan). Disimpan oleh job-ingest.service.ts.
@@ -71,9 +88,9 @@ const timeOf = (s?: string) => {
   const t = Date.parse(s ?? '')
   return Number.isNaN(t) ? 0 : t
 }
-/** Urutan stabil: relevansi menurun, lalu tanggal terbit terbaru (tanggal tidak valid = 0). */
+/** Urutan stabil: skor hybrid C1 menurun (jatuh ke relevansi bila tak ada), lalu tanggal terbit terbaru. */
 export const byRelevanceThenDate = (a: RankedJob, b: RankedJob) =>
-  b.relevance - a.relevance || timeOf(b.posted_at) - timeOf(a.posted_at)
+  (b.rank_score ?? b.relevance) - (a.rank_score ?? a.relevance) || timeOf(b.posted_at) - timeOf(a.posted_at)
 
 export async function aggregateJobs(params: AggregateParams): Promise<AggregateResult> {
   const t0 = Date.now()
@@ -145,14 +162,28 @@ export async function aggregateJobs(params: AggregateParams): Promise<AggregateR
       // jadi filter ketat hanya untuk ATS yang mengembalikan seluruh isi papan.
       .filter((j) => client.kind !== 'ats' || matchesKeywords(j, keywords))
       .map((j) => {
-        const r = relevanceScore(j, keywords, params.skills ?? [])
+        const legacy = relevanceScore(j, keywords, params.skills ?? [])
+        const c1 = rankJobC1(j, {
+          keywords,
+          skills: params.skills ?? [],
+          location: locFilter || location,
+          workTypes: params.workTypes,
+          experienceLevels: params.experienceLevels,
+          desiredSalary: params.desiredSalary,
+          yearsOfExperience: params.yearsOfExperience,
+          nowMs: params.nowMs ?? t0,
+        })
         return {
           ...j,
           platform,
-          relevance: r.score,
-          match_score: matchScoreOf(r),
-          matchedKeywords: r.matchedKeywords,
-          matchedSkills: r.matchedSkills,
+          relevance: legacy.score,
+          rank_score: c1.score,
+          score_reasons: c1.reasons,
+          scoreReasons: c1.reasons,
+          score_breakdown: c1.breakdown,
+          match_score: matchScoreOf(legacy),
+          matchedKeywords: c1.matchedKeywords,
+          matchedSkills: c1.matchedSkills,
         }
       })
       // Peringkat dulu, baru dipotong, supaya yang tersisa adalah lowongan paling relevan per sumber.

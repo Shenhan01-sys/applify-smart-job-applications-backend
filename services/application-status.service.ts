@@ -55,7 +55,7 @@ export function statusMessage(p: {
 
 export type NotifyOutcome =
   | { sent: true; status: ApplicationStatus }
-  | { sent: false; reason: 'not_found' | 'draft' | 'duplicate' | 'send_failed' | 'unknown_status'; detail?: string }
+  | { sent: false; reason: 'not_found' | 'draft' | 'duplicate' | 'send_failed' | 'unknown_status' | 'no_user_channels'; detail?: string }
 
 export interface UserChannelDispatcher {
   dispatchUserNotification(
@@ -87,7 +87,7 @@ export async function notifyApplicationStatus(
   db: StatusDb,
   notifier: Notifier,
   args: { userId: string; applicationId: string },
-  opts?: { dispatcher?: UserChannelDispatcher }
+  opts?: { dispatcher?: UserChannelDispatcher; skipTelegram?: boolean }
 ): Promise<NotifyOutcome> {
   const { data: app } = await db
     .from('ai_applications')
@@ -118,7 +118,7 @@ export async function notifyApplicationStatus(
     : { data: null }
 
   const htmlMsg = statusMessage({ status, title: job?.title, company: job?.company, followUpAt: app.follow_up_scheduled })
-  const res = await notifier.sendTelegram(htmlMsg)
+  const res = opts?.skipTelegram ? { ok: false, error: 'skipped' } : await notifier.sendTelegram(htmlMsg)
 
   let userChannels: string[] = []
   if (opts?.dispatcher && (status === 'ready' || status === 'submitted' || status === 'follow_up')) {
@@ -133,6 +133,9 @@ export async function notifyApplicationStatus(
     userChannels = out.deliveredChannels
   }
 
+  if (opts?.skipTelegram && userChannels.length === 0) {
+    return { sent: false, reason: 'no_user_channels' }
+  }
   if (!res.ok && userChannels.length === 0) {
     return { sent: false, reason: 'send_failed', detail: res.error }
   }

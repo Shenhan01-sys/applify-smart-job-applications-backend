@@ -16,7 +16,7 @@ import { approvalRoutes } from './routes/approval.js'
 import { rateLimitRoutes } from './routes/rate-limit.js'
 import { linkedinSessionRoutes } from './routes/linkedin-session.js'
 import { oauthRoutes } from './routes/oauth.js'
-import { notificationRoutes, whatsappWebhookRoutes } from './routes/notifications.js'
+import { internalNotificationRoutes, notificationRoutes, whatsappWebhookRoutes } from './routes/notifications.js'
 import { jobRoutes } from './routes/jobs.js'
 import { profileImportRoutes } from './routes/profile-import.js'
 import { agentCodeRoutes } from './routes/agent-code.js'
@@ -109,6 +109,8 @@ await app.register(oauthRoutes, { prefix: '/api/oauth' })
 await app.register(extensionRoutes, { prefix: '/api/extension' })
 // Webhook publik Kapso WhatsApp (dilindungi signature HMAC `x-hub-signature-256`).
 await app.register(whatsappWebhookRoutes, { prefix: '/api/notifications' })
+// Endpoint internal Worker -> Backend untuk dispatch notifikasi email/WhatsApp perubahan status.
+await app.register(internalNotificationRoutes, { prefix: '/api/internal/notifications' })
 
 const start = async () => {
   try {

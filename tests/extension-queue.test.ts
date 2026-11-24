@@ -314,13 +314,44 @@ test('Paket B planner & report-run: login.seek.com (tanpa password) terdeteksi a
       pageUrl: 'https://id.jobstreet.com/id/job/96011760/apply',
       outcome: 'ready',
       filledCount: 4,
+      stepsCount: 3,
     },
   })
   assert.equal(repReady.statusCode, 200)
   assert.equal(store.tables.automation_queue[0].status, 'completed')
+  assert.equal(store.tables.application_logs.at(-1)?.details?.steps_count, 3)
 
   await assert.rejects(heartbeatExtensionJob(store.db as any, USER_ID, QUEUE_ID_1, NOW), (err: any) => err?.code === 'job_not_processing')
   await assert.rejects(releaseExtensionJob(store.db as any, USER_ID, QUEUE_ID_1, {}, NOW), (err: any) => err?.code === 'job_already_finished')
+})
+
+test('POST /api/extension/plan-form memblokir captcha_blocked saat hasCaptchaIframe=true tanpa AI', async () => {
+  let aiCalls = 0
+  const planner = new ExtensionPlanner(async () => {
+    aiCalls++
+    return { model: 'm', text: '{"actions":[]}' }
+  }, () => NOW.getTime())
+  const store = seedStore()
+  const app = buildApp({ db: store.db, primaryUserId: USER_ID, planner, now: () => NOW.getTime() })
+  const { token } = (await app.inject({ method: 'POST', url: '/api/extension/token' })).json()
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/extension/plan-form',
+    headers: { authorization: `Bearer ${token}` },
+    payload: {
+      approvalId: APPROVAL_ID,
+      jobId: JOB_ID,
+      pageUrl: 'https://www.kalibrr.com/login',
+      noticeText: '',
+      hasPasswordInput: true,
+      hasCaptchaIframe: true,
+      controls: [],
+    },
+  })
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().blocked, 'captcha_blocked')
+  assert.equal(aiCalls, 0)
 })
 
 test('POST /api/approvals/:id/approve merutekan kalibrr.id & jobstreet.com ke extension_apply vs greenhouse ke apply', async () => {

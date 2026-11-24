@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { notificationsService } from '../../services/notifications.service.js'
 import { notifyApplicationStatus } from '../../services/application-status.service.js'
@@ -241,5 +242,52 @@ export async function whatsappWebhookRoutes(app: FastifyInstance, opts: Notifica
       updated += res.updated
     }
     return { ok: true, updated }
+  })
+}
+
+export function verifyInternalBearer(authHeader: unknown, expectedSecret: string | undefined): boolean {
+  const secret = (expectedSecret ?? '').trim()
+  if (secret.length < 8 || typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
+    return false
+  }
+  const provided = authHeader.slice(7).trim()
+  if (!provided) return false
+  const digestA = createHash('sha256').update(provided).digest()
+  const digestB = createHash('sha256').update(secret).digest()
+  return timingSafeEqual(digestA, digestB)
+}
+
+/**
+ * Rute internal untuk worker latar memicu notifikasi kanal pengguna (email Resend / WhatsApp) saat status lamaran
+ * berubah ke `ready` atau `submitted`. Dilindungi bearer `INTERNAL_NOTIFY_SECRET` atau `SUPABASE_SERVICE_ROLE_KEY`.
+ */
+export async function internalNotificationRoutes(app: FastifyInstance, opts: NotificationRoutesOptions = {}) {
+  const getDb = async (): Promise<GuardDb> => opts.db ?? ((await import('../index.js')).supabase as unknown as GuardDb)
+  const dispatcher = opts.dispatcher ?? notificationDispatcher
+  const env = opts.env ?? process.env
+
+  app.post('/application-status', async (request, reply) => {
+    const expectedSecret = (env.INTERNAL_NOTIFY_SECRET || env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+    if (expectedSecret.length < 8) {
+      return reply.status(503).send({ error: 'Internal notification secret not configured' })
+    }
+    if (!verifyInternalBearer(request.headers.authorization, expectedSecret)) {
+      return reply.status(401).send({ error: 'Unauthorized' })
+    }
+
+    const body = (request.body ?? {}) as Record<string, unknown>
+    const userId = typeof body.user_id === 'string' ? body.user_id.trim() : ''
+    const applicationId = typeof body.application_id === 'string' ? body.application_id.trim() : ''
+    if (!userId || !applicationId) {
+      return reply.status(400).send({ error: 'user_id and application_id (strings) are required' })
+    }
+    const skipTelegram = body.skip_telegram !== false
+
+    try {
+      const db = await getDb()
+      return await notifyApplicationStatus(db as any, notificationsService, { userId, applicationId }, { dispatcher, skipTelegram })
+    } catch {
+      return reply.status(500).send({ error: 'Gagal mengirim notifikasi status internal', code: 'internal_notify_failed' })
+    }
   })
 }
