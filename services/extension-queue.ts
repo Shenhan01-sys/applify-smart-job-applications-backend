@@ -103,7 +103,6 @@ async function markQueueFailedSafe(db: GuardDb, userId: string, queueJobId: stri
         status: 'failed',
         completed_at: now.toISOString(),
         error_message: reason.slice(0, 240),
-        updated_at: now.toISOString(),
       })
       .eq('id', queueJobId)
       .eq('user_id', userId)
@@ -127,7 +126,6 @@ async function updateClaimLeaseColumnsSafe(
     status: 'processing',
     processed_at: iso,
     retry_count: nextRetry,
-    updated_at: iso,
   }
   const fullPatch = { ...basePatch, heartbeat_at: iso, claimed_by: claimer }
 
@@ -324,7 +322,7 @@ export async function heartbeatExtensionJob(
   if (lease.kind === 'absent') warnMissingLease('heartbeat')
 
   const iso = now.toISOString()
-  const basePatch = { processed_at: iso, updated_at: iso }
+  const basePatch = { processed_at: iso }
   const fullPatch = { ...basePatch, heartbeat_at: iso }
 
   const runUpdate = (patch: Record<string, any>, withLeaseFilter: boolean) => {
@@ -415,7 +413,6 @@ export async function releaseExtensionJob(
     error_message: cleanReleaseError(opts.error),
     scheduled_at: nextStatus === 'pending' ? new Date(now.getTime() + delaySec * 1000).toISOString() : iso,
     ...(nextStatus === 'failed' ? { completed_at: iso } : { processed_at: null }),
-    updated_at: iso,
   }
   const fullPatch = { ...basePatch, heartbeat_at: null, claimed_by: null }
 

@@ -905,8 +905,8 @@ export async function reportExtensionRun(
   try {
     const iso = now.toISOString()
     const baseQueuePatch = awaitingLogin
-      ? { status: 'processing', processed_at: iso, updated_at: iso }
-      : { status: 'completed', completed_at: iso, error_message: null, updated_at: iso }
+      ? { status: 'processing', processed_at: iso }
+      : { status: 'completed', completed_at: iso, error_message: null }
     const fullQueuePatch = awaitingLogin
       ? { ...baseQueuePatch, heartbeat_at: iso }
       : { ...baseQueuePatch, heartbeat_at: null, claimed_by: null }
