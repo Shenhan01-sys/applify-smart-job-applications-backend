@@ -29,15 +29,15 @@ const row = (e: { institution: string; degree: string; field_of_study: string | 
 
 const UCN = 'Universitas Contoh Nusantara (UCN), Bandung | B.Sc. Computer Science Sep 2023 - Expected Mar 2027'
 const NOISE = [
-  'GPA 3.79/4.00. Grade A: Machine Learning, Decision Support Systems, Capstone Project, Software Engineering, Algorithms and Data',
+  'GPA 3.62/4.00. Grade A: Basis Data, Statistika, Pemrograman Web, Jaringan Komputer, Struktur Data',
   'Structures. 2nd Place, University-Level Outstanding Student Award (PILCONTOH) 2025 and 2026; Regional Region V official delegate.',
-  'Contoh Hook Incubator, cohort 10 | Atrium Academy and Contoh Foundation Accepted Jun 2026',
+  'Program Inkubasi Contoh, angkatan 3 | Akademi Contoh dan Yayasan Contoh Accepted Jun 2026',
   'Contoh International Bootcamp | Pulau Labs Mar 2026',
 ]
 
 test('satu baris + IPK + penghargaan, inkubator, bootcamp: tepat satu entri pendidikan lengkap', () => {
   const n = read([UCN, ...NOISE])
-  assert.deepEqual(n.education.map(row), [['Universitas Contoh Nusantara (UCN)', 'B.Sc.', 'Computer Science', 2023, 2027, true, 3.79, 4]])
+  assert.deepEqual(n.education.map(row), [['Universitas Contoh Nusantara (UCN)', 'B.Sc.', 'Computer Science', 2023, 2027, true, 3.62, 4]])
   assert.equal(n.dropped.education, 0, 'tidak ada entri palsu yang terbuang')
 })
 
@@ -98,7 +98,7 @@ test('layanan, jalur AI: gelar "Bachelor of Science" dan tahun "Expected" dari m
       text: JSON.stringify({
         full_name: 'Rina Contoh',
         education: [
-          { school: 'Universitas Contoh Nusantara (UCN)', degree: 'Bachelor of Science', field: 'Computer Science', years: 'Sep 2023 - Expected Mar 2027', gpa: '3.79/4.00' },
+          { school: 'Universitas Contoh Nusantara (UCN)', degree: 'Bachelor of Science', field: 'Computer Science', years: 'Sep 2023 - Expected Mar 2027', gpa: '3.62/4.00' },
         ],
       }),
       model: 'tiruan',
@@ -106,6 +106,6 @@ test('layanan, jalur AI: gelar "Bachelor of Science" dan tahun "Expected" dari m
   })
   const preview = await svc.importFromPdf(Buffer.from('%PDF-1.4 tiruan'))
   assert.equal(preview.meta.method, 'ai')
-  assert.deepEqual(preview.education.map(row), [['Universitas Contoh Nusantara (UCN)', 'Bachelor of Science', 'Computer Science', 2023, 2027, true, 3.79, 4]])
+  assert.deepEqual(preview.education.map(row), [['Universitas Contoh Nusantara (UCN)', 'Bachelor of Science', 'Computer Science', 2023, 2027, true, 3.62, 4]])
   assert.equal(preview.meta.dropped.education, 0)
 })
