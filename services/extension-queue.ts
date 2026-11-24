@@ -1,6 +1,7 @@
 import { classifyJobChannel } from './apply-channel.js'
 import { ExtensionRunnerError, isUuid, verifyExtensionApproval } from './extension-runner.js'
 import type { GuardDb } from './queue-guard.js'
+import { sweepExtensionJobs } from './extension-sweep.js'
 import { leaseHolds, newLeaseId, parseLeaseId, readQueueRow, warnMissingLease } from './extension-lease.js'
 
 /**
@@ -167,6 +168,14 @@ export async function claimNextExtensionJob(
   // Tiap klaim memakai lease baru; label `claimer` dari klien tidak lagi disimpan.
   const leaseId = newLeaseId()
   const claimer = leaseId
+
+  // Sapu dulu tugas pengguna ini yang tak akan pernah selesai (jatah percobaan habis, persetujuan kedaluwarsa)
+  // supaya tidak menggantung. Terbaik-upaya: gagal menyapu tidak boleh menggagalkan klaim.
+  try {
+    await sweepExtensionJobs(db, { userId, now, staleAfterMs: staleMs })
+  } catch (err: any) {
+    console.warn('[extension-queue] sapuan tugas ekstensi gagal:', String(err?.message ?? err))
+  }
 
   for (let pass = 0; pass < 10; pass++) {
     let claimedRow: Record<string, any> | null = null
