@@ -12,6 +12,7 @@ import axios from 'axios'
  */
 process.env.GEMINI_API_KEY = 'gem-test-not-real'
 delete process.env.ANTHROPIC_API_KEY
+for (const k of ['NUMES_API_KEY', 'NUMES_API_KEY_2', 'NUMES_API_KEY_3', 'NUMES_API_KEYS']) delete process.env[k]
 delete process.env.OPENROUTER_API_KEY
 delete process.env.GROQ_API_KEY
 delete process.env.FREE_MODELS

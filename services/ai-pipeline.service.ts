@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { tracingService } from './tracing.service.js'
-import { PREMIUM_CALL_TIMEOUT_MS, premiumChain } from './ai-providers.js'
+import { PREMIUM_CALL_TIMEOUT_MS, premiumChainParts } from './ai-providers.js'
+import { numesErrorType, runWithNumesKeys } from './numes-keys.js'
 import { acceptJsonObject } from './json-output.js'
 import {
   GROUNDING_RULES,
@@ -106,7 +107,7 @@ const nextUtcMidnight = () => {
 }
 
 interface AIGenerationParams {
-  /** Paket pengguna: menentukan rantai Gemini/Anthropic di depan rantai OpenRouter dan Groq. Bawaan 'free'. */
+  /** Paket pengguna: menentukan rantai Numes/Gemini di depan rantai OpenRouter dan Groq, dan Anthropic di belakangnya. Bawaan 'free'. */
   tier?: 'free' | 'pro'
   model: string
   messages: Array<{ role: string; content: string }>
@@ -234,7 +235,7 @@ interface CallState {
   rejections: string[]
   attempts: number
   soft: { text: string; model: string } | null
-  /** Penyedia Gemini/Anthropic yang sudah pasti tidak bisa dipakai di permintaan ini (kunci ditolak atau tidak terjangkau). */
+  /** Penyedia Numes/Gemini/Anthropic yang sudah pasti tidak bisa dipakai di permintaan ini (kunci ditolak atau tidak terjangkau). */
   skipProviders: Set<string>
 }
 
@@ -284,35 +285,54 @@ export class AIPipelineService {
   }
 
   /**
-   * Gemini dan Anthropic (endpoint kompatibel OpenAI) dicoba lebih dulu bila kuncinya terpasang. Batas waktu
-   * per panggilan pendek supaya model yang menggantung tidak menahan seluruh rantai. Mengembalikan null bila
-   * tidak ada yang menjawab dengan jawaban yang lolos pemeriksaan mutu.
+   * Numes, Gemini, dan Anthropic (endpoint kompatibel OpenAI), bila kuncinya terpasang. `first` (Numes dan Gemini)
+   * jalan sebelum rantai OpenRouter dan Groq, `last` (Anthropic) sesudahnya: Claude hanya cadangan terakhir
+   * supaya kredit Anthropic hemat. Batas waktu per panggilan pendek supaya model yang menggantung tidak menahan
+   * seluruh rantai. Mengembalikan null bila tidak ada yang menjawab dengan jawaban yang lolos pemeriksaan mutu.
    */
   private async callPremium(
     params: AIGenerationParams,
-    state: CallState
+    state: CallState,
+    part: 'first' | 'last'
   ): Promise<{ text: string; model: string } | null> {
-    for (const target of premiumChain(params.tier ?? 'free')) {
+    for (const target of premiumChainParts(params.tier ?? 'free')[part]) {
       if (budgetSpent(params)) break
       if (state.skipProviders.has(target.provider)) continue
       const label = `${target.provider}:${target.model}`
       try {
-        const response = await axios.post(
-          target.url,
-          {
-            model: target.model,
-            messages: params.messages,
-            // Model Claude terbaru menolak `temperature` (400 "is deprecated for this model"), jadi tidak dikirim.
-            ...(target.provider === 'anthropic' ? {} : { temperature: params.temperature ?? 0.7 }),
-            // Claude menghitung penalaran tersembunyi ke dalam max_tokens: dengan batas kecil (300 sampai 800)
-            // jawabannya bisa kosong atau terpotong, jadi diberi ruang minimal 1600.
-            max_tokens: target.provider === 'anthropic' ? Math.max(params.max_tokens ?? 2000, 1600) : params.max_tokens ?? 2000,
-          },
-          { headers: target.headers, timeout: callTimeout(params, PREMIUM_CALL_TIMEOUT_MS), validateStatus: () => true }
-        )
+        const body = {
+          model: target.model,
+          messages: params.messages,
+          // Model Claude terbaru menolak `temperature` (400 "is deprecated for this model"), jadi tidak dikirim.
+          ...(target.provider === 'anthropic' ? {} : { temperature: params.temperature ?? 0.7 }),
+          // Claude menghitung penalaran tersembunyi ke dalam max_tokens: dengan batas kecil (300 sampai 800)
+          // jawabannya bisa kosong atau terpotong, jadi diberi ruang minimal 1600.
+          max_tokens: target.provider === 'anthropic' ? Math.max(params.max_tokens ?? 2000, 1600) : params.max_tokens ?? 2000,
+        }
+        const post = (headers: Record<string, string>) =>
+          axios.post(target.url, body, { headers, timeout: callTimeout(params, PREMIUM_CALL_TIMEOUT_MS), validateStatus: () => true })
+        let response: { status: number; data: any }
+        if (target.provider === 'numes' && target.pool) {
+          // Kolam kunci: tiap kunci mencoba model yang sama, kunci yang gagal digantikan kunci berikutnya.
+          const run = await runWithNumesKeys(
+            target.pool,
+            async (key) => {
+              const r = await post({ ...target.headers, Authorization: `Bearer ${key}` })
+              return { status: r.status, data: r.data, retryAfter: r.headers?.['retry-after'], errorType: numesErrorType(r.data) }
+            },
+            { label, canContinue: () => !budgetSpent(params) }
+          )
+          if (!run.reply) {
+            if (run.error) throw run.error
+            continue // tidak ada kunci yang bisa dipakai (kosong atau didinginkan)
+          }
+          response = run.reply
+        } else {
+          response = await post(target.headers)
+        }
         if (response.status < 200 || response.status >= 300) {
           console.warn(`[AI] ${label} -> HTTP ${response.status}, trying next model...`)
-          if (isAuthRejection(response.status)) state.skipProviders.add(target.provider)
+          if (isAuthRejection(response.status) && target.provider !== 'numes') state.skipProviders.add(target.provider)
           continue
         }
         const content: string = response.data?.choices?.[0]?.message?.content ?? ''
@@ -334,7 +354,7 @@ export class AIPipelineService {
 
   private async callAIDetailed(params: AIGenerationParams): Promise<{ text: string; model: string }> {
     const state: CallState = { rejections: [], attempts: 0, soft: null, skipProviders: new Set() }
-    const premium = await this.callPremium(params, state)
+    const premium = await this.callPremium(params, state, 'first')
     if (premium) return premium
     const chain = Date.now() < openRouterCappedUntil || budgetSpent(params)
       ? []
@@ -439,6 +459,10 @@ export class AIPipelineService {
         return groqResult
       }
     }
+
+    // Anthropic paling akhir: dipakai hanya bila Numes, Gemini, OpenRouter, dan Groq semuanya gagal.
+    const lastResort = await this.callPremium(params, state, 'last')
+    if (lastResort) return lastResort
 
     // No model produced a fully acceptable answer. A "soft" failure (for example wrong language) still beats
     // nothing: use the first such answer and let the caller attach the warning.
@@ -562,8 +586,8 @@ ${GROUNDING_RULES.map((r) => `- ${r}`).join('\n')}${achievementRule}
 
 Write the cover letter now (just the body, no header/footer):`
 
-    // Rantai: Gemini/Anthropic menurut paket (FREE_MODELS / PRO_MODELS, lihat ai-providers.ts) bila kuncinya
-    // terpasang, lalu OPENROUTER_MODEL dan cadangan gratisnya, lalu Groq.
+    // Rantai: Numes dan Gemini menurut paket (FREE_MODELS / PRO_MODELS, lihat ai-providers.ts) bila kuncinya
+    // terpasang, lalu OPENROUTER_MODEL dan cadangan gratisnya, lalu Groq, dan Anthropic paling akhir.
     const model = getOpenRouterKey() ? (process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free') : 'openrouter/free'
 
     const allowedContext = [userProfile.firstName, userProfile.lastName, company, jobTitle, jobDescription, userProfile.summary, ...achievementLines].join(' ')

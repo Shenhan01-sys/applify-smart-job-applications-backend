@@ -16,6 +16,7 @@ delete process.env.AI_OPENROUTER_TIMEOUT_MS
 delete process.env.GROQ_API_KEY
 delete process.env.GEMINI_API_KEY
 delete process.env.ANTHROPIC_API_KEY
+for (const k of ['NUMES_API_KEY', 'NUMES_API_KEY_2', 'NUMES_API_KEY_3', 'NUMES_API_KEYS']) delete process.env[k]
 delete process.env.FREE_MODELS
 
 const { aiPipelineService, AiBudgetExhaustedError } = await import('../services/ai-pipeline.service.ts')
@@ -119,22 +120,38 @@ test('deadline: Groq juga berhenti dan diberi batas waktu hanya bila rantai puny
 // ───────────────────────────────────────────────────────────── penyedia yang pasti gagal
 
 const PREMIUM_ENV = { GEMINI_API_KEY: 'gk', ANTHROPIC_API_KEY: 'ak', FREE_MODELS: 'gemini:ga,gemini:gb,anthropic:ca' }
+// Anthropic paling akhir: rantai OpenRouter (m1..m6) jalan lebih dulu, jadi di sini semuanya dibuat gagal.
+const OPENROUTER_DOWN: Record<string, Reply> = Object.fromEntries(['m1', 'm2', 'm3', 'm4', 'm5', 'm6'].map((m) => [m, { status: 503 }]))
+const OPENROUTER_CALLS = ['m1', 'm2', 'm3', 'm4', 'm5', 'm6']
 
-test('penyedia: kunci Gemini ditolak (401) = model Gemini berikutnya dilewati, Anthropic tetap dicoba', async () => {
+test('penyedia: kunci Gemini ditolak (401) = model Gemini berikutnya dilewati, OpenRouter dicoba, lalu Anthropic paling akhir', async () => {
   await withEnv(PREMIUM_ENV, async () => {
-    script = { ga: { status: 401 }, ca: { status: 200, content: GOOD } }
+    script = { ...OPENROUTER_DOWN, ga: { status: 401 }, ca: { status: 200, content: GOOD } }
     const out = await run()
-    assert.deepEqual(calls.map((c) => c.model), ['ga', 'ca'])
+    assert.deepEqual(calls.map((c) => c.model), ['ga', ...OPENROUTER_CALLS, 'ca'])
     assert.equal(out.model, 'anthropic:ca')
   })
 })
 
 test('penyedia: server tidak terjangkau (ENOTFOUND) = model berikutnya di penyedia sama dilewati', async () => {
   await withEnv(PREMIUM_ENV, async () => {
-    script = { ga: Object.assign(new Error('getaddrinfo ENOTFOUND generativelanguage.googleapis.com'), { code: 'ENOTFOUND' }), ca: { status: 200, content: GOOD } }
+    script = {
+      ...OPENROUTER_DOWN,
+      ga: Object.assign(new Error('getaddrinfo ENOTFOUND generativelanguage.googleapis.com'), { code: 'ENOTFOUND' }),
+      ca: { status: 200, content: GOOD },
+    }
     const out = await run()
-    assert.deepEqual(calls.map((c) => c.model), ['ga', 'ca'])
+    assert.deepEqual(calls.map((c) => c.model), ['ga', ...OPENROUTER_CALLS, 'ca'])
     assert.equal(out.model, 'anthropic:ca')
+  })
+})
+
+test('penyedia: Anthropic tidak disentuh selama OpenRouter menjawab', async () => {
+  await withEnv(PREMIUM_ENV, async () => {
+    script = { ga: { status: 401 }, ca: { status: 200, content: GOOD } }
+    const out = await run()
+    assert.deepEqual(calls.map((c) => c.model), ['ga', 'm1'])
+    assert.equal(out.model, 'openrouter:m1')
   })
 })
 

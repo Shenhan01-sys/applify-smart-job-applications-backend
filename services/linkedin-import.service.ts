@@ -34,7 +34,7 @@ import {
 export type JsonLlm = (params: { system: string; user: string; userId?: string; deadlineAt?: number }) => Promise<{ text: string; model: string | null }>
 
 /**
- * Anggaran waktu total untuk AI. Rantai penuh (Gemini, Claude, sampai sembilan model OpenRouter, lalu Groq) bisa
+ * Anggaran waktu total untuk AI. Rantai penuh (Numes, Gemini, sampai sembilan model OpenRouter, Groq, lalu Claude) bisa
  * memakan beberapa menit; lewat anggaran ini parser aturan dipakai. UAT 2026-11-20: batas lama 75 detik membuat
  * pengguna menunggu 90 sampai 110 detik sebelum pratinjau cadangan muncul. Bisa diubah lewat LINKEDIN_IMPORT_AI_BUDGET_MS.
  */

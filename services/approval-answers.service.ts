@@ -200,7 +200,7 @@ export function mergeProfileIntoSettings(
  *   needs_review = needsReview dari filler, ATAU keyakinan tidak tinggi (<= 0,8), ATAU jawaban kosong,
  *                  ATAU jawaban dari AI, ATAU data sumbernya belum diisi pengguna.
  */
-// The AI question can wait on a whole model chain (OpenRouter free models, then Groq). Creating the approval
+// The AI question can wait on a whole model chain (Numes, Gemini, OpenRouter free models, Groq, then Anthropic last). Creating the approval
 // must not hang on it: after this long the answer is left as "no data, check it yourself".
 const AI_ANSWER_TIMEOUT_MS = Number(process.env.APPROVAL_ANSWER_TIMEOUT_MS || 25_000)
 

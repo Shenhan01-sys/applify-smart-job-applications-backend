@@ -15,6 +15,7 @@ process.env.OPENROUTER_FALLBACK_MODELS = 'm1,m2,m3'
 delete process.env.GROQ_API_KEY
 delete process.env.GEMINI_API_KEY
 delete process.env.ANTHROPIC_API_KEY
+for (const k of ['NUMES_API_KEY', 'NUMES_API_KEY_2', 'NUMES_API_KEY_3', 'NUMES_API_KEYS']) delete process.env[k]
 
 const { aiPipelineService } = await import('../services/ai-pipeline.service.ts')
 const { LinkedInImportService } = await import('../services/linkedin-import.service.ts')

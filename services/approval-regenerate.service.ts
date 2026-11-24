@@ -1,6 +1,6 @@
 /**
  * Tombol "Tulis ulang" di layar persetujuan: surat lamaran pada permintaan persetujuan yang masih pending
- * ditulis ulang lewat AIPipelineService (OpenRouter, Groq sebagai cadangan), lalu disimpan.
+ * ditulis ulang lewat AIPipelineService (Numes, Gemini, OpenRouter, Groq, Anthropic terakhir), lalu disimpan.
  * Tidak ada yang dikirim; pengguna tetap harus menyetujui versi yang tampil di layar.
  */
 
