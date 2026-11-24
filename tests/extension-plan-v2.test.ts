@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   EXT_MAX_PENDING_QUESTIONS,
   ExtensionPlanner,
+  detectExtensionBlocker,
   isSecretLabel,
   sanitizeExtensionControls,
   sanitizePendingQuestions,
@@ -374,4 +375,24 @@ test('plan-form: fileTargets dan fileControlId/resumeUrl lama ada pada respons; 
   assert.equal(blocked.blocked, 'auth_required')
   assert.deepEqual(blocked.fileTargets, [])
   assert.equal(blocked.aiError, null)
+})
+
+test('B7 Turnstile: iframe challenges.cloudflare.com atau frasa Turnstile memblokir sebagai captcha_blocked meski ada kolom login', () => {
+  const withIframe = detectExtensionBlocker({
+    pageUrl: 'https://www.kalibrr.com/login',
+    noticeText: 'Masuk ke akun Kalibrr',
+    hasPasswordInput: true,
+    hasCaptchaIframe: true,
+    controls: [],
+  })
+  assert.equal(withIframe?.reason, 'captcha_blocked')
+
+  const withPhrase = detectExtensionBlocker({
+    pageUrl: 'https://www.kalibrr.com/c/acme/jobs/1/apply',
+    noticeText: 'Verifikasi bahwa Anda manusia sebelum melanjutkan (Cloudflare Turnstile)',
+    hasPasswordInput: false,
+    hasCaptchaIframe: false,
+    controls: [],
+  })
+  assert.equal(withPhrase?.reason, 'captcha_blocked')
 })

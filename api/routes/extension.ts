@@ -180,6 +180,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
         pageUrl,
         noticeText: typeof body.noticeText === 'string' ? body.noticeText : '',
         hasPasswordInput: Boolean(body.hasPasswordInput),
+        hasCaptchaIframe: Boolean(body.hasCaptchaIframe),
         rawControls: body.controls,
       })
     } catch (err: any) {
@@ -301,6 +302,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
           remainingRequired:
             Array.isArray(body.remainingRequired) || typeof body.remainingRequired === 'number' ? body.remainingRequired : 0,
           questions: Array.isArray(body.questions) ? body.questions : [],
+          stepsCount: typeof body.stepsCount === 'number' ? body.stepsCount : undefined,
           submitCheck: body.submitCheck,
           filledScreenshot: body.filledScreenshot,
           afterScreenshot: body.afterScreenshot,

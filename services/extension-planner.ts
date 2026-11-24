@@ -218,9 +218,10 @@ export function detectExtensionBlocker(args: {
   pageUrl: string
   noticeText: string
   hasPasswordInput?: boolean
+  hasCaptchaIframe?: boolean
   controls: SanitizedExtControl[]
 }): { reason: ExtBlockerReason; note: string } | null {
-  const { pageUrl, noticeText, hasPasswordInput, controls } = args
+  const { pageUrl, noticeText, hasPasswordInput, hasCaptchaIframe, controls } = args
   const combinedText = [
     noticeText,
     ...controls.map((c) => `${c.groupLabel} ${c.label}`.trim()),
@@ -237,8 +238,13 @@ export function detectExtensionBlocker(args: {
 
   const formControlsCount = controls.filter((c) => c.kind !== 'submit').length
 
-  // Teks tantangan hanya memblokir bila tidak ada kontrol formulir yang bisa diisi; URL tantangan selalu memblokir.
-  if (CAPTCHA_URL_RE.test(pageUrl) || (formControlsCount === 0 && CAPTCHA_ACTIVE_RE.test(noticeText))) {
+  // Iframe CAPTCHA aktif (mis. challenges.cloudflare.com Turnstile) atau URL tantangan selalu memblokir meski ada kolom
+  // login/formulir; teks tantangan aktif memblokir bila belum ada kolom isian formulir atau beriringan dengan kolom kata sandi.
+  if (
+    hasCaptchaIframe ||
+    CAPTCHA_URL_RE.test(pageUrl) ||
+    ((formControlsCount === 0 || Boolean(hasPasswordInput)) && CAPTCHA_ACTIVE_RE.test(noticeText))
+  ) {
     return {
       reason: 'captcha_blocked',
       note: 'Halaman menampilkan CAPTCHA atau verifikasi manusia. Selesaikan verifikasi di tab browser, lalu klik "Lanjutkan setelah Login/CAPTCHA".',
@@ -585,6 +591,7 @@ export class ExtensionPlanner {
     pageUrl: string
     noticeText?: string
     hasPasswordInput?: boolean
+    hasCaptchaIframe?: boolean
     rawControls: unknown
   }): Promise<PlanExtensionResult> {
     const { db, userId, jobId } = args
@@ -604,6 +611,7 @@ export class ExtensionPlanner {
       pageUrl,
       noticeText,
       hasPasswordInput: Boolean(args.hasPasswordInput),
+      hasCaptchaIframe: Boolean(args.hasCaptchaIframe),
       controls,
     })
     if (blocker) {

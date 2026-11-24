@@ -676,6 +676,7 @@ export interface ReportRunInput {
   /** Daftar label kolom wajib yang belum terisi (bentuk worker). Angka diterima sebagai kiriman lama. */
   remainingRequired?: number | unknown[]
   questions?: unknown[]
+  stepsCount?: unknown
   submitCheck?: unknown
   filledScreenshot?: unknown
   afterScreenshot?: unknown
@@ -804,6 +805,10 @@ export async function reportExtensionRun(
   const documentsAttached = awaitingLogin ? null : sanitizeFilesAttached(input.filesAttached)
   const rawCount = awaitingLogin ? 0 : Math.max(0, Math.floor(Number(input.filledCount ?? 0) || 0))
   const filledCount = Math.max(rawCount, filledFields.length)
+  const stepsCount =
+    typeof input.stepsCount === 'number' && Number.isFinite(input.stepsCount) && input.stepsCount >= 1
+      ? Math.min(20, Math.floor(input.stepsCount))
+      : null
   const remaining = awaitingLogin
     ? []
     : sanitizeRemainingRequired(
@@ -835,6 +840,7 @@ export async function reportExtensionRun(
     remaining_required: remaining,
     ...(awaitingUntilIso ? { awaiting_until: awaitingUntilIso } : {}),
     ...(cleanLoginUrl ? { login_url: cleanLoginUrl } : {}),
+    ...(stepsCount !== null ? { steps_count: stepsCount } : {}),
     ...(questions.length > 0 ? { questions, questions_pending: questions.length } : {}),
     ...(secretSkipped.length > 0 ? { secret_skipped: secretSkipped.map((q) => ({ key: q.key, label: q.label, required: q.required })) } : {}),
     ...(documentsAttached ? { documents_attached: documentsAttached } : {}),
