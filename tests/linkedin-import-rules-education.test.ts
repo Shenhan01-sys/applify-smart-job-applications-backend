@@ -81,18 +81,26 @@ test('aturan: nama sekolah yang terpotong (baris kedua diawali huruf kecil) disa
   assert.deepEqual(eduOf(text).map((e) => e[0]), ['Sekolah Tinggi Teknologi Fiktif dan Bisnis Nusantara', 'Universitas Fiktif A'])
 })
 
-test('aturan: kurung yang tidak berisi tahun, atau tanggal tanpa tahun akhir, tidak menelan baris lain dan dihitung terbuang', () => {
+test('aturan: kurung yang tidak berisi tahun, atau rentang yang menggantung ("2018 -"), tidak menelan baris lain dan dihitung terbuang', () => {
   const text = [
     'Contact', 'www.linkedin.com/in/tokoh-sintetis (LinkedIn)',
     'Top Skills', 'Python',
     'Tokoh Sintetis Tiga', 'Engineer at Fiktif', 'Jakarta, Indonesia',
     'Pendidikan',
     'Universitas Fiktif (UF)', 'Gelar Sarjana, Hukum · (2012 - 2016)',
-    'Universitas Fiktif Tengah', 'Gelar Sarjana, Ekonomi · (2018)',
+    'Universitas Fiktif Tengah', 'Gelar Sarjana, Ekonomi · (2018 -)',
   ].join('\n')
   const n = norm(parseWithRules(text), text)
   assert.deepEqual(n.education.map((e) => e.institution), ['Universitas Fiktif (UF)'])
-  assert.equal(n.dropped.education, 1, 'tanpa tahun akhir = terbuang dan dihitung, bukan hilang diam-diam')
+  assert.equal(n.dropped.education, 1, 'rentang menggantung = terbuang dan dihitung, bukan hilang diam-diam')
+})
+
+test('aturan: satu tahun saja di kurung ("(2018)") dipakai sebagai tahun masuk dan lulus, dengan catatan', () => {
+  const text = ['Education', 'Universitas Fiktif Tengah', 'Gelar Sarjana, Ekonomi · (2018)'].join('\n')
+  const n = norm(parseWithRules(text), text)
+  assert.deepEqual(n.education.map((e) => [e.institution, e.start_year, e.end_year]), [['Universitas Fiktif Tengah', 2018, 2018]])
+  assert.match(n.education[0].notes.join(' '), /satu tahun/)
+  assert.equal(n.dropped.education, 0)
 })
 
 // ───────────────────────────────────────────────────────────── peringatan bagian kosong
