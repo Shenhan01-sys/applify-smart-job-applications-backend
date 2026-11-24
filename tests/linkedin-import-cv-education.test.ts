@@ -237,8 +237,14 @@ test('aturan: baris format LinkedIn tetap dibaca seperti sebelumnya (tidak terti
   assert.deepEqual(rows(n), [['Universitas Fiktif Barat', "Bachelor's degree", 'Computer Science', 2019, 2023, false]])
 })
 
-test('aturan: entri tanpa jenjang atau tanpa tahun tidak ditebak, hanya dihitung sebagai dibuang', () => {
+test('aturan: CV tanpa jenjang memakai program studi sebagai gelar (jenjang tidak ditebak); tanpa tahun hanya dihitung sebagai dibuang', () => {
   const n = eduRules(['Pendidikan', 'Universitas Fiktif Barat', 'Teknik Informatika', '2019 - 2023', 'Universitas Fiktif Timur', 'S1 Akuntansi'].join('\n'))
+  assert.deepEqual(rows(n), [['Universitas Fiktif Barat', 'Teknik Informatika', null, 2019, 2023, false]])
+  assert.equal(n.dropped.education, 1)
+})
+
+test('aturan: institusi tanpa gelar dan tanpa program studi sama sekali tetap dibuang dan dihitung', () => {
+  const n = eduRules(['Pendidikan', 'Universitas Fiktif Barat', '2019 - 2023'].join('\n'))
   assert.deepEqual(rows(n), [])
-  assert.equal(n.dropped.education, 2)
+  assert.equal(n.dropped.education, 1)
 })

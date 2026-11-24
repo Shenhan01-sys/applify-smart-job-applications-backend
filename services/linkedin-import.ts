@@ -730,6 +730,94 @@ function joinDescription(lines: string[]): string {
   return out.trim()
 }
 
+// ───────────────────────────────────────────────────────────── pengalaman di CV biasa (tanggal di baris yang sama)
+
+/** Kata jabatan umum (Inggris dan Indonesia). Hanya petunjuk untuk urutan jabatan dan perusahaan; bukan syarat bila baris berpisah pipa. */
+const ROLE_RE =
+  /\b(?:manager|engineer|developer|analyst|designer|consultant|specialist|executive|officer|director|lead|head|intern|internship|assistant|associate|administrator|coordinator|supervisor|technician|architect|scientist|researcher|programmer|tester|founder|co-?founder|ceo|cto|coo|cfo|president|owner|freelancer?|teacher|lecturer|instructor|trainer|tutor|nurse|accountant|auditor|writer|editor|marketer|staff|trainee|representative|advisor|adviser|strategist|planner|operator|clerk|secretary|magang|asisten|pengembang|insinyur|manajer|analis|desainer|konsultan|spesialis|direktur|kepala|ketua|koordinator|pengawas|teknisi|arsitek|peneliti|pendiri|guru|dosen|perawat|akuntan|penulis|staf|pimpinan|sekretaris|bendahara|wakil)\b/i
+
+/**
+ * Pisahkan rentang tanggal di ujung baris: setelah pipa terakhir ("... | Mar 2016 - Present"), di dalam kurung
+ * ("... (Jan 2020 - Dec 2021)"), atau 2 sampai 9 kata terakhir yang seluruhnya satu rentang ("... Feb - May 2026").
+ * Rentang terpanjang yang sah dipakai, supaya "Aug 2025 - Present" tidak tertinggal "Aug" di judul.
+ */
+function splitTrailingRange(l: string): { head: string; range: string } | null {
+  const c = cleanDateNoise(l).trim()
+  const bar = c.lastIndexOf('|')
+  if (bar >= 0) {
+    const tail = c.slice(bar + 1).trim()
+    if (tail && isDateRangeText(tail)) return { head: c.slice(0, bar).trim(), range: tail }
+  }
+  const paren = /^(.*?)\s*[([]\s*([^()[\]]+?)\s*[)\]]\s*$/.exec(c)
+  if (paren && isDateRangeText(paren[2])) return { head: paren[1].trim(), range: paren[2] }
+  const words = c.split(/\s+/)
+  for (let k = Math.min(9, words.length - 1); k >= 2; k--) {
+    const tail = words.slice(-k).join(' ')
+    if (isDateRangeText(tail)) return { head: words.slice(0, words.length - k).join(' ').replace(/[\s,;:|\-–—]+$/u, ''), range: tail }
+  }
+  return null
+}
+
+interface ExperienceHead {
+  title: string
+  company: string
+  location: string | null
+  /** Keterangan sesudah pipa pada bentuk "Jabatan, Perusahaan | Konteks". */
+  context: string | null
+}
+
+/**
+ * Bagian depan baris pengalaman. Bentuk yang dikenali: "Jabatan | Perusahaan | Kota" (juga "Perusahaan | Jabatan" bila hanya
+ * potongan kedua yang berkata jabatan), "Jabatan, Perusahaan | Konteks", dan "Jabatan at/di/@ Perusahaan". Bentuk tanpa
+ * pipa memerlukan kata jabatan di depan; tanpa itu baris bisa saja judul proyek atau kalimat, jadi null.
+ */
+function parseExperienceHead(head: string): ExperienceHead | null {
+  const h = head.replace(/^[\s•·*\-–—]+/u, '').trim()
+  if (!h || h.length > 200 || wordCount(h) > 25 || /[.!?]$/.test(h)) return null
+  const segs = h.split(/\s*\|\s*|\s+[–—]\s+/).map((p) => p.trim()).filter(Boolean)
+  if (segs.length === 0) return null
+  const first = segs[0]
+  const beforeComma = beforeTopLevelComma(first).trim()
+  if (beforeComma.length < first.length && ROLE_RE.test(beforeComma)) {
+    const company = first.slice(beforeTopLevelComma(first).length + 1).trim()
+    if (!company) return null
+    return { title: beforeComma, company, location: null, context: segs.slice(1).join(' | ') || null }
+  }
+  if (segs.length >= 2) {
+    let [title, company] = segs
+    if (!ROLE_RE.test(title) && ROLE_RE.test(company)) [title, company] = [company, title]
+    return { title, company, location: segs[2] ?? null, context: null }
+  }
+  const at = /^(.+?)\s+(?:at|@|di|pada)\s+(.+)$/i.exec(first)
+  if (at && ROLE_RE.test(at[1])) return { title: at[1].trim(), company: at[2].trim(), location: null, context: null }
+  return null
+}
+
+/**
+ * Pengalaman pada CV biasa: satu baris judul memuat jabatan, perusahaan, dan tanggal ("Jabatan | Perusahaan | Kota |
+ * Mar 2016 - Present", "Jabatan, Perusahaan | Konteks Feb - May 2026"), diikuti poin atau kalimat uraian sampai baris
+ * judul berikutnya. Dipakai bila format PDF LinkedIn (baris tanggal sendiri) tidak menemukan apa pun. Tidak ada yang
+ * ditebak: perusahaan dan jabatan tetap harus ada di teks sumber saat divalidasi.
+ */
+function parseInlineExperienceRules(lines: string[]): RawExtraction[] {
+  type Header = { at: number; head: ExperienceHead; range: string }
+  const headers: Header[] = []
+  lines.forEach((l0, i) => {
+    // Penebalan markdown ("**Jabatan** | Perusahaan | ...") bukan poin daftar.
+    const l = l0.replace(/\*\*|__/g, '').trim()
+    if (BULLET_RE.test(l) || /^\p{Ll}/u.test(l) || l.length > 220) return
+    const split = splitTrailingRange(l)
+    const head = split ? parseExperienceHead(split.head) : null
+    if (split && head) headers.push({ at: i, head, range: split.range })
+  })
+  return headers.map((h, i) => {
+    const to = i + 1 < headers.length ? headers[i + 1].at : lines.length
+    const body = lines.slice(h.at + 1, to)
+    const description = joinDescription(h.head.context ? [h.head.context, ...body] : body)
+    return { company: h.head.company, title: h.head.title, date_range: h.range, location: h.head.location, description: description || null }
+  })
+}
+
 function parseExperienceRules(lines: string[]): RawExtraction[] {
   type Entry = { date: number; start: number; company: string | null; title: string; hasLocation: boolean }
   const entries: Entry[] = []
@@ -762,6 +850,8 @@ function parseExperienceRules(lines: string[]): RawExtraction[] {
     entries.push({ date: d, start, company, title: lines[titleIdx], hasLocation })
     boundary = d + (hasLocation ? 1 : 0)
   })
+
+  if (entries.length === 0) return parseInlineExperienceRules(lines)
 
   return entries.map((e, i) => {
     const from = e.date + 1 + (e.hasLocation ? 1 : 0)
@@ -894,6 +984,8 @@ function isInstitutionPiece(piece: string): boolean {
 }
 
 interface CvEduEntry {
+  /** Indeks sesudah potongan terakhir dari baris institusi; potongan di antara sekolah dan indeks ini (kota, dll.) bukan calon bidang. */
+  lineEnd?: number
   /** Potongan tepat sesudah nama sekolah adalah kota ("SMA Negeri 1 Contoh, Bandung"), bukan jurusan. */
   cityAfter?: boolean
   pieces: string[]
@@ -947,6 +1039,27 @@ function resolveCvEntry(e: CvEduEntry): RawExtraction {
     } else if (inOthers >= 0) {
       degree = schoolLevelOf(others[inOthers])
       field = nextField(inOthers)
+    }
+  }
+  if (!degree && !field) {
+    // CV tidak menulis jenjang ("Manajemen Bisnis" / "Universitas Contoh" / "2012-2016"): potongan polos terdekat dipakai sebagai
+    // bidang, dan normalizeExtraction menjadikannya gelar (jenjang tidak ditebak). Potongan di baris institusi sesudah nama
+    // sekolah dilewati karena biasanya kota.
+    const plain = (i: number) => {
+      const p = e.pieces[i]
+      return i !== e.school && !(e.lineEnd !== undefined && i > e.school && i < e.lineEnd) && wordCount(p) <= 8 && /\p{L}/u.test(p) && !isInstitutionPiece(p) && !CONTACT_LINE_RE.test(p)
+    }
+    const after = e.pieces.findIndex((_, i) => i > e.school && plain(i))
+    let before = -1
+    for (let i = e.school - 1; i >= 0 && before < 0; i--) if (plain(i)) before = i
+    const at = after >= 0 ? after : before
+    if (at >= 0) {
+      const p = tidyPiece(e.pieces[at])
+      const m = DEGREE_IN_FIELD_RE.exec(p)
+      if (m) {
+        degree = tidyPiece(m[1]) || null
+        field = fold(m[1]) === fold(m[2]) ? null : tidyPiece(m[2]) || null
+      } else field = p || null
     }
   }
   return { school, degree, field, years: e.years, gpa: e.gpa }
@@ -1083,10 +1196,12 @@ function parseCvEducationRules(lines: string[]): RawExtraction[] {
     const schoolAt = pieces.findIndex(isInstitutionPiece)
     if (schoolAt >= 0) {
       const lineHasDegree = readLevel(raw) !== null || schoolLevelOf(raw) !== null
-      if ((schoolAt === 0 || lineHasDegree) && (isStrongInstitution(pieces[schoolAt]) || lineHasDegree)) {
+      // Potongan sebelum institusi ("Akuntansi in Akuntansi, Universitas Contoh, 2021-2025") boleh asal pendek dan bukan kalimat.
+      const leadOk = schoolAt === 0 || lineHasDegree || pieces.slice(0, schoolAt).every((p) => wordCount(p) <= 8 && !/[.!?:]$/.test(p))
+      if (leadOk && (isStrongInstitution(pieces[schoolAt]) || lineHasDegree)) {
         const after = pieces[schoolAt + 1]
         const cityAfter = !!after && schoolLevelOf(pieces[schoolAt]) !== null && isCityPiece(after) && d.rest.includes(`${pieces[schoolAt]},`)
-        cur = { pieces: [...prelude, ...pieces], school: prelude.length + schoolAt, years: years ?? pendingYears, gpa, cityAfter }
+        cur = { pieces: [...prelude, ...pieces], school: prelude.length + schoolAt, years: years ?? pendingYears, gpa, cityAfter, lineEnd: prelude.length + pieces.length }
         if (!years) pendingYears = null
         prelude = []
         entries.push(cur)
