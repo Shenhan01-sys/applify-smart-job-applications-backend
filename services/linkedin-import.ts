@@ -323,7 +323,7 @@ const DASH = '[-\\u2010-\\u2015\\u2212]'
 /** Pemisah rentang di CV: strip, "to", "until", "sampai (dengan)", "hingga", "s/d", "s.d.", "sd". */
 const RANGE_SEP = `(?:${DASH}|to|until|till|through|thru|sampai(?:\\s+dengan)?|hingga|s\\s*[/.]\\s*d\\.?|sd\\.?)`
 /** Penanda "masih berjalan" untuk tahun akhir. */
-const END_WORDS = 'sampai\\s+sekarang|hingga\\s+sekarang|saat\\s+ini|sekarang|present|current|now|kini'
+const END_WORDS = 'sampai\\s+sekarang|hingga\\s+sekarang|saat\\s+ini|sekarang|present|current|now|kini|ongoing|berlangsung|sedang\\s+(?:berjalan|menempuh|studi|kuliah)|masih\\s+(?:kuliah|studi|menempuh|aktif)'
 
 const YEAR_RANGE_RE = new RegExp(`\\b(\\d{4})\\b(?:\\s*${RANGE_SEP}\\s*(?:(?:\\p{L}+\\.?\\s+)?(\\d{4})|(${END_WORDS}))\\b)?`, 'iu')
 
@@ -1215,7 +1215,8 @@ function clipText(s: string, max: number): string {
 function educationYearsText(e: Record<string, unknown>): string {
   const pick = (v: unknown): string => (typeof v === 'number' && Number.isFinite(v) ? String(v) : line(v))
   const direct = pick(e.years) || pick(e.dates) || pick(e.period) || pick(e.date_range)
-  if (direct) return direct
+  // Model yang hanya menulis tahun masuk ("2022") tetapi menandai is_current tidak boleh dibaca sebagai tahun lulus.
+  if (direct) return e.is_current === true && isSingleYear(direct) ? `${direct} - Present` : direct
   const start = pick(e.start_year ?? e.start)
   const end = pick(e.end_year ?? e.end ?? e.graduation_year ?? e.year) || (e.is_current === true ? 'Present' : '')
   return [start, end].filter(Boolean).join(' - ')
