@@ -486,9 +486,14 @@ export async function sendTransactionalEmailNotification(
       }),
       signal: notifyTimeoutSignal(),
     })
-    if (!resp.ok) return { ok: false, error: `resend_http_${resp.status}` }
+    if (!resp.ok) {
+      // Hanya status HTTP yang dicatat: tidak ada kunci API, alamat penerima, isi pesan, atau badan jawaban Resend.
+      console.warn(`[notify] email Resend ditolak: status=${resp.status}`)
+      return { ok: false, error: `resend_http_${resp.status}` }
+    }
     return { ok: true }
   } catch (err: unknown) {
+    console.warn(`[notify] email Resend gagal dikirim: ${(err as { name?: string } | null)?.name ?? 'Error'}`)
     return { ok: false, error: networkErrorCode('resend', err) }
   }
 }

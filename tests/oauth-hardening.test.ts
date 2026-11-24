@@ -112,7 +112,7 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
     assert.notEqual(rawCookieValue, decoded.nonce, 'cookie tidak boleh menyimpan nonce mentah')
     assert.equal(rawCookieValue, hashOAuthNonce(decoded.nonce))
 
-    // 2. Serangan login-CSRF: penyerang memberi link bertanda tangan miliknya ke korban -> korban tidak punya cookie yang cocok -> 400 + cookie dihapus.
+    // 2. Serangan login-CSRF: penyerang memberi link bertanda tangan miliknya ke korban -> korban tidak punya cookie yang cocok -> ditolak (kembali ke Pengaturan dengan reason=session_mismatch) + cookie dihapus.
     const initAttacker = await app.inject({
       method: 'POST',
       url: '/api/oauth/google/init',
@@ -124,7 +124,8 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
       method: 'GET',
       url: `/api/oauth/google/callback?code=c1&state=${encodeURIComponent(attackerState)}`,
     })
-    assert.equal(noCookieRes.statusCode, 400)
+    assert.equal(noCookieRes.statusCode, 302)
+    assert.equal(noCookieRes.headers.location, 'https://app.applify.id/settings?gmail=error&reason=session_mismatch')
     assert.match(String(noCookieRes.headers['set-cookie']), /Max-Age=0/)
     assert.equal(googleExchangeCalls, 0)
 
@@ -133,7 +134,8 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
       url: `/api/oauth/google/callback?code=c1&state=${encodeURIComponent(attackerState)}`,
       headers: { cookie: cookiePairFromSetCookie(setCookieHeader) },
     })
-    assert.equal(mismatchRes.statusCode, 400)
+    assert.equal(mismatchRes.statusCode, 302)
+    assert.equal(mismatchRes.headers.location, 'https://app.applify.id/settings?gmail=error&reason=session_mismatch')
     assert.match(String(mismatchRes.headers['set-cookie']), /Max-Age=0/)
     assert.equal(googleExchangeCalls, 0)
     assert.equal(store.tables.platform_sessions.length, 0)
@@ -181,4 +183,116 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
     assert.equal(hashOAuthNonce('abc'), crypto.createHash('sha256').update('abc').digest('hex'))
     await app.close()
   })
+})
+
+// ---- Kegagalan callback kembali ke Pengaturan, bukan JSON mentah; status memberi tahu perlu sambung ulang -------------
+
+const OAUTH_ENV = {
+  NODE_ENV: 'production',
+  FRONTEND_URL: 'https://app.applify.id',
+  GOOGLE_CLIENT_ID: 'gid-test',
+  GOOGLE_CLIENT_SECRET: 'gsec-test',
+  GOOGLE_REDIRECT_URI: 'https://api.applify.id/api/oauth/google/callback',
+}
+
+async function buildOAuthApp(opts: { db?: any; fetchImpl?: typeof fetch; env?: Record<string, string | undefined> } = {}) {
+  const app = Fastify()
+  await app.register(oauthRoutes, {
+    prefix: '/api/oauth',
+    db: opts.db ?? makeExtensionTestDb({ platform_sessions: [] }).db,
+    resolveUserId: async (req, reply) => {
+      if (req.headers.authorization === 'Bearer valid') return 'user-1'
+      reply.status(401).send({ error: 'Unauthorized' })
+      return null
+    },
+    fetchImpl: opts.fetchImpl ?? ((async () => new Response('{}', { status: 400 })) as typeof fetch),
+    notify: async () => {},
+    env: opts.env ?? OAUTH_ENV,
+  })
+  return app
+}
+
+test('OAuth callback: parameter hilang, state rusak, atau server belum dikonfigurasi: redirect ke Pengaturan dengan kode alasan, tanpa teks galat', async () => {
+  await withEncryptionKey(async () => {
+    const app = await buildOAuthApp()
+    const go = (query: string) => app.inject({ method: 'GET', url: `/api/oauth/google/callback${query}` })
+    const loc = (res: any) => String(res.headers.location)
+
+    const noParams = await go('')
+    assert.equal(noParams.statusCode, 302)
+    assert.equal(loc(noParams), 'https://app.applify.id/settings?gmail=error&reason=missing_params')
+    assert.match(String(noParams.headers['set-cookie']), /Max-Age=0/)
+
+    const noState = await go('?code=abc')
+    assert.equal(loc(noState), 'https://app.applify.id/settings?gmail=error&reason=missing_params')
+
+    const garbage = await go('?code=abc&state=bukan.state.valid')
+    assert.equal(garbage.statusCode, 302)
+    assert.equal(loc(garbage), 'https://app.applify.id/settings?gmail=error&reason=invalid_state')
+    assert.equal(garbage.body.includes('signature'), false)
+
+    const expired = signState({ uid: 'user-1', nonce: 'n', exp: Date.now() - 1000 })
+    const expiredRes = await go(`?code=abc&state=${encodeURIComponent(expired)}`)
+    assert.equal(loc(expiredRes), 'https://app.applify.id/settings?gmail=error&reason=invalid_state')
+
+    const noNonce = signState({ uid: 'user-1', exp: Date.now() + 60_000 })
+    const noNonceRes = await go(`?code=abc&state=${encodeURIComponent(noNonce)}`)
+    assert.equal(loc(noNonceRes), 'https://app.applify.id/settings?gmail=error&reason=invalid_state')
+
+    const unconfigured = await buildOAuthApp({ env: { ...OAUTH_ENV, GOOGLE_CLIENT_SECRET: '' } })
+    const unconfiguredRes = await unconfigured.inject({ method: 'GET', url: '/api/oauth/google/callback?code=abc&state=x' })
+    assert.equal(loc(unconfiguredRes), 'https://app.applify.id/settings?gmail=error&reason=not_configured')
+    await app.close()
+    await unconfigured.close()
+  })
+})
+
+test('OAuth callback: penukaran kode gagal (HTTP 400 atau jaringan putus) kembali dengan reason=token_exchange dan tidak menyimpan token', async () => {
+  await withEncryptionKey(async () => {
+    for (const fetchImpl of [
+      (async () => new Response('{"error":"invalid_grant"}', { status: 400 })) as typeof fetch,
+      (async () => {
+        throw new TypeError('fetch failed')
+      }) as typeof fetch,
+    ]) {
+      const store = makeExtensionTestDb({ platform_sessions: [] })
+      const app = await buildOAuthApp({ db: store.db, fetchImpl })
+      const init = await app.inject({ method: 'POST', url: '/api/oauth/google/init', headers: { authorization: 'Bearer valid', host: 'api.applify.id' } })
+      const state = new URL(init.json().url).searchParams.get('state')!
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/oauth/google/callback?code=c1&state=${encodeURIComponent(state)}`,
+        headers: { cookie: cookiePairFromSetCookie(init.headers['set-cookie']) },
+      })
+      assert.equal(res.statusCode, 302)
+      assert.equal(res.headers.location, 'https://app.applify.id/settings?gmail=error&reason=token_exchange')
+      assert.equal(store.tables.platform_sessions.length, 0)
+      await app.close()
+    }
+  })
+})
+
+test('OAuth status: token yang refresh-nya ditolak (invalid_grant) melapor connected:false, needs_reconnect:true; tanpa blob terenkripsi', async () => {
+  const future = new Date(Date.now() + 3600_000).toISOString()
+  const store = makeExtensionTestDb({
+    platform_sessions: [
+      { id: 's1', user_id: 'user-1', platform: 'gmail', is_active: true, expires_at: future, session_data: { encrypted: 'BLOB-RAHASIA', refresh_failed: 'invalid_grant' } },
+    ],
+  })
+  const app = await buildOAuthApp({ db: store.db })
+  const res = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(res.json(), { gmail: false, connected: false, needs_reconnect: true })
+  assert.equal(res.body.includes('BLOB-RAHASIA'), false)
+
+  // Tersambung normal, tanpa penanda.
+  store.tables.platform_sessions[0].session_data = { encrypted: 'BLOB-RAHASIA' }
+  const ok = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
+  assert.deepEqual(ok.json(), { gmail: true, connected: true, needs_reconnect: false })
+
+  // Belum pernah tersambung.
+  store.tables.platform_sessions.length = 0
+  const none = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
+  assert.deepEqual(none.json(), { gmail: false, connected: false, needs_reconnect: false })
+  await app.close()
 })

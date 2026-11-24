@@ -248,12 +248,17 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
     const cookieNonceHash = parseCookieValue(request.headers.cookie, OAUTH_NONCE_COOKIE)
     clearNonceCookie(request, reply)
 
-    if (error) return reply.redirect(`${frontendUrl()}/settings?gmail=error&reason=${encodeURIComponent(String(error))}`)
+    // Semua kegagalan callback kembali ke halaman Pengaturan dengan kode alasan tetap, bukan JSON mentah di tab
+    // OAuth. Validasi state dan nonce tetap ketat (tidak ada penukaran kode atau penyimpanan token pada kegagalan);
+    // yang berubah hanya bentuk jawabannya. Teks galat internal tidak ikut dikirim.
+    const fail = (reason: string) => reply.redirect(`${frontendUrl()}/settings?gmail=error&reason=${encodeURIComponent(reason)}`)
+
+    if (error) return fail(String(error).slice(0, 80))
     if (!code || !state || typeof code !== 'string' || typeof state !== 'string') {
-      return reply.status(400).send({ error: 'missing code/state' })
+      return fail('missing_params')
     }
     if (!googleClientId() || !googleClientSecret()) {
-      return reply.status(503).send({ error: 'Gmail not configured on server' })
+      return fail('not_configured')
     }
 
     let uid: string
@@ -261,37 +266,44 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
     try {
       const payload = verifyState<{ uid?: unknown; nonce?: unknown }>(state)
       if (typeof payload?.uid !== 'string' || !payload.uid || typeof payload?.nonce !== 'string' || !payload.nonce) {
-        return reply.status(400).send({ error: 'invalid state: missing nonce' })
+        return fail('invalid_state')
       }
       uid = payload.uid
       nonce = payload.nonce
-    } catch (e: any) {
-      return reply.status(400).send({ error: `invalid state: ${e?.message}` })
+    } catch {
+      return fail('invalid_state')
     }
 
     const expectedNonceHash = hashOAuthNonce(nonce)
     if (!cookieNonceHash || !timingSafeStringEqual(cookieNonceHash, expectedNonceHash)) {
-      return reply.status(400).send({ error: 'invalid state: oauth session mismatch' })
+      return fail('session_mismatch')
     }
 
     // Exchange authorization code for tokens.
-    const tokenResp = await fetchFn('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code,
-        client_id: googleClientId(),
-        client_secret: googleClientSecret(),
-        redirect_uri: googleRedirectUri(),
-        grant_type: 'authorization_code',
-      }),
-    })
-    if (!tokenResp.ok) {
-      const text = await tokenResp.text()
-      console.error('[oauth] token exchange failed:', tokenResp.status, text)
-      return reply.redirect(`${frontendUrl()}/settings?gmail=error&reason=token_exchange`)
+    let tokens: any
+    try {
+      const tokenResp = await fetchFn('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: googleClientId(),
+          client_secret: googleClientSecret(),
+          redirect_uri: googleRedirectUri(),
+          grant_type: 'authorization_code',
+        }),
+      })
+      if (!tokenResp.ok) {
+        const text = await tokenResp.text()
+        console.error('[oauth] token exchange failed:', tokenResp.status, text.slice(0, 300))
+        return fail('token_exchange')
+      }
+      tokens = await tokenResp.json()
+    } catch (e: any) {
+      console.error('[oauth] token exchange error:', e?.name ?? 'Error')
+      return fail('token_exchange')
     }
-    const tokens = (await tokenResp.json()) as any
+    if (!tokens?.access_token) return fail('token_exchange')
 
     const blob = JSON.stringify({
       access_token: tokens.access_token,
@@ -319,27 +331,36 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
 
     if (upErr) {
       console.error('[oauth] failed to persist gmail token:', upErr.message)
-      return reply.redirect(`${frontendUrl()}/settings?gmail=error&reason=storage`)
+      return fail('storage')
     }
 
-    await notifyFn(`✅ Applify: Gmail connected for user ${uid}`)
+    try {
+      await notifyFn(`✅ Applify: Gmail connected for user ${uid}`)
+    } catch (e: any) {
+      console.warn('[oauth] connect notification failed:', e?.name ?? 'Error')
+    }
     return reply.redirect(`${frontendUrl()}/settings?gmail=connected`)
   })
 
   // ---- GET /api/oauth/status — is the current user's Gmail connected? ----
+  // `needs_reconnect`: refresh terakhir ditolak Google dengan invalid_grant (cabut akses, sandi diganti, token
+  // kedaluwarsa). Worker menandai baris `platform_sessions` (session_data.refresh_failed = 'invalid_grant');
+  // menyambungkan ulang menimpa session_data sehingga penanda hilang. Isi blob terenkripsi tidak pernah dikirim.
   app.get('/status', async (request, reply) => {
     const userId = await requireUser(request, reply)
     if (!userId) return reply
     const db = await getDb()
     const { data } = await db
       .from('platform_sessions')
-      .select('is_active, expires_at')
+      .select('is_active, expires_at, session_data')
       .eq('user_id', userId)
       .eq('platform', 'gmail')
       .maybeSingle()
+    const needsReconnect = Boolean(data) && data?.session_data?.refresh_failed === 'invalid_grant'
+    if (needsReconnect) return { gmail: false, connected: false, needs_reconnect: true }
     const now = new Date()
     const connected = Boolean(data?.is_active && (!data?.expires_at || new Date(data.expires_at) > now))
-    return { gmail: connected || Boolean(data) }
+    return { gmail: connected || Boolean(data), connected: connected || Boolean(data), needs_reconnect: false }
   })
 
   // ---- POST /api/oauth/disconnect — revoke & delete Gmail session ----
