@@ -259,7 +259,7 @@ export function verifyInternalBearer(authHeader: unknown, expectedSecret: string
 
 /**
  * Rute internal untuk worker latar memicu notifikasi kanal pengguna (email Resend / WhatsApp) saat status lamaran
- * berubah ke `ready` atau `submitted`. Dilindungi bearer `INTERNAL_NOTIFY_SECRET` atau `SUPABASE_SERVICE_ROLE_KEY`.
+ * berubah ke `ready` atau `submitted`. Dilindungi bearer `INTERNAL_NOTIFY_SECRET` saja (minimal 8 karakter); kunci service role sengaja tidak diterima.
  */
 export async function internalNotificationRoutes(app: FastifyInstance, opts: NotificationRoutesOptions = {}) {
   const getDb = async (): Promise<GuardDb> => opts.db ?? ((await import('../index.js')).supabase as unknown as GuardDb)
@@ -267,7 +267,7 @@ export async function internalNotificationRoutes(app: FastifyInstance, opts: Not
   const env = opts.env ?? process.env
 
   app.post('/application-status', async (request, reply) => {
-    const expectedSecret = (env.INTERNAL_NOTIFY_SECRET || env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+    const expectedSecret = (env.INTERNAL_NOTIFY_SECRET || '').trim()
     if (expectedSecret.length < 8) {
       return reply.status(503).send({ error: 'Internal notification secret not configured' })
     }

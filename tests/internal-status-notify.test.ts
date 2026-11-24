@@ -128,7 +128,7 @@ test('POST /api/internal/notifications/application-status: dispatch Resend saat 
       prefix: '/api/internal/notifications',
       db: storeOn.db,
       dispatcher: dispatcherOn,
-      env: { SUPABASE_SERVICE_ROLE_KEY: SECRET },
+      env: { INTERNAL_NOTIFY_SECRET: SECRET },
     })
 
     const onRes = await appOn.inject({
@@ -160,3 +160,17 @@ test('POST /api/internal/notifications/application-status: dispatch Resend saat 
     ;(notificationsService as any).sendTelegram = realTelegram
   }
 })
+
+test('rute internal: kunci service role tidak diterima sebagai pengganti INTERNAL_NOTIFY_SECRET', async () => {
+  const app = Fastify()
+  await app.register(internalNotificationRoutes, { prefix: '/api/internal/notifications', env: { SUPABASE_SERVICE_ROLE_KEY: 'svc-key-1234567890' } })
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/internal/notifications/application-status',
+    headers: { authorization: 'Bearer svc-key-1234567890' },
+    payload: { user_id: 'u', application_id: 'a' },
+  })
+  assert.equal(res.statusCode, 503)
+  await app.close()
+})
+
