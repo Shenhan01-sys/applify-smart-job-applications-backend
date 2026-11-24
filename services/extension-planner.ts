@@ -56,6 +56,16 @@ export interface SanitizedExtControl {
   required: boolean
   options: string[]
   currentValue: string
+  /**
+   * Keadaan kontrol dari ekstensi (semua opsional, tanpa nilai bila tidak dikirim). Widget ARIA dan contenteditable
+   * tiba sebagai jenis yang sudah ada: `role=checkbox|switch` -> `checkbox`, `role=radiogroup` dan tombol bergantian
+   * -> `radio`, `contenteditable` -> `textarea`. Jadi perencana tidak butuh jenis baru.
+   */
+  role?: ExtControlRole
+  disabled?: boolean
+  readOnly?: boolean
+  checked?: boolean
+  expanded?: boolean
 }
 
 export type ExtBlockerReason = 'ai_prohibited' | 'captcha_blocked' | 'closed_posting' | 'auth_required'
@@ -111,6 +121,46 @@ export function questionKey(label: string): string {
 
 const VALID_KINDS = new Set<ExtControlKind>(['text', 'textarea', 'select', 'checkbox', 'radio', 'file', 'submit'])
 
+/** Peran ARIA yang diterima dari ekstensi. Harus sama dengan `EXT_ROLES` di `extension/src/content/extractControls.ts`. */
+export const EXT_ROLES = [
+  'checkbox',
+  'switch',
+  'radio',
+  'radiogroup',
+  'textbox',
+  'searchbox',
+  'combobox',
+  'listbox',
+  'spinbutton',
+  'slider',
+  'button',
+  'group',
+] as const
+export type ExtControlRole = (typeof EXT_ROLES)[number]
+const VALID_ROLES = new Set<string>(EXT_ROLES)
+
+/** Jenis kontrol yang boleh membawa `checked` dan `expanded`. Selain itu kolom itu dibuang. */
+const CHECKED_KINDS = new Set<ExtControlKind>(['checkbox', 'radio'])
+const EXPANDED_KINDS = new Set<ExtControlKind>(['select', 'text', 'textarea'])
+
+/**
+ * Keadaan kontrol yang valid: `role` dari daftar tertutup (huruf kecil, tanpa spasi), keempat bendera hanya bila
+ * tipenya boolean persis (string "true", angka 1, dan objek dibuang), `checked` hanya untuk checkbox/radio, `expanded`
+ * hanya untuk select/text/textarea. Yang tidak valid dihilangkan, bukan ditolak: kontrolnya sendiri tetap diterima.
+ */
+function sanitizeControlState(rec: Record<string, unknown>, kind: ExtControlKind): Partial<SanitizedExtControl> {
+  const state: Partial<SanitizedExtControl> = {}
+  if (typeof rec.role === 'string') {
+    const role = rec.role.trim().toLowerCase()
+    if (role.length <= 20 && VALID_ROLES.has(role)) state.role = role as ExtControlRole
+  }
+  if (typeof rec.disabled === 'boolean') state.disabled = rec.disabled
+  if (typeof rec.readOnly === 'boolean') state.readOnly = rec.readOnly
+  if (typeof rec.checked === 'boolean' && CHECKED_KINDS.has(kind)) state.checked = rec.checked
+  if (typeof rec.expanded === 'boolean' && EXPANDED_KINDS.has(kind)) state.expanded = rec.expanded
+  return state
+}
+
 export const cleanLine = (raw: unknown, max: number): string => {
   if (typeof raw !== 'string') return ''
   return raw
@@ -163,6 +213,7 @@ export function sanitizeExtensionControls(rawControls: unknown): SanitizedExtCon
       required: Boolean(rec.required),
       options,
       currentValue: kind === 'file' || kind === 'submit' ? '' : cleanLine(rec.currentValue, 500),
+      ...sanitizeControlState(rec, kind),
     })
   }
   return out
