@@ -1,3 +1,4 @@
+import { parseLeaseId, settleExtensionQueueRow, warnMissingLease } from './extension-lease.js'
 import crypto from 'crypto'
 import { classifyJobChannel, isLinkedInUrl, sanitizeHttpUrl } from './apply-channel.js'
 import { cleanLine, isSecretLabel, sanitizePendingQuestions, sanitizeSecretSkips } from './extension-planner.js'
@@ -663,6 +664,8 @@ export interface ReportRunInput {
   outcome: ExtensionRunOutcome
   runId?: string | null
   queueJobId?: string | null
+  /** `lease_id` dari klaim antrean: baris hanya disentuh bila masih milik lease ini (extension-lease.ts). */
+  leaseId?: unknown
   awaitingUntil?: string | null
   loginUrl?: string | null
   reason?: string | null
@@ -897,7 +900,8 @@ export async function reportExtensionRun(
 
   const claimReleased = RELEASE_OUTCOMES.has(outcome) ? await releaseApprovalClaim(db, userId, input.approvalId, runId) : false
 
-  // Perbarui antrean `extension_apply` terkait secara best-effort (tidak pernah menggagalkan log).
+  // Perbarui antrean `extension_apply` terkait secara best-effort (tidak pernah menggagalkan log). Hanya baris
+  // aktif (pending/processing) milik persetujuan ini, dan milik lease ini bila lease_id dikirim (extension-lease.ts).
   try {
     const iso = now.toISOString()
     const baseQueuePatch = awaitingLogin
@@ -905,20 +909,18 @@ export async function reportExtensionRun(
       : { status: 'completed', completed_at: iso, error_message: null, updated_at: iso }
     const fullQueuePatch = awaitingLogin
       ? { ...baseQueuePatch, heartbeat_at: iso }
-      : { ...baseQueuePatch, heartbeat_at: null }
-
-    const runQueueUpdate = (patch: Record<string, any>) => {
-      let q = db.from('automation_queue').update(patch).eq('user_id', userId).eq('job_type', 'extension_apply')
-      q = queueJobId ? q.eq('id', queueJobId) : q.eq('payload->>approval_request_id', input.approvalId).in('status', ['pending', 'processing'])
-      return q
-    }
-
-    let qRes = await runQueueUpdate(fullQueuePatch)
-    if (
-      qRes?.error &&
-      (qRes.error.code === '42703' || qRes.error.code === 'PGRST204' || /heartbeat_at/i.test(String(qRes.error.message ?? '')))
-    ) {
-      await runQueueUpdate(baseQueuePatch)
+      : { ...baseQueuePatch, heartbeat_at: null, claimed_by: null }
+    const lease = parseLeaseId(input.leaseId)
+    if (lease.kind === 'absent') warnMissingLease('report-run')
+    const settled = await settleExtensionQueueRow(db, userId, {
+      approvalId: input.approvalId,
+      queueJobId,
+      lease,
+      fullPatch: fullQueuePatch,
+      basePatch: baseQueuePatch,
+    })
+    if ('reason' in settled && settled.reason !== 'not_found') {
+      console.warn(`[extension-report] baris antrean tidak disentuh (${settled.reason}) untuk persetujuan ${input.approvalId}`)
     }
   } catch {
     // Abaikan kegagalan sinkronisasi baris antrean sesudah log hasil tersimpan aman.

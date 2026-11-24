@@ -291,6 +291,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
           outcome: body.outcome as any,
           runId: typeof body.runId === 'string' ? body.runId : null,
           queueJobId: typeof body.queueJobId === 'string' ? body.queueJobId : null,
+          leaseId: body.lease_id,
           awaitingUntil: typeof body.awaitingUntil === 'string' ? body.awaitingUntil : null,
           loginUrl: typeof body.loginUrl === 'string' ? body.loginUrl : null,
           reason: typeof body.reason === 'string' ? body.reason : null,
@@ -321,10 +322,8 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
     if (!userId) return reply
     const body = (request.body ?? {}) as Record<string, unknown>
     try {
-      const job = await claimNextExtensionJob(await getDb(), userId, {
-        claimer: typeof body.claimer === 'string' ? body.claimer : undefined,
-        now: new Date(now()),
-      })
+      // Respons `job.lease_id` = kepemilikan tugas; kirim kembali pada heartbeat, release, dan report-run.
+      const job = await claimNextExtensionJob(await getDb(), userId, { now: new Date(now()) })
       if (!job) return reply.status(204).send()
       return { job }
     } catch (err: any) {
@@ -339,8 +338,9 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
     const userId = await requireExtensionUser(request, reply)
     if (!userId) return reply
     const { id } = request.params as { id: string }
+    const body = (request.body ?? {}) as Record<string, unknown>
     try {
-      return await heartbeatExtensionJob(await getDb(), userId, id, new Date(now()))
+      return await heartbeatExtensionJob(await getDb(), userId, id, new Date(now()), body.lease_id)
     } catch (err: any) {
       if (err instanceof ExtensionRunnerError) {
         return reply.status(err.statusCode).send({ error: err.message, code: err.code })
@@ -364,6 +364,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
           error: typeof body.error === 'string' ? body.error : undefined,
           countRetry: body.countRetry !== false,
           delaySeconds: typeof body.delaySeconds === 'number' ? body.delaySeconds : undefined,
+          leaseId: body.lease_id,
         },
         new Date(now())
       )

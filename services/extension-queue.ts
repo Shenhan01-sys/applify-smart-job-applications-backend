@@ -1,7 +1,7 @@
-import crypto from 'crypto'
 import { classifyJobChannel } from './apply-channel.js'
 import { ExtensionRunnerError, isUuid, verifyExtensionApproval } from './extension-runner.js'
 import type { GuardDb } from './queue-guard.js'
+import { leaseHolds, newLeaseId, parseLeaseId, readQueueRow, warnMissingLease } from './extension-lease.js'
 
 /**
  * Layanan antrean khusus Ekstensi Browser (`job_type = 'extension_apply'`).
@@ -19,6 +19,12 @@ export const DEFAULT_RELEASE_DELAY_SEC = 15
 
 export interface ClaimedExtensionJob {
   queueJobId: string
+  /**
+   * Kepemilikan tugas: UUID acak yang disimpan di `automation_queue.claimed_by`. Ekstensi mengirimnya kembali
+   * pada heartbeat, release, dan report-run (`lease_id`). Sebelum migrasi kolom itu belum ada, nilainya tetap
+   * dikirim tetapi tidak diperiksa.
+   */
+  lease_id: string
   approvalId: string
   jobId: string
   applicationId: string | null
@@ -154,11 +160,13 @@ async function updateClaimLeaseColumnsSafe(
 export async function claimNextExtensionJob(
   db: GuardDb,
   userId: string,
-  opts: { claimer?: string; now?: Date; staleAfterMs?: number } = {}
+  opts: { now?: Date; staleAfterMs?: number } = {}
 ): Promise<ClaimedExtensionJob | null> {
   const now = opts.now ?? new Date()
   const staleMs = Math.max(60_000, opts.staleAfterMs ?? EXTENSION_LEASE_STALE_MS)
-  const claimer = cleanReleaseError(opts.claimer) ?? `ext-${crypto.randomUUID().slice(0, 8)}`
+  // Tiap klaim memakai lease baru; label `claimer` dari klien tidak lagi disimpan.
+  const leaseId = newLeaseId()
+  const claimer = leaseId
 
   for (let pass = 0; pass < 10; pass++) {
     let claimedRow: Record<string, any> | null = null
@@ -267,6 +275,7 @@ export async function claimNextExtensionJob(
 
     return {
       queueJobId: String(claimedRow.id),
+      lease_id: leaseId,
       approvalId,
       jobId,
       applicationId: approvalCheck.row.application_id ?? null,
@@ -286,76 +295,102 @@ export async function claimNextExtensionJob(
   return null
 }
 
-/** Perbarui heartbeat tugas `extension_apply` yang sedang `processing` milik pengguna. */
+/**
+ * Perbarui heartbeat tugas `extension_apply` yang sedang `processing` milik pengguna.
+ * `leaseId` (dari klaim) harus sama dengan `claimed_by` bila kolomnya ada; beda = 409 `lease_lost` (tugas sudah
+ * direklaim ekstensi lain). Tanpa `leaseId` (ekstensi lama) diterima dan dicatat di log.
+ */
 export async function heartbeatExtensionJob(
   db: GuardDb,
   userId: string,
   queueJobId: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  leaseId?: unknown
 ): Promise<{ ok: true; queueJobId: string; heartbeatAt: string }> {
   if (!validQueueId(queueJobId)) {
     throw new ExtensionRunnerError(400, 'invalid_job_id', 'ID tugas antrean tidak valid')
   }
+  const lease = parseLeaseId(leaseId)
+  if (lease.kind === 'invalid') throw new ExtensionRunnerError(400, 'invalid_lease_id', 'lease_id tidak valid')
+  if (lease.kind === 'absent') warnMissingLease('heartbeat')
+
   const iso = now.toISOString()
   const basePatch = { processed_at: iso, updated_at: iso }
   const fullPatch = { ...basePatch, heartbeat_at: iso }
 
-  const runUpdate = (patch: Record<string, any>) =>
-    db
+  const runUpdate = (patch: Record<string, any>, withLeaseFilter: boolean) => {
+    let q = db
       .from('automation_queue')
       .update(patch)
       .eq('id', queueJobId)
       .eq('user_id', userId)
       .eq('job_type', EXTENSION_QUEUE_JOB_TYPE)
       .eq('status', 'processing')
-      .select('id, status')
+    // Syarat kepemilikan ikut di UPDATE: reklamasi di antara pembacaan dan penulisan tidak boleh tertimpa.
+    if (withLeaseFilter && lease.kind === 'present') q = q.eq('claimed_by', lease.leaseId)
+    return q.select('id, status')
+  }
 
-  let res = await runUpdate(fullPatch)
+  let res = await runUpdate(fullPatch, true)
   if (res.error && isMissingQueueSchemaError(res.error)) {
-    res = await runUpdate(basePatch)
+    res = await runUpdate(basePatch, false)
   }
   if (res.error) throw new ExtensionRunnerError(500, 'heartbeat_failed', res.error.message)
   if (Array.isArray(res.data) && res.data.length > 0) {
     return { ok: true, queueJobId, heartbeatAt: iso }
   }
 
-  const { data: existing, error: lookupErr } = await db
-    .from('automation_queue')
-    .select('id, job_type, status')
-    .eq('id', queueJobId)
-    .eq('user_id', userId)
-    .maybeSingle()
-  if (lookupErr) throw new ExtensionRunnerError(500, 'queue_lookup_failed', lookupErr.message)
+  let lookup: Awaited<ReturnType<typeof readQueueRow>>
+  try {
+    lookup = await readQueueRow(db, userId, queueJobId, 'id, job_type, status')
+  } catch (err: any) {
+    throw new ExtensionRunnerError(500, 'queue_lookup_failed', String(err?.message ?? 'queue lookup failed'))
+  }
+  const existing = lookup.row
   if (!existing || existing.job_type !== EXTENSION_QUEUE_JOB_TYPE) {
     throw new ExtensionRunnerError(404, 'job_not_found', 'Tugas antrean ekstensi tidak ditemukan')
+  }
+  if (existing.status === 'processing' && !leaseHolds(lease, existing, lookup.hasLeaseColumn)) {
+    throw new ExtensionRunnerError(409, 'lease_lost', 'Tugas ini sudah direklaim ekstensi lain')
   }
   throw new ExtensionRunnerError(409, 'job_not_processing', `Tugas berstatus ${existing.status}, tidak menerima heartbeat`)
 }
 
-/** Lepas kembali tugas `extension_apply` ke `pending` (atau `failed` bila terminal / batas coba habis). */
+/**
+ * Lepas kembali tugas `extension_apply` ke `pending` (atau `failed` bila terminal / batas coba habis).
+ * `opts.leaseId` harus sama dengan `claimed_by` bila kolomnya ada, kalau tidak 409 `lease_lost`; claimed_by
+ * dikosongkan saat dilepas. Tanpa `leaseId` (ekstensi lama) diterima dan dicatat di log.
+ */
 export async function releaseExtensionJob(
   db: GuardDb,
   userId: string,
   queueJobId: string,
-  opts: { terminal?: boolean; error?: string; countRetry?: boolean; delaySeconds?: number } = {},
+  opts: { terminal?: boolean; error?: string; countRetry?: boolean; delaySeconds?: number; leaseId?: unknown } = {},
   now: Date = new Date()
 ): Promise<{ ok: true; queueJobId: string; status: 'pending' | 'failed'; retryCount: number }> {
   if (!validQueueId(queueJobId)) {
     throw new ExtensionRunnerError(400, 'invalid_job_id', 'ID tugas antrean tidak valid')
   }
-  const { data: existing, error: lookupErr } = await db
-    .from('automation_queue')
-    .select('id, user_id, job_type, status, retry_count, max_retries')
-    .eq('id', queueJobId)
-    .eq('user_id', userId)
-    .maybeSingle()
+  const lease = parseLeaseId(opts.leaseId)
+  if (lease.kind === 'invalid') throw new ExtensionRunnerError(400, 'invalid_lease_id', 'lease_id tidak valid')
+  if (lease.kind === 'absent') warnMissingLease('release')
 
-  if (lookupErr) throw new ExtensionRunnerError(500, 'queue_lookup_failed', lookupErr.message)
+  let lookup: Awaited<ReturnType<typeof readQueueRow>>
+  try {
+    lookup = await readQueueRow(db, userId, queueJobId)
+  } catch (err: any) {
+    throw new ExtensionRunnerError(500, 'queue_lookup_failed', String(err?.message ?? 'queue lookup failed'))
+  }
+  const existing = lookup.row
+
   if (!existing || existing.job_type !== EXTENSION_QUEUE_JOB_TYPE) {
     throw new ExtensionRunnerError(404, 'job_not_found', 'Tugas antrean ekstensi tidak ditemukan')
   }
   if (existing.status === 'completed' || existing.status === 'failed') {
     throw new ExtensionRunnerError(409, 'job_already_finished', `Tugas sudah berstatus ${existing.status}`)
+  }
+  if (!leaseHolds(lease, existing, lookup.hasLeaseColumn)) {
+    throw new ExtensionRunnerError(409, 'lease_lost', 'Tugas ini sudah direklaim ekstensi lain')
   }
 
   const countRetry = opts.countRetry !== false
@@ -373,21 +408,23 @@ export async function releaseExtensionJob(
     ...(nextStatus === 'failed' ? { completed_at: iso } : { processed_at: null }),
     updated_at: iso,
   }
-  const fullPatch = { ...basePatch, heartbeat_at: null }
+  const fullPatch = { ...basePatch, heartbeat_at: null, claimed_by: null }
 
-  const runUpdate = (patch: Record<string, any>) =>
-    db
+  const runUpdate = (patch: Record<string, any>, withLeaseFilter: boolean) => {
+    let q = db
       .from('automation_queue')
       .update(patch)
       .eq('id', queueJobId)
       .eq('user_id', userId)
       .eq('job_type', EXTENSION_QUEUE_JOB_TYPE)
-      .eq('status', existing.status)
-      .select('id, status')
+      .eq('status', existing.status as string)
+    if (withLeaseFilter && lease.kind === 'present') q = q.eq('claimed_by', lease.leaseId)
+    return q.select('id, status')
+  }
 
-  let res = await runUpdate(fullPatch)
+  let res = await runUpdate(fullPatch, lookup.hasLeaseColumn)
   if (res.error && isMissingQueueSchemaError(res.error)) {
-    res = await runUpdate(basePatch)
+    res = await runUpdate(basePatch, false)
   }
   if (res.error) throw new ExtensionRunnerError(500, 'release_failed', res.error.message)
   if (!Array.isArray(res.data) || res.data.length === 0) {
