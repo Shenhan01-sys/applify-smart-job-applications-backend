@@ -5,6 +5,7 @@ import { NOW, fixturePages, fixturePdf, fixtureText } from './helpers/linkedinFi
 import { LinkedInImportError, PDF_MAX_BYTES, assertPdfUpload, extractPdfPages } from '../services/linkedin-pdf.ts'
 import {
   LIMITS,
+  MAX_TECHNICAL_SKILLS,
   assemblePreview,
   buildModelPrompt,
   cleanPdfText,
@@ -316,12 +317,20 @@ test('normalizeExtraction deskripsi: kata karangan membuat deskripsi dibuang den
   assert.match(long.notes.join(' '), /dipotong/)
 })
 
-test('normalizeExtraction skill: tingkat bahasa dipetakan, ganda dan terlalu panjang dibuang, batas 50, kategori selalu sah', () => {
+test('normalizeExtraction skill: ganda dan terlalu panjang dibuang, skill teknis paling banyak 40, kategori selalu sah', () => {
   const names = Array.from({ length: 60 }, (_, i) => `Skill${i}`)
   const n = norm({ skills: [...names, 'Skill1', 'x'.repeat(61)], languages: [] }, names.join('\n') + '\n' + 'x'.repeat(61))
-  assert.equal(n.skills.length, LIMITS.maxSkills)
+  assert.equal(n.skills.length, MAX_TECHNICAL_SKILLS)
   assert.ok(n.skills.every((s) => ['technical', 'tool', 'language', 'soft'].includes(s.category) && s.proficiency_level >= 1 && s.proficiency_level <= 5))
-  assert.equal(n.dropped.skills, 60 + 2 - LIMITS.maxSkills)
+  assert.equal(n.dropped.skills, 60 + 2 - MAX_TECHNICAL_SKILLS)
+})
+
+test('normalizeExtraction skill: skill teknis dan bahasa bersama tetap dibatasi LIMITS.maxSkills (50)', () => {
+  const tech = Array.from({ length: 40 }, (_, i) => `Skill${i}`)
+  const langs = Array.from({ length: 15 }, (_, i) => `Bahasa${i}`)
+  const n = norm({ skills: tech, languages: langs.map((name) => ({ name, level: 'Native' })) }, [...tech, ...langs].join('\n'))
+  assert.equal(n.skills.length, LIMITS.maxSkills)
+  assert.equal(n.dropped.skills, 5)
 })
 
 test('normalizeExtraction: masukan sampah (bukan objek, tipe salah) tidak melempar galat', () => {

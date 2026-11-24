@@ -56,7 +56,7 @@ test('layanan: AI sudah menemukan pendidikan -> hasil AI dipakai apa adanya, tan
     education: [{ school: 'Universitas Fiktif Nusantara', degree: 'S1', field: 'Sistem Informasi', years: '2018 s/d 2022', gpa: '3,75/4,00' }],
   }).importFromPdf(Buffer.from('%PDF-tiruan'), { userId: 'u1' })
   assert.deepEqual(preview.education.map((e) => [e.institution, e.start_year, e.end_year, e.gpa, e.max_gpa]), [['Universitas Fiktif Nusantara', 2018, 2022, 3.75, 4]])
-  assert.ok(!preview.warnings.some((w) => /aturan sederhana/i.test(w)))
+  assert.ok(!preview.warnings.some((w) => /Pendidikan.*aturan sederhana/i.test(w)))
 })
 
 test('layanan: AI gagal total, CV biasa dibaca parser aturan dan pendidikannya ikut terbaca', async () => {

@@ -5,7 +5,9 @@ import {
   buildModelPrompt,
   cleanPdfText,
   emptyMainSections,
+  hasCvSkillsSection,
   isEmptyExtraction,
+  LIMITS,
   normalizeExtraction,
   parseWithRules,
   type ImportPreview,
@@ -134,6 +136,16 @@ export class LinkedInImportService {
       if (fromRules.education.length > 0) {
         result = { ...result, education: fromRules.education, dropped: { ...result.dropped, education: result.dropped.education + fromRules.dropped.education } }
         warnings.push('AI tidak menemukan riwayat pendidikan, jadi bagian Pendidikan dibaca dengan aturan sederhana. Periksa hasilnya dengan teliti.')
+      }
+    }
+
+    // Hal yang sama untuk skill: CV biasa punya seksi Skills/Keahlian, tetapi AI kadang hanya mengisi pengalaman.
+    if (method === 'ai' && !result.skills.some((k) => k.category === 'technical') && hasCvSkillsSection(text)) {
+      const fromRules = normalizeExtraction(parseWithRules(text), { sourceText: text, now }).skills.filter((k) => k.category === 'technical')
+      if (fromRules.length > 0) {
+        const languages = result.skills.filter((k) => k.category !== 'technical')
+        result = { ...result, skills: [...fromRules, ...languages].slice(0, LIMITS.maxSkills) }
+        warnings.push('AI tidak menemukan skill, jadi bagian Skill dibaca dengan aturan sederhana. Periksa hasilnya dengan teliti.')
       }
     }
 

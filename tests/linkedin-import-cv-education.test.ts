@@ -168,7 +168,7 @@ test('splitSections: judul seksi CV biasa sesudah Pendidikan menutup bloknya (Ke
   assert.deepEqual(blocks.map((b) => [b.key, b.lines]), [
     ['preamble', []],
     ['education', ['Universitas Fiktif Barat']],
-    ['other', ['Python']],
+    ['skills', ['Python']],
     ['experience', ['Analis']],
   ])
 })

@@ -422,6 +422,7 @@ export type SectionKey =
   | 'preamble'
   | 'contact'
   | 'topSkills'
+  | 'skills'
   | 'languages'
   | 'certifications'
   | 'honors'
@@ -434,6 +435,14 @@ export type SectionKey =
 const HEADINGS: Array<[SectionKey, string[]]> = [
   ['contact', ['Contact', 'Kontak']],
   ['topSkills', ['Top Skills', 'Kemampuan Teratas', 'Keahlian Teratas', 'Skill Teratas']],
+  // Seksi skill CV biasa (bukan "Top Skills" milik PDF LinkedIn). Beberapa seksi (Technical dan Soft Skills) digabung.
+  [
+    'skills',
+    [
+      'Skills', 'Skill', 'Technical Skills', 'Hard Skills', 'Soft Skills', 'Key Skills', 'Core Skills', 'Skills & Tools', 'Skills and Tools', 'Tools', 'Tools & Technologies', 'Tools and Technologies',
+      'Keahlian', 'Kemampuan', 'Keterampilan', 'Keahlian Teknis', 'Keterampilan Teknis', 'Kemampuan Teknis', 'Keahlian Lunak', 'Keterampilan Lunak',
+    ],
+  ],
   ['languages', ['Languages', 'Bahasa']],
   ['certifications', ['Certifications', 'Licenses & Certifications', 'Licenses and Certifications', 'Sertifikasi', 'Lisensi & Sertifikasi', 'Lisensi dan Sertifikasi']],
   // "Honors-Awards" dan "Honors & Awards" sama setelah fold ("honors awards"); LinkedIn berbahasa Indonesia memakai "Penghargaan".
@@ -467,7 +476,7 @@ const HEADINGS: Array<[SectionKey, string[]]> = [
     [
       'Patents', 'Courses', 'Projects', 'Volunteer Experience', 'Organizations', 'Test Scores', 'Recommendations', 'Paten', 'Kursus', 'Proyek', 'Pengalaman Sukarela', 'Organisasi', 'Skor Tes', 'Rekomendasi',
       // Penutup blok pada CV biasa: tanpa ini isi seksi sesudah Pendidikan ikut terbaca sebagai pendidikan.
-      'Skills', 'Technical Skills', 'Hard Skills', 'Soft Skills', 'Keahlian', 'Keterampilan', 'Kemampuan', 'Organizational Experience', 'Pengalaman Organisasi', 'Achievements', 'Prestasi',
+      'Organizational Experience', 'Pengalaman Organisasi', 'Achievements', 'Prestasi',
       'Training', 'Trainings', 'Pelatihan', 'Seminar', 'References', 'Referensi', 'Interests', 'Minat', 'Hobi', 'Profile', 'Profil', 'Professional Summary', 'Career Objective', 'Objective', 'Tujuan Karir',
       'Personal Data', 'Data Pribadi', 'Personal Information', 'Informasi Pribadi',
     ],
@@ -499,6 +508,69 @@ export function splitSections(text: string): SectionBlock[] {
 const linesOf = (blocks: SectionBlock[], key: SectionKey): string[] => blocks.filter((b) => b.key === key).flatMap((b) => b.lines)
 
 // ───────────────────────────────────────────────────────────── parser aturan (cadangan)
+
+// ───────────────────────────────────────────────────────────── skill
+
+/** Panjang paling besar satu nama skill dan jumlah skill teknis paling banyak dari satu PDF. */
+export const MAX_SKILL_CHARS = 40
+export const MAX_TECHNICAL_SKILLS = 40
+
+const SKILL_LABEL_RE = /\b(?:bahasa|language|framework|tool|database|platform|library|software|aplikasi|office|teknis|technical|hard|soft|skills?|keahlian|kemampuan|keterampilan|cloud|devops|analytics|design|desain)\b/i
+const FIRST_PERSON_RE = /^(?:saya|aku|kami|i|we|my)\s/i
+
+/** Nama skill yang wajar: pendek, bukan kalimat. Dipakai untuk jawaban model maupun parser aturan. */
+export function isSkillLike(name: string): boolean {
+  if (!name || name.length > MAX_SKILL_CHARS || wordCount(name) > 6) return false
+  if (FIRST_PERSON_RE.test(name)) return false
+  if (/[.!?]$/.test(name) && wordCount(name) > 3) return false
+  return true
+}
+
+/** Satu baris yang jelas kalimat, bukan daftar: dibiarkan utuh supaya ditolak (dan dihitung) oleh isSkillLike. */
+function looksLikeSentenceLine(l: string): boolean {
+  if (FIRST_PERSON_RE.test(l)) return true
+  if (/[.!?]$/.test(l) && wordCount(l) >= 5) return true
+  return !/[,;|•·]/.test(l) && wordCount(l) > 6
+}
+
+/** "HTML/CSS" dipecah; "CI/CD", "TCP/IP", "UI/UX", "A/B Testing" tidak (kedua sisi harus paling sedikit tiga karakter). */
+function splitSlashes(s: string): string[] {
+  const parts = s.split('/')
+  const out: string[] = [parts[0]]
+  for (const p of parts.slice(1)) {
+    const left = out[out.length - 1].trim().split(/\s+/).pop() ?? ''
+    const right = p.trim().split(/\s+/)[0] ?? ''
+    if (left.length >= 3 && right.length >= 3) out.push(p)
+    else out[out.length - 1] += `/${p}`
+  }
+  return out
+}
+
+/**
+ * Pecah baris-baris seksi skill menjadi nama skill: poin di depan dan label ("Bahasa Pemrograman: Java, Go") dibuang,
+ * lalu pisah di koma, titik koma, pipa, titik tengah, " / ", dan garis miring antarkata panjang. Duplikat (tanpa
+ * memandang huruf besar) dibuang sekali. Kalimat dibiarkan utuh agar ditolak dan dihitung oleh normalizeExtraction.
+ */
+export function splitSkillItems(lines: unknown[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of lines) {
+    let l = line(raw).replace(BULLET_RE, '').trim()
+    if (!l) continue
+    const colon = /^([^:]{1,40}):\s*(.+)$/.exec(l)
+    if (colon && (/[,;|/]/.test(colon[2]) || SKILL_LABEL_RE.test(colon[1]))) l = colon[2]
+    const items = looksLikeSentenceLine(l) ? [l] : l.split(/[,;|•·]|\s\/\s/).flatMap(splitSlashes)
+    for (const item of items) {
+      const name = item.replace(/\s+/g, ' ').replace(/^[\s\-–—*▪◦]+|[\s.:;,]+$/g, '').trim()
+      const key = fold(name)
+      if (!name || !key || seen.has(key)) continue
+      seen.add(key)
+      out.push(name)
+    }
+  }
+  return out
+}
+
 
 const MONTH_YEAR = '(?:\\p{L}{3,10}\\.?\\s+)?\\d{4}'
 const PRESENT = 'present|sekarang|saat ini|kini|now'
@@ -888,7 +960,7 @@ export function parseWithRules(text: string): RawExtraction {
     certifications: parseCertificationRules(linesOf(blocks, 'certifications')),
     // Dibaca sesudah nama, judul profil, dan lokasi dilepas dari ujung blok terakhir kolom kiri (lihat di atas).
     achievements: [...parseAchievementRules(linesOf(blocks, 'honors'), 'award'), ...parseAchievementRules(linesOf(blocks, 'publications'), 'publication')],
-    skills: linesOf(blocks, 'topSkills'),
+    skills: splitSkillItems([...linesOf(blocks, 'topSkills'), ...linesOf(blocks, 'skills')]),
     languages,
   }
 }
@@ -933,7 +1005,7 @@ export function buildModelPrompt(text: string): { system: string; user: string; 
     '- Titles in the left column are wrapped over 2 or 3 short lines. Join the wrapped lines of ONE title with single spaces (a line starting with "(" or a lowercase letter usually continues the title). Do not merge two different items.',
     '- "date": copy the year or month and year as written, for example "2025", "March 2025" or "(APTIKOM 2025)"; null if the text has none. "issuer": the organiser or publisher only when the text names it; otherwise null.',
     '- "description": for a publication, the authors or publisher lines directly under its title, copied as written; otherwise null. A line that only says "Authors" is a label, not a value. Never use the person\'s own name, headline or location lines.',
-    '- "skills": only items from the Top Skills section. "languages": only items from the Languages section.',
+    '- "skills": the items of the Top Skills section of a LinkedIn PDF, or of the Skills / Technical Skills / Hard Skills / Soft Skills / Tools / Keahlian / Kemampuan / Keterampilan section of a regular CV. One short name per item (at most 40 characters, no sentences); split lists separated by commas, bullets, pipes or slashes into separate items. Never take skills from job descriptions. "languages": only items from the Languages section.',
     '- Do not output email, phone or street address anywhere.',
     '',
     '<profile_text>',
@@ -1245,17 +1317,25 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
   // --- skill dan bahasa (keduanya masuk user_skills)
   const skills: ImportSkill[] = []
   const seenSkill = new Set<string>()
+  let technical = 0
   const addSkill = (nameRaw: unknown, category: SkillCategory, level: number) => {
     const name = line(nameRaw)
     const key = fold(name)
-    if (!name || name.length > LIMITS.skillName || !grounded(name) || seenSkill.has(key)) {
+    const tooMany = category === 'technical' && technical >= MAX_TECHNICAL_SKILLS
+    const shapeOk = category === 'technical' ? isSkillLike(name) : name.length > 0 && name.length <= LIMITS.skillName
+    if (!name || !shapeOk || tooMany || !grounded(name) || seenSkill.has(key)) {
       dropped.skills++
       return
     }
     seenSkill.add(key)
+    if (category === 'technical') technical++
     skills.push({ name, category, proficiency_level: level })
   }
-  for (const item of asArray(raw.skills, 80)) addSkill(typeof item === 'string' ? item : asObject(item)?.name, 'technical', 3)
+  // Model kadang mengembalikan satu string berisi daftar ("Python, SQL, Excel"): dipecah seperti seksi skill CV.
+  for (const item of asArray(raw.skills, 80)) {
+    const nameRaw = typeof item === 'string' ? item : asObject(item)?.name
+    for (const name of typeof nameRaw === 'string' ? splitSkillItems([nameRaw]) : [nameRaw]) addSkill(name, 'technical', 3)
+  }
   for (const item of asArray(raw.languages, 30)) {
     const l = typeof item === 'string' ? { name: item, level: null } : asObject(item)
     addSkill(l?.name, 'language', languageLevel(l?.level))
@@ -1278,6 +1358,11 @@ export function emptyMainSections(text: string, counts: { experience: number; ed
   if (counts.experience === 0 && linesOf(blocks, 'experience').length > 0) out.push('Pengalaman')
   if (counts.education === 0 && linesOf(blocks, 'education').length > 0) out.push('Pendidikan')
   return out
+}
+
+/** Teks punya seksi skill ala CV biasa (Skills, Keahlian, Tools, ...) yang ada isinya. */
+export function hasCvSkillsSection(text: string): boolean {
+  return linesOf(splitSections(text), 'skills').length > 0
 }
 
 export function isEmptyExtraction(n: NormalizedExtraction): boolean {
