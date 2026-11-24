@@ -142,7 +142,7 @@ async function runConsent(
   try {
     const facts = await fetchRerunFacts(db, userId, approvalId, now)
     const verdict = decideExtensionConsent(facts)
-    if (!verdict.ok) return { status: verdict.status, body: { error: verdict.error, code: verdict.code } }
+    if ('error' in verdict) return { status: verdict.status, body: { error: verdict.error, code: verdict.code } }
 
     // LinkedIn tidak pernah dikerjakan ekstensi (manual saja). Lowongan yang hilang tidak bisa diisi.
     const classified = await resolveApplyChannel(db, String(facts.approval?.job_id))
