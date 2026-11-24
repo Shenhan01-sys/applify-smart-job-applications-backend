@@ -1,4 +1,4 @@
-import { cleanLine, isSecretLabel, questionKey } from './extension-planner.js'
+import { cleanLine, consentAnswerKey, isConsentAnswerLabel, isSecretLabel, questionKey } from './extension-planner.js'
 import { ExtensionRunnerError, isUuid, verifyExtensionApproval } from './extension-runner.js'
 import type { GuardDb } from './queue-guard.js'
 
@@ -32,7 +32,7 @@ export interface ExtensionAnswerRow {
 }
 
 /** Validasi seluruh kiriman lebih dulu: tidak ada yang ditulis bila salah satu jawaban tidak sah. */
-export function parseExtensionAnswers(raw: unknown, userId: string, now: Date): ExtensionAnswerRow[] {
+export function parseExtensionAnswers(raw: unknown, userId: string, now: Date, approvalId?: string): ExtensionAnswerRow[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new ExtensionRunnerError(400, 'invalid_answers', 'answers harus berupa daftar jawaban yang tidak kosong')
   }
@@ -57,7 +57,10 @@ export function parseExtensionAnswers(raw: unknown, userId: string, now: Date): 
     }
     // Jawaban kosong berarti belum dijawab: dilewati, bukan galat (panel boleh mengirim seluruh daftar).
     if (!answer) continue
-    byKey.set(key, { user_id: userId, question_key: key, question_label: label, answer, updated_at: now.toISOString() })
+    // Jawaban persetujuan (syarat, privasi, setuju) hanya berlaku untuk persetujuan lamaran ini: disimpan dengan kunci
+    // terikat, bukan di bank umum yang dipakai ulang di lowongan lain dan oleh worker.
+    const storedKey = approvalId && isConsentAnswerLabel(label) ? consentAnswerKey(approvalId, key) : key
+    byKey.set(storedKey, { user_id: userId, question_key: storedKey, question_label: label, answer, updated_at: now.toISOString() })
   }
   return [...byKey.values()]
 }
@@ -71,7 +74,7 @@ export async function saveExtensionAnswers(
   if (!isUuid(input.approvalId)) {
     throw new ExtensionRunnerError(400, 'invalid_id', 'approvalId tidak valid')
   }
-  const rows = parseExtensionAnswers(input.answers, userId, now)
+  const rows = parseExtensionAnswers(input.answers, userId, now, input.approvalId)
 
   const check = await verifyExtensionApproval(db, { userId, approvalId: input.approvalId, now })
   if ('code' in check) throw new ExtensionRunnerError(check.statusCode, check.code, check.error)

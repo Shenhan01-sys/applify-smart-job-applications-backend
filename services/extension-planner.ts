@@ -524,6 +524,32 @@ export const isConsentCheckbox = (c: SanitizedExtControl): boolean =>
   isSingleConsentWidget(c) && !isMarketingOptIn(c) && CONSENT_RE.test(consentHaystack(c))
 const isGuardedCheckbox = (c: SanitizedExtControl): boolean => isMarketingOptIn(c) || isConsentCheckbox(c)
 
+/**
+ * Jawaban persetujuan dari panel ekstensi disimpan TERPISAH dari bank jawaban umum, dengan kunci yang terikat pada satu
+ * persetujuan lamaran: `consent:<approvalId>:<questionKey>`. Kunci pertanyaan biasa hanya berisi huruf, angka, dan spasi,
+ * jadi kunci ini tidak pernah cocok dengan pencarian bank di lowongan lain atau di worker. Hanya perencana untuk
+ * persetujuan yang sama yang membacanya, dan hanya bila jawabannya tegas setuju.
+ */
+export const CONSENT_ANSWER_PREFIX = 'consent:'
+export const consentAnswerKey = (approvalId: string, qKey: string): string => `${CONSENT_ANSWER_PREFIX}${approvalId}:${qKey}`.slice(0, 200)
+
+/** Label pertanyaan yang jawabannya disimpan sebagai persetujuan terikat: persetujuan, bukan opt-in pemasaran. */
+export const isConsentAnswerLabel = (label: string): boolean => CONSENT_RE.test(label) && !MARKETING_OPT_IN_RE.test(label)
+
+const NEGATION_RE = /\b(?:tidak|tak|bukan|belum|jangan|menolak|no|not|never|disagree|decline|don'?t|do not)\b/i
+const AFFIRMATIVE_CONSENT_RE = /^(?:(?:ya|iya|yes|y|ok|oke)\b[\s,.!]*)?(?:(?:saya|i|kami|we)\s+)?(?:setuju|menyetujui|agree|accept|menerima|bersedia|centang)\b/i
+
+/**
+ * Jawaban panel yang tegas setuju ("Ya", "Yes", "Ya, saya setuju", "I agree"). Kata penyangkal ("tidak setuju", "not
+ * agree") selalu menolak. Untuk radio persetujuan satu pilihan, jawaban yang sama dengan teks pilihannya juga setuju.
+ */
+export function isAffirmativeConsent(answer: string, control?: SanitizedExtControl): boolean {
+  const text = String(answer ?? '').trim()
+  if (!text || NEGATION_RE.test(text)) return false
+  if (isYesLike(text) || AFFIRMATIVE_CONSENT_RE.test(text)) return true
+  return control?.kind === 'radio' && matchOptionStrict(text, control.options) !== null
+}
+
 /** Combobox pencarian tanpa daftar pilihan: dijawab dengan teks bebas yang diketik, bukan salah satu pilihan. */
 const isFreeTextSearch = (c: SanitizedExtControl): boolean => c.kind === 'select' && c.searchable === true && c.options.length === 0
 
@@ -857,6 +883,11 @@ export class ExtensionPlanner {
     userId: string
     userEmail?: string
     jobId: string
+    /**
+     * Persetujuan lamaran yang sedang diisi (sudah diverifikasi pemanggil). Hanya dengan ini jawaban persetujuan dari
+     * panel untuk persetujuan INI bisa mencentang kotak syarat; tanpa ini kotak itu selalu menjadi pertanyaan.
+     */
+    approvalId?: string
     coverLetter?: string | null
     pageUrl: string
     noticeText?: string
@@ -946,11 +977,29 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
     for (const row of Array.isArray(answerRows) ? answerRows : []) {
       const k = typeof row?.question_key === 'string' ? row.question_key : ''
       const a = typeof row?.answer === 'string' ? row.answer.trim() : ''
-      if (k && a) savedMap.set(k, a)
+      if (k && a && !k.startsWith(CONSENT_ANSWER_PREFIX)) savedMap.set(k, a)
     }
 
     const actions: ExtFillAction[] = []
     const plannedControlIds = new Set<string>()
+
+    // Jawaban persetujuan yang dijawab pengguna di panel untuk PERSETUJUAN INI saja (kunci `consent:<approvalId>:...`).
+    // Bank jawaban umum tidak pernah mencentang persetujuan; hanya baris terikat ini, dan hanya bila tegas setuju.
+    const consentAnswers = new Map<string, string>()
+    const consentControls = isRetry || !args.approvalId ? [] : controls.filter((c) => isConsentCheckbox(c) && !isMarketingOptIn(c))
+    if (consentControls.length > 0 && args.approvalId) {
+      const keys = [...new Set(consentControls.map((c) => consentAnswerKey(args.approvalId as string, questionKey(controlQuestionLabel(c)))))]
+      try {
+        const { data: scopedRows } = await db.from('user_form_answers').select('question_key, answer').eq('user_id', userId).in('question_key', keys)
+        for (const row of Array.isArray(scopedRows) ? scopedRows : []) {
+          const k = typeof row?.question_key === 'string' ? row.question_key : ''
+          const a = typeof row?.answer === 'string' ? row.answer.trim() : ''
+          if (k && a) consentAnswers.set(k, a)
+        }
+      } catch {
+        // Tanpa jawaban terikat, persetujuan tetap menjadi pertanyaan.
+      }
+    }
 
     /** Aksi isian dari satu tahap. Combobox pencarian tanpa pilihan menandai `typeToSearch`: nilainya diketik lalu dicocokkan. */
     const addAction = (c: FillableControl, value: string | boolean, source: ExtFillAction['source']): void => {
@@ -967,7 +1016,14 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
     // 1. Jawaban tersimpan pengguna (`user_form_answers`) selalu menang pertama. Putaran kedua melewatkannya: nilai
     //    tersimpan sudah dicoba dan tidak menempel di halaman. Persetujuan dan opt-in pemasaran tidak pernah diisi dari sini.
     for (const c of isRetry ? [] : fillable) {
-      if (isGuardedCheckbox(c)) continue
+      if (isGuardedCheckbox(c)) {
+        // Persetujuan: hanya jawaban pengguna di panel untuk persetujuan ini, dan hanya bila tegas setuju.
+        if (isConsentCheckbox(c) && !isMarketingOptIn(c) && args.approvalId) {
+          const answer = consentAnswers.get(consentAnswerKey(args.approvalId, questionKey(controlQuestionLabel(c))))
+          if (answer && isAffirmativeConsent(answer, c)) addAction(c, c.kind === 'radio' ? (c.options[0] ?? true) : true, 'saved')
+        }
+        continue
+      }
       const qLabel = controlQuestionLabel(c)
       const k = questionKey(qLabel)
       const saved = k ? savedMap.get(k) : undefined

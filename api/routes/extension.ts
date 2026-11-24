@@ -176,6 +176,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
         userId,
         userEmail: authEmail,
         jobId: approvalCheck.row.job_id,
+        approvalId,
         coverLetter: approvalCheck.row.cover_letter ?? null,
         pageUrl,
         noticeText: typeof body.noticeText === 'string' ? body.noticeText : '',

@@ -3,14 +3,16 @@ import assert from 'node:assert/strict'
 import {
   EXT_QUESTION_REASONS,
   ExtensionPlanner,
+  consentAnswerKey,
   fitToConstraints,
+  isAffirmativeConsent,
   isConsentCheckbox,
   isMarketingOptIn,
   neutralPhoneNumber,
   sanitizeExtensionControls,
   sanitizePendingQuestions,
 } from '../services/extension-planner.js'
-import { makeExtensionTestDb, USER_ID } from './extension-test-db.js'
+import { buildApp, issueToken, makeExtensionTestDb, USER_ID } from './extension-test-db.js'
 
 // -------------------------------------------------------------------------------------------------------------
 // Paket D-1: sakelar mode, combobox pencarian, persetujuan, batas kolom, nomor telepon netral, alasan pertanyaan
@@ -348,4 +350,100 @@ test('kolom wajib yang nonaktif atau hanya-baca tetap muncul sebagai pertanyaan 
   ])
   const reasons = Object.fromEntries(res.pendingQuestions.map((q) => [q.label, q.reason]))
   assert.deepEqual(reasons, { 'Nomor pegawai': 'disabled', 'Kode kampus': 'readonly' })
+})
+
+// ---------- Persetujuan dari panel: terikat pada persetujuan lamaran ini ----------
+
+const NOW = new Date('2026-11-24T05:00:00Z')
+const FUTURE = '2026-11-24T12:00:00Z'
+const APPROVAL_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'
+const APPROVAL_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2'
+const TERMS_LABEL = 'Saya setuju dengan Syarat dan Ketentuan'
+
+async function consentSetup() {
+  const store = makeExtensionTestDb({
+    approval_requests: [
+      { id: APPROVAL_A, user_id: USER_ID, job_id: 'job-a', application_id: 'app-a', status: 'approved', expires_at: FUTURE },
+      { id: APPROVAL_B, user_id: USER_ID, job_id: 'job-b', application_id: 'app-b', status: 'approved', expires_at: FUTURE },
+    ],
+    jobs: [
+      { id: 'job-a', title: 'Backend', company: 'Acme', platform_source: 'kalibrr', external_url: 'https://www.kalibrr.com/c/acme/jobs/1', description: '', location: 'Jakarta' },
+      { id: 'job-b', title: 'Frontend', company: 'Beta', platform_source: 'kalibrr', external_url: 'https://www.kalibrr.com/c/beta/jobs/2', description: '', location: 'Jakarta' },
+    ],
+    profiles: [{ id: USER_ID, full_name: 'Budi Santoso' }],
+  })
+  // Model yang berusaha mencentang semuanya tidak boleh berpengaruh pada persetujuan.
+  const planner = new ExtensionPlanner(async () => ({ model: 'm', text: '{"actions":[{"controlId":"k1","value":true},{"controlId":"rg_1","value":"Saya setuju"}]}' }), () => NOW.getTime())
+  const app = buildApp({ db: store.db, primaryUserId: USER_ID, planner, now: () => NOW.getTime() })
+  const token = await issueToken(app)
+  const headers = { authorization: `Bearer ${token}` }
+  const answer = (approvalId: string, value: string, label = TERMS_LABEL) =>
+    app.inject({ method: 'POST', url: '/api/extension/answers', headers, payload: { approvalId, answers: [{ key: 'x', label, value }] } as any })
+  const planFor = async (approvalId: string, controls: unknown[]) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/extension/plan-form',
+      headers,
+      payload: { approvalId, pageUrl: 'https://www.kalibrr.com/c/acme/jobs/1/apply', controls } as any,
+    })
+    assert.equal(res.statusCode, 200, res.body)
+    return res.json() as { actions: Array<{ controlId: string; value: unknown; source: string }>; pendingQuestions: Array<{ label: string; reason?: string }> }
+  }
+  return { store, answer, planFor }
+}
+
+const termsBox = base({ controlId: 'k1', kind: 'checkbox', inputType: 'checkbox', label: TERMS_LABEL })
+
+test('persetujuan panel: jawaban "Ya, saya setuju" untuk persetujuan ini mencentang kotak syarat saat isi ulang', async () => {
+  const { answer, planFor, store } = await consentSetup()
+  const before = await planFor(APPROVAL_A, [termsBox])
+  assert.deepEqual(before.actions, [])
+  assert.deepEqual(before.pendingQuestions.map((q) => [q.label, q.reason]), [[TERMS_LABEL, 'consent']])
+
+  assert.equal((await answer(APPROVAL_A, 'Ya, saya setuju')).statusCode, 200)
+  const after = await planFor(APPROVAL_A, [termsBox])
+  assert.deepEqual(after.actions, [{ controlId: 'k1', kind: 'checkbox', value: true, source: 'saved' }])
+  assert.deepEqual(after.pendingQuestions, [])
+  // Tidak masuk bank umum: hanya baris terikat pada persetujuan ini.
+  assert.deepEqual(store.tables.user_form_answers.map((r) => r.question_key), [consentAnswerKey(APPROVAL_A, 'saya setuju dengan syarat dan ketentuan')])
+})
+
+test('persetujuan panel: label yang sama di lowongan lain (persetujuan lain) tetap pertanyaan; tidak ada pemakaian ulang', async () => {
+  const { answer, planFor } = await consentSetup()
+  await answer(APPROVAL_A, 'Yes')
+  assert.equal((await planFor(APPROVAL_A, [termsBox])).actions.length, 1)
+  const other = await planFor(APPROVAL_B, [termsBox])
+  assert.deepEqual(other.actions, [])
+  assert.deepEqual(other.pendingQuestions.map((q) => [q.label, q.reason]), [[TERMS_LABEL, 'consent']])
+})
+
+test('persetujuan panel: jawaban menolak ("Tidak setuju", "No") tidak mencentang; baris bank umum lama tidak pernah mencentang', async () => {
+  const { answer, planFor, store } = await consentSetup()
+  await answer(APPROVAL_A, 'Tidak setuju')
+  assert.deepEqual((await planFor(APPROVAL_A, [termsBox])).actions, [])
+  // Baris bank umum (mis. dari halaman Persetujuan web) dengan kunci biasa tidak dipakai untuk persetujuan.
+  store.tables.user_form_answers.push({ user_id: USER_ID, question_key: 'saya setuju dengan syarat dan ketentuan', question_label: TERMS_LABEL, answer: 'Yes' })
+  assert.deepEqual((await planFor(APPROVAL_A, [termsBox])).actions, [])
+})
+
+test('persetujuan panel: radio persetujuan satu pilihan memilih pilihannya; opt-in pemasaran tetap tidak pernah dicentang', async () => {
+  const { answer, planFor, store } = await consentSetup()
+  const radio = base({ controlId: 'rg_1', kind: 'radio', inputType: 'radio', label: 'Saya setuju', groupLabel: 'Saya setuju', options: ['Saya setuju'] })
+  const promo = base({ controlId: 'm1', kind: 'checkbox', inputType: 'checkbox', label: 'Saya setuju menerima newsletter', required: false })
+  await answer(APPROVAL_A, 'Ya, saya setuju', 'Saya setuju')
+  await answer(APPROVAL_A, 'Yes', 'Saya setuju menerima newsletter')
+  const res = await planFor(APPROVAL_A, [radio, promo])
+  assert.deepEqual(res.actions, [{ controlId: 'rg_1', kind: 'radio', value: 'Saya setuju', source: 'saved' }])
+  // Pemasaran tidak diikat per persetujuan dan tidak pernah dipakai untuk mencentang.
+  assert.ok(store.tables.user_form_answers.some((r) => r.question_key === 'saya setuju menerima newsletter'))
+})
+
+test('persetujuan panel: perencana tanpa approvalId tidak pernah mencentang, dan isAffirmativeConsent menolak penyangkalan', async () => {
+  const { answer, store } = await consentSetup()
+  await answer(APPROVAL_A, 'Yes')
+  const planner = new ExtensionPlanner(async () => ({ model: 'm', text: '{"actions":[]}' }), () => NOW.getTime())
+  const res = await planner.planForm({ db: store.db, userId: USER_ID, jobId: 'job-a', pageUrl: 'https://www.kalibrr.com/c/acme/jobs/1/apply', rawControls: [termsBox] })
+  assert.deepEqual(res.actions, [])
+  for (const yes of ['Yes', 'Ya', 'Ya, saya setuju', 'Saya setuju', 'I agree', 'Yes, I agree', 'iya']) assert.equal(isAffirmativeConsent(yes), true, yes)
+  for (const no of ['No', 'Tidak', 'Tidak setuju', 'Saya tidak setuju', 'I do not agree', 'Belum', '', 'mungkin']) assert.equal(isAffirmativeConsent(no), false, no)
 })
