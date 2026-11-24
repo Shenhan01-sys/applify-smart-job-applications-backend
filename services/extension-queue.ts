@@ -216,7 +216,7 @@ export async function claimNextExtensionJob(
       let target: Record<string, any> | null = null
       const pendingReady = list
         .filter((r) => r.status === 'pending' && (!r.scheduled_at || Date.parse(r.scheduled_at) <= nowMs))
-        .sort((a, b) => (Number(a.priority ?? 0) - Number(b.priority ?? 0)) || (Date.parse(a.scheduled_at ?? '') - Date.parse(b.scheduled_at ?? '')))
+        .sort((a, b) => (Number(b.priority ?? 0) - Number(a.priority ?? 0)) || (Date.parse(a.scheduled_at ?? '') - Date.parse(b.scheduled_at ?? '')))
 
       if (pendingReady.length > 0) {
         target = pendingReady[0]
