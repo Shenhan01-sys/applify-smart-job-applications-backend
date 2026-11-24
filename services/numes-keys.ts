@@ -5,7 +5,7 @@
 // tanpa API Node atau Deno, hanya sintaks yang bisa dihapus (tanpa enum atau parameter properties), supaya
 // jalan di bawah tsx, node --test, dan Deno.
 //
-// Kunci dibaca dari NUMES_API_KEY, NUMES_API_KEY_2, NUMES_API_KEY_3, lalu NUMES_API_KEYS (dipisah koma). Duplikat dan
+// Kunci dibaca dari NUMES_API_KEY, NUMES_API_KEY_2 sampai NUMES_API_KEY_5, lalu NUMES_API_KEYS (dipisah koma). Duplikat dan
 // nilai kosong dibuang, paling banyak MAX_NUMES_KEYS kunci. Satu panggilan model memakai kunci berurutan mulai dari
 // indeks yang berputar (round-robin) supaya pemakaian tersebar. Bila sebuah kunci gagal karena kunci itu sendiri
 // (401/402/403/429, kuota, galat 5xx, batas waktu), model yang sama dicoba lagi dengan kunci berikutnya. Kunci yang
@@ -21,7 +21,7 @@
 
 export const NUMES_CHAT_URL = 'https://api.numes.ai/api/v1/chat/completions'
 /** Paling banyak kunci yang dipakai, supaya satu model yang rusak tidak menghabiskan banyak panggilan. */
-export const MAX_NUMES_KEYS = 3
+export const MAX_NUMES_KEYS = 5
 /** Pendinginan kunci yang kena 429 tanpa Retry-After, atau 402 (saldo atau batas belanja). */
 export const NUMES_COOLDOWN_RATE_MS = 60_000
 /** Pendinginan kunci yang ditolak (401, atau 403 yang bukan blokir isi). Kunci dicabut tidak pulih sendiri. */
@@ -33,9 +33,11 @@ export const MAX_NUMES_TRANSPORT_FAILURES = 2
 
 type Env = Record<string, string | undefined>
 
-/** Kunci platform dari env, urutan: NUMES_API_KEY, _2, _3, lalu NUMES_API_KEYS. Tanpa duplikat, tanpa kosong. */
+/** Kunci platform dari env, urutan: NUMES_API_KEY, _2 sampai _5, lalu NUMES_API_KEYS. Tanpa duplikat, tanpa kosong. */
 export function parseNumesKeys(env: Env): string[] {
-  const raw: Array<string | undefined> = [env.NUMES_API_KEY, env.NUMES_API_KEY_2, env.NUMES_API_KEY_3]
+  const raw: Array<string | undefined> = [
+    env.NUMES_API_KEY, env.NUMES_API_KEY_2, env.NUMES_API_KEY_3, env.NUMES_API_KEY_4, env.NUMES_API_KEY_5,
+  ]
   if (env.NUMES_API_KEYS) raw.push(...env.NUMES_API_KEYS.split(','))
   const out: string[] = []
   for (const value of raw) {

@@ -40,8 +40,11 @@ test('parseNumesKeys: urutan NUMES_API_KEY, _2, _3, lalu NUMES_API_KEYS; duplika
   // gabungan: variabel tunggal lebih dulu, lalu daftar, tanpa duplikat
   assert.deepEqual(parseNumesKeys({ NUMES_API_KEY: K1, NUMES_API_KEYS: `${K1},${K2}` }), [K1, K2])
   // paling banyak MAX_NUMES_KEYS
-  assert.equal(MAX_NUMES_KEYS, 3)
-  assert.deepEqual(parseNumesKeys({ NUMES_API_KEYS: 'a,b,c,d,e' }), ['a', 'b', 'c'])
+  assert.equal(MAX_NUMES_KEYS, 5)
+  assert.deepEqual(parseNumesKeys({ NUMES_API_KEYS: 'a,b,c,d,e,f,g' }), ['a', 'b', 'c', 'd', 'e'])
+  // tanpa NUMES_API_KEY: _2 sampai _5 tetap terbaca (setelan worker production 24 Nov 2026)
+  assert.deepEqual(parseNumesKeys({ NUMES_API_KEY_2: K1, NUMES_API_KEY_3: K2, NUMES_API_KEY_4: K3 }), [K1, K2, K3])
+  assert.deepEqual(parseNumesKeys({ NUMES_API_KEY: 'a', NUMES_API_KEY_2: 'b', NUMES_API_KEY_3: 'c', NUMES_API_KEY_4: 'd', NUMES_API_KEY_5: 'e' }), ['a', 'b', 'c', 'd', 'e'])
 })
 
 test('plan: indeks awal berputar tiap panggilan (round-robin)', () => {

@@ -18,7 +18,7 @@ process.env.ANTHROPIC_API_KEY = 'ant-test-not-real'
 delete process.env.GROQ_API_KEY
 delete process.env.FREE_MODELS
 delete process.env.PRO_MODELS
-for (const k of ['NUMES_API_KEY', 'NUMES_API_KEY_2', 'NUMES_API_KEY_3', 'NUMES_API_KEYS']) delete process.env[k]
+for (const k of ['NUMES_API_KEY', 'NUMES_API_KEY_2', 'NUMES_API_KEY_3', 'NUMES_API_KEY_4', 'NUMES_API_KEY_5', 'NUMES_API_KEYS']) delete process.env[k]
 
 const { DEFAULT_FREE_MODELS, DEFAULT_PRO_MODELS, parseModelList, premiumChain, premiumChainParts, resolvePremiumModel } = await import('../services/ai-providers.ts')
 const { aiPipelineService } = await import('../services/ai-pipeline.service.ts')
@@ -72,7 +72,7 @@ beforeEach(() => {
   delete process.env.FREE_MODELS
   delete process.env.PRO_MODELS
   delete process.env.GROQ_API_KEY
-  for (const k of ['NUMES_API_KEY', 'NUMES_API_KEY_2', 'NUMES_API_KEY_3', 'NUMES_API_KEYS']) delete process.env[k]
+  for (const k of ['NUMES_API_KEY', 'NUMES_API_KEY_2', 'NUMES_API_KEY_3', 'NUMES_API_KEY_4', 'NUMES_API_KEY_5', 'NUMES_API_KEYS']) delete process.env[k]
   resetNumesPools()
   ;(aiPipelineService as any).tierClient = undefined
 })
