@@ -27,6 +27,9 @@ export const LIMITS = {
   certName: 200,
   issuer: 120,
   achievementTitle: 200,
+  /** Deskripsi penghargaan atau publikasi dari impor: ringkas, jauh di bawah batas 2000 karakter editor Profil. */
+  achievementDescription: 600,
+  achievementUrl: 500,
   maxExperiences: 30,
   maxEducation: 15,
   maxCertifications: 30,
@@ -93,8 +96,10 @@ export interface ImportAchievement {
   issuer: string | null
   /** `YYYY-MM-01`, atau `YYYY-01-01` bila PDF hanya mencantumkan tahun. null bila tidak ada tanggal. */
   achievement_date: string | null
-  /** Publikasi: baris penulis atau penerbit di bawah judul, hanya bila tertulis di PDF. */
+  /** Baris keterangan di bawah judul (alasan penghargaan, penulis atau penerbit publikasi), tanpa poin, paling banyak 600 karakter. */
   description: string | null
+  /** Tautan http(s) yang tertulis di PDF, null bila tidak ada. */
+  url: string | null
   notes: string[]
 }
 
@@ -446,7 +451,14 @@ const HEADINGS: Array<[SectionKey, string[]]> = [
   ['languages', ['Languages', 'Bahasa']],
   ['certifications', ['Certifications', 'Licenses & Certifications', 'Licenses and Certifications', 'Sertifikasi', 'Lisensi & Sertifikasi', 'Lisensi dan Sertifikasi']],
   // "Honors-Awards" dan "Honors & Awards" sama setelah fold ("honors awards"); LinkedIn berbahasa Indonesia memakai "Penghargaan".
-  ['honors', ['Honors-Awards', 'Honors & Awards', 'Honors and Awards', 'Penghargaan', 'Penghargaan & Prestasi', 'Penghargaan dan Prestasi', 'Honor & Penghargaan', 'Honor dan Penghargaan']],
+  // CV biasa memakai "Awards", "Achievements", atau "Prestasi" untuk seksi yang sama.
+  [
+    'honors',
+    [
+      'Honors-Awards', 'Honors & Awards', 'Honors and Awards', 'Penghargaan', 'Penghargaan & Prestasi', 'Penghargaan dan Prestasi', 'Honor & Penghargaan', 'Honor dan Penghargaan',
+      'Awards', 'Award', 'Awards & Achievements', 'Awards and Achievements', 'Achievements & Awards', 'Achievements and Awards', 'Achievements', 'Achievement', 'Prestasi', 'Prestasi & Penghargaan', 'Prestasi dan Penghargaan',
+    ],
+  ],
   ['publications', ['Publications', 'Publication', 'Publikasi']],
   ['summary', ['Summary', 'About', 'Ringkasan', 'Tentang']],
   // Judul tambahan di bawah ini dipakai CV biasa (bukan ekspor LinkedIn). Tanpa itu seksinya tidak dikenali, jadi tidak
@@ -476,7 +488,7 @@ const HEADINGS: Array<[SectionKey, string[]]> = [
     [
       'Patents', 'Courses', 'Projects', 'Volunteer Experience', 'Organizations', 'Test Scores', 'Recommendations', 'Paten', 'Kursus', 'Proyek', 'Pengalaman Sukarela', 'Organisasi', 'Skor Tes', 'Rekomendasi',
       // Penutup blok pada CV biasa: tanpa ini isi seksi sesudah Pendidikan ikut terbaca sebagai pendidikan.
-      'Organizational Experience', 'Pengalaman Organisasi', 'Achievements', 'Prestasi',
+      'Organizational Experience', 'Pengalaman Organisasi',
       'Training', 'Trainings', 'Pelatihan', 'Seminar', 'References', 'Referensi', 'Interests', 'Minat', 'Hobi', 'Profile', 'Profil', 'Professional Summary', 'Career Objective', 'Objective', 'Tujuan Karir',
       'Personal Data', 'Data Pribadi', 'Personal Information', 'Informasi Pribadi',
     ],
@@ -486,6 +498,12 @@ const HEADING_LOOKUP = new Map<string, SectionKey>()
 for (const [key, names] of HEADINGS) for (const n of names) HEADING_LOOKUP.set(fold(n), key)
 
 const MAIN_SECTIONS = new Set<SectionKey>(['summary', 'experience', 'education'])
+
+/**
+ * "Achievements:" dengan titik dua biasanya label di dalam satu pengalaman kerja, bukan judul seksi. Baris seperti itu
+ * tetap menutup blok sebelumnya (perilaku lama, seksi 'other'), tetapi isinya tidak dibaca sebagai penghargaan.
+ */
+const LABEL_WHEN_COLON = new Set(['awards', 'award', 'achievements', 'achievement', 'prestasi'])
 
 export interface SectionBlock {
   key: SectionKey
@@ -498,7 +516,9 @@ export function splitSections(text: string): SectionBlock[] {
   for (const raw of text.split('\n')) {
     const l = raw.trim()
     if (!l) continue
-    const key = HEADING_LOOKUP.get(fold(l.replace(/:$/, '')))
+    const folded = fold(l.replace(/:$/, ''))
+    let key = HEADING_LOOKUP.get(folded)
+    if (key === 'honors' && l.endsWith(':') && LABEL_WHEN_COLON.has(folded)) key = 'other'
     if (key && l.length <= 40) blocks.push({ key, lines: [] })
     else blocks[blocks.length - 1].lines.push(l)
   }
@@ -855,14 +875,139 @@ function isAchievementDateLine(l: string): boolean {
   return /^\(.*\)$/.test(l) || d.issuer === null
 }
 
+/** Poin daftar di awal baris, termasuk glif poin PDF (area pribadi Unicode) dan penomoran "1." atau "2)". */
+const LIST_MARK_RE = /^(?:[•·\-–—*▪◦‣●○■□]+\s*|\(?\d{1,2}[.)]\s+)/u
+const BULLET_ONLY_RE = /^[•·\-–—*▪◦‣●○■□]+\s*/u
+const URL_RE = /https?:\/\/[^\s<>"')\]]+/i
+/** Awal baris keterangan tanpa tanda baca akhir ("Diselenggarakan oleh ...", "Penulis: ..."): bukan judul item baru. */
+const ACH_DETAIL_LEAD_RE = /^(?:diselenggarakan|diberikan|dianugerahkan|diterbitkan|dipublikasikan|penyelenggara|pemberi|issued|awarded|presented|organi[sz]ed|published|authors?|co[- ]?authors?|penulis|pengarang|publisher|penerbit|jurnal|journal|prosiding|proceedings|conference|konferensi|seminar|doi|isbn|issn|vol(?:ume)?|kategori|category|peringkat|rank|hadiah|prize|oleh|by|di|at|untuk|for|atas|sebagai|as|dengan|with|dalam|in)\b/iu
+/** "Diselenggarakan oleh X", "Issued by X", "Penyelenggara: X": X adalah penyelenggara. */
+const ACH_ISSUER_LEAD_RE = /^(?:diselenggarakan oleh|diberikan oleh|dianugerahkan oleh|diterbitkan oleh|penyelenggara|pemberi|issued by|awarded by|presented by|organi[sz]ed by|published by|publisher|penerbit)\s*[:\-–]?\s*(.+)$/iu
+
+const isListLine = (l: string): boolean => BULLET_ONLY_RE.test(l)
+const startsLower = (l: string): boolean => /^\p{Ll}/u.test(l)
+/**
+ * Kalimat atau baris sambungan: berakhir tanda baca kalimat, sangat panjang, diawali huruf kecil, atau (sejak tujuh kata)
+ * hampir seluruh katanya berhuruf kecil. Judul penghargaan hampir selalu Title Case; kalimat keterangan tidak.
+ */
+function isProseLine(l: string): boolean {
+  if (/[.!?]$/.test(l) || wordCount(l) >= 14 || startsLower(l)) return true
+  const words = l.split(/\s+/).filter((w) => w.replace(/[^\p{L}]/gu, '').length >= 4)
+  if (wordCount(l) < 7 || words.length < 4) return false
+  const capitalised = words.slice(1).filter((w) => /^\p{Lu}/u.test(w.replace(/^[^\p{L}]+/u, ''))).length
+  return capitalised / (words.length - 1) < 0.4
+}
+
+/** Tanggal di ujung judul yang dipisah tanda baca: "Dean's List, Maret 2022", "Juara 1 (2024)", "Best Paper (KONFIK 2024)". */
+function splitTrailingDate(title: string): { title: string; date: string | null } {
+  const paren = /^(.{3,}?)\s*(\([^()]*\b(?:19|20)\d{2}\))$/u.exec(title)
+  if (paren && readAchievementDate(paren[2])) return { title: paren[1].replace(/[\s,|–—-]+$/u, ''), date: paren[2] }
+  const m = /^(.{3,}?)\s*[,|–—-]\s*((?:\p{L}{3,10}\.?\s+)?(?:19|20)\d{2})$/u.exec(title)
+  if (m) {
+    const lead = /^(\p{L}+)\.?\s+/u.exec(m[2])
+    if (!lead || MONTH_LOOKUP.has(fold(lead[1]))) return { title: m[1].replace(/[\s,|–—-]+$/u, ''), date: m[2] }
+  }
+  return { title, date: null }
+}
+
+interface AchEntry {
+  title: string[]
+  /** keterangan di bawah judul; `hard` = harus mulai di baris baru (poin, "Penulis: ...", "Jurnal ...") */
+  desc: Array<{ text: string; hard: boolean }>
+  date: string | null
+  issuer: string | null
+  url: string | null
+}
+
+/** Sambung baris keterangan: baris baru untuk poin dan baris berawalan keterangan, atau sesudah tanda baca kalimat; selain itu spasi. */
+function joinAchDescription(items: AchEntry['desc']): string {
+  let out = ''
+  items.forEach((it, i) => {
+    if (i === 0) out = it.text
+    else out += it.hard || /[.!?:;]$/.test(items[i - 1].text) ? `\n${it.text}` : ` ${it.text}`
+  })
+  return out.trim()
+}
+
+/**
+ * Bentuk CV biasa: keterangan ada di bawah judul, berupa poin, kalimat, atau baris berawalan "Diselenggarakan oleh",
+ * "Penulis:", dan sejenisnya. Berbeda dari kolom kiri PDF LinkedIn yang sempit (tidak ada keterangan, hanya judul yang
+ * terpotong). Dipakai bila seksi memuat poin atau kalimat.
+ */
+function isCvStyleSection(lines: string[]): boolean {
+  return lines.some((l) => isListLine(l) || (/[.!?]$/.test(l) && wordCount(l) >= 6) || wordCount(l) >= 14)
+}
+
+function parseCvAchievementRules(lines: string[], kind: AchievementCategory): RawExtraction[] {
+  const entries: AchEntry[] = []
+  let cur: AchEntry | null = null
+  const open = (title: string): AchEntry => {
+    const entry: AchEntry = { title: [title], desc: [], date: null, issuer: null, url: null }
+    entries.push(entry)
+    return entry
+  }
+  for (const raw of lines) {
+    const l = raw.trim()
+    if (!l || AUTHOR_LABEL_RE.test(l)) continue
+    // Baris tanggal di CV pendek ("2024", "Maret 2024", "(KONFIK 2024)"); judul panjang yang berakhir tahun bukan tanggal.
+    if (isAchievementDateLine(l) && (/^\(.*\)$/.test(l) || wordCount(l) <= 4)) {
+      const target: AchEntry | undefined = cur ?? entries[entries.length - 1]
+      if (target && !target.date) target.date = l
+      continue
+    }
+    if (isListLine(l)) {
+      const text = l.replace(BULLET_ONLY_RE, '').trim()
+      if (cur && text) cur.desc.push({ text, hard: true })
+      continue
+    }
+    const text = l.replace(LIST_MARK_RE, '').trim()
+    if (!text) continue
+    if (!cur) {
+      if (!isProseLine(text)) cur = open(text)
+      continue
+    }
+    if (/^https?:\/\/\S+$/i.test(text)) {
+      cur.url ??= text.replace(/[.,;]+$/, '')
+      continue
+    }
+    const issuerLine = ACH_ISSUER_LEAD_RE.exec(text)
+    if (issuerLine && !cur.issuer && issuerLine[1].length <= LIMITS.issuer && wordCount(issuerLine[1]) <= 8 && !/[.!?]$/.test(issuerLine[1])) {
+      cur.issuer = issuerLine[1].trim()
+      continue
+    }
+    const continuesTitle = cur.desc.length === 0 && !cur.date && (startsLower(text) || /[,&\-–—/(]$|\b(?:dan|and|of|di|at|the|for|untuk)$/iu.test(cur.title[cur.title.length - 1]))
+    if (continuesTitle) {
+      cur.title.push(text)
+      continue
+    }
+    if (ACH_DETAIL_LEAD_RE.test(text)) cur.desc.push({ text, hard: true })
+    else if (isProseLine(text)) cur.desc.push({ text, hard: false })
+    else cur = open(text)
+  }
+  return entries.map((e) => {
+    let title = joinWrapped(e.title)
+    let date = e.date
+    const trailing = splitTrailingDate(title)
+    if (trailing.date) {
+      title = trailing.title
+      date ??= trailing.date
+    }
+    const all = [title, ...e.desc.map((d) => d.text)].join(' ')
+    const url = e.url ?? URL_RE.exec(all)?.[0].replace(/[.,;]+$/, '') ?? null
+    if (url) title = title.replace(url, '').replace(/\s+/g, ' ').replace(/[\s,|–—-]+$/u, '').trim()
+    return { title, kind, issuer: e.issuer, date, description: e.desc.length > 0 ? joinAchDescription(e.desc) : null, url }
+  })
+}
+
 /**
  * Seksi Honors-Awards dan Publications ada di kolom kiri yang sempit, jadi judulnya terpotong menjadi 2 sampai 3
  * baris dan tidak ada pemisah antaritem. Aturan (tebakan terbaik, cadangan bila AI tidak tersedia): baris tanggal
  * menutup item; baris label "Authors" menutup item; baris yang diakhiri ")" atau lebih pendek dari 20 karakter
  * dianggap baris terakhir judul. Dua item tanpa tanggal dan tanpa ciri itu bisa tergabung; pengguna memeriksanya di
- * pratinjau.
+ * pratinjau. Seksi bergaya CV (ada poin atau kalimat keterangan) dibaca oleh parseCvAchievementRules.
  */
 function parseAchievementRules(lines: string[], kind: AchievementCategory): RawExtraction[] {
+  if (isCvStyleSection(lines)) return parseCvAchievementRules(lines, kind)
   const entries: Array<{ title: string[]; date: string | null }> = []
   let cur: string[] = []
   const flush = () => {
@@ -889,7 +1034,7 @@ function parseAchievementRules(lines: string[], kind: AchievementCategory): RawE
     if (l.length < SHORT_TITLE_LINE || l.endsWith(')')) flush()
   }
   flush()
-  return entries.map((e) => ({ title: joinWrapped(e.title), kind, issuer: null, date: e.date, description: null }))
+  return entries.map((e) => ({ title: joinWrapped(e.title), kind, issuer: null, date: e.date, description: null, url: null }))
 }
 
 /** Baris sertifikat sepanjang ini atau lebih dianggap penuh selebar kolom kiri, jadi judulnya mungkin berlanjut. */
@@ -901,7 +1046,10 @@ const CERT_FULL_LINE = 30
  * menyambung baris sebelumnya, dan baris pendek (di bawah 20 karakter) sesudah baris yang penuh juga sambungan.
  * Dua sertifikat berjudul pendek berurutan tidak ikut tergabung; pengguna memeriksanya di pratinjau.
  */
-function parseCertificationRules(lines: string[]): RawExtraction[] {
+function parseCertificationRules(rawLines: string[]): RawExtraction[] {
+  // Sertifikat tidak punya kolom deskripsi. Pada CV biasa, poin dan kalimat di bawah sertifikat adalah keterangannya, bukan
+  // sertifikat baru, jadi dibuang sebelum judul dibentuk.
+  const lines = isCvStyleSection(rawLines) ? rawLines.filter((l) => !isListLine(l) && !isProseLine(l)) : rawLines
   const names: string[] = []
   lines.forEach((l, i) => {
     const continues = i > 0 && (/^[\p{Ll}(]/u.test(l) || (lines[i - 1].length >= CERT_FULL_LINE && l.length < SHORT_TITLE_LINE))
@@ -989,7 +1137,7 @@ export function buildModelPrompt(text: string): { system: string; user: string; 
     '  "experiences": [ { "company": string, "title": string, "date_range": string, "location": string | null, "description": string | null } ],',
     '  "education": [ { "school": string, "degree": string | null, "field": string | null, "years": string | null, "gpa": string | null } ],',
     '  "certifications": [ { "name": string, "issuer": string | null } ],',
-    '  "achievements": [ { "title": string, "kind": "award" | "publication", "issuer": string | null, "date": string | null, "description": string | null } ],',
+    '  "achievements": [ { "title": string, "kind": "award" | "publication", "issuer": string | null, "date": string | null, "description": string | null, "url": string | null } ],',
     '  "skills": [ string ],',
     '  "languages": [ { "name": string, "level": string | null } ]',
     '}',
@@ -1001,10 +1149,11 @@ export function buildModelPrompt(text: string): { system: string; user: string; 
     '- "degree": the level or title as written, for example "S1", "D3", "Sarjana", "Bachelor\'s degree", "SMA". "field": the major, for example "Sistem Informasi" or "Computer Science".',
     '- "years": copy as written, for example "2020 - 2024" or "Agustus 2019 s/d Juli 2023". If the text gives only one year (the graduation year), copy only that year, for example "2023". Never invent the other year.',
     '- "gpa": the GPA / IPK exactly as written with its scale when shown, for example "3.75/4.00" or "3,75"; null when the text has none.',
-    '- "achievements": items from the "Honors-Awards" section ("Penghargaan") have kind "award"; items from the "Publications" section ("Publikasi") have kind "publication". Do not add anything else.',
+    '- "achievements": items from the "Honors-Awards" / "Awards" / "Achievements" section ("Penghargaan", "Prestasi") have kind "award"; items from the "Publications" section ("Publikasi") have kind "publication". Do not add anything else.',
     '- Titles in the left column are wrapped over 2 or 3 short lines. Join the wrapped lines of ONE title with single spaces (a line starting with "(" or a lowercase letter usually continues the title). Do not merge two different items.',
     '- "date": copy the year or month and year as written, for example "2025", "March 2025" or "(APTIKOM 2025)"; null if the text has none. "issuer": the organiser or publisher only when the text names it; otherwise null.',
-    '- "description": for a publication, the authors or publisher lines directly under its title, copied as written; otherwise null. A line that only says "Authors" is a label, not a value. Never use the person\'s own name, headline or location lines.',
+    '- "description": the text that belongs to that one item and sits under its title (bullet lines or an indented paragraph, until the next item title): what the award was given for, the result, or for a publication the authors, venue and publisher. Copy it as written, remove the bullet marks, join wrapped lines, at most 600 characters; null when the text has none. Never copy the title, another item\'s lines, or the person\'s own name, headline or location. A line that only says "Authors" is a label, not a value.',
+    '- "url": a http(s) link written under that item (for example a certificate, paper or project link), copied exactly; otherwise null.',
     '- "skills": the items of the Top Skills section of a LinkedIn PDF, or of the Skills / Technical Skills / Hard Skills / Soft Skills / Tools / Keahlian / Kemampuan / Keterampilan section of a regular CV. One short name per item (at most 40 characters, no sentences); split lists separated by commas, bullets, pipes or slashes into separate items. Never take skills from job descriptions. "languages": only items from the Languages section.',
     '- Do not output email, phone or street address anywhere.',
     '',
@@ -1047,7 +1196,7 @@ function locationType(loc: string): ImportExperience['location_type'] {
 function achievementCategory(v: unknown): AchievementCategory | null {
   const s = fold(typeof v === 'string' ? v : '')
   if (/\bpubli/.test(s)) return 'publication'
-  if (/\b(?:awards?|honou?rs?|penghargaan)\b/.test(s)) return 'award'
+  if (/\b(?:awards?|honou?rs?|penghargaan|achievements?|prestasi)\b/.test(s)) return 'award'
   return null
 }
 
@@ -1108,6 +1257,39 @@ function readGpa(rawGpa: unknown, rawMax: unknown, sourceNumbers: Set<number>): 
   if (!/[.,]/.test(m[1]) && !(scaleStated && max > 4)) return none
   if (gpa < 0 || gpa > max) return { gpa: null, max: null, note: `IPK ${m[1]} melebihi skala ${max}, jadi tidak dimasukkan. Tambahkan manual bila perlu.` }
   return { gpa: Math.round(gpa * 100) / 100, max, note: null }
+}
+
+const LEADING_MARK_RE = /^(?:[•·\-–—*▪◦‣●○■□\uf0b7\uf0a7]+\s*|\(?\d{1,2}[.)]\s+)/u
+
+/**
+ * Deskripsi penghargaan atau publikasi: poin dan nomor di depan baris dibuang, baris yang sama dengan judul dibuang,
+ * sisanya satu baris per baris asli. Pemotongan ke 600 karakter dilakukan pemanggil supaya bisa memberi catatan.
+ */
+export function cleanAchievementDescription(v: unknown, title = ''): string {
+  if (typeof v !== 'string') return ''
+  const titleKey = fold(title)
+  return v
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((raw) => line(raw.trim().replace(LEADING_MARK_RE, '')))
+    .filter((t) => t && fold(t) !== titleKey)
+    .join('\n')
+    .trim()
+}
+
+/** Tautan http(s) yang benar-benar ada di teks sumber, paling banyak 500 karakter. Selain itu null. */
+function groundedUrl(raw: unknown, sourceText: string): string | null {
+  const s = line(raw)
+  if (!s || s.length > LIMITS.achievementUrl || /\s/.test(s)) return null
+  let parsed: URL
+  try {
+    parsed = new URL(s)
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+  const compact = (t: string) => t.replace(/\s+/g, '').toLowerCase()
+  return compact(sourceText).includes(compact(s)) ? s : null
 }
 
 export interface NormalizeContext {
@@ -1295,19 +1477,22 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     if (issuer && (issuer.length > LIMITS.issuer || !grounded(issuer))) issuer = ''
     if (!issuer && dateIssuer && dateIssuer.length <= LIMITS.issuer && grounded(dateIssuer)) issuer = dateIssuer
 
-    let description: string | null = block(a.description) || null
+    let description: string | null = cleanAchievementDescription(a.description, title) || null
     if (description) {
       const f = fold(description)
       if (AUTHOR_LABEL_RE.test(f) || f === key) description = null // hanya label "Authors" atau pengulangan judul
       else if (!descriptionGrounded(description)) {
         description = null
         notes.push('Deskripsi tidak dimasukkan karena isinya tidak cocok dengan teks PDF.')
-      } else if (description.length > LIMITS.longText) {
-        description = clipText(description, LIMITS.longText)
-        notes.push('Deskripsi dipotong sampai 2000 karakter.')
+      } else if (description.length > LIMITS.achievementDescription) {
+        description = clipText(description, LIMITS.achievementDescription)
+        notes.push(`Deskripsi dipotong sampai ${LIMITS.achievementDescription} karakter.`)
       }
     }
-    achievements.push({ title, category, issuer: issuer || null, achievement_date: date, description, notes })
+
+    // Tautan hanya bila tertulis di PDF (spasi dan pindah baris di tengah tautan diabaikan).
+    const url = groundedUrl(a.url ?? a.link, ctx.sourceText)
+    achievements.push({ title, category, issuer: issuer || null, achievement_date: date, description, url, notes })
   }
   if (achievements.length > LIMITS.maxAchievements) {
     dropped.achievements += achievements.length - LIMITS.maxAchievements
@@ -1363,6 +1548,39 @@ export function emptyMainSections(text: string, counts: { experience: number; ed
 /** Teks punya seksi skill ala CV biasa (Skills, Keahlian, Tools, ...) yang ada isinya. */
 export function hasCvSkillsSection(text: string): boolean {
   return linesOf(splitSections(text), 'skills').length > 0
+}
+
+/**
+ * Lengkapi penghargaan dan publikasi hasil AI yang kosong deskripsi, penyelenggara, tanggal, atau tautannya dengan hasil
+ * parser aturan untuk judul yang sama. AI sering menjawab null untuk keterangan di bawah judul padahal PDF memuatnya.
+ * Hanya bidang kosong yang diisi; judul tidak berubah. Mengembalikan jumlah item yang dilengkapi.
+ */
+export function fillAchievementGaps(ai: ImportAchievement[], fromRules: ImportAchievement[]): { items: ImportAchievement[]; filled: number } {
+  const same = (a: string, b: string): boolean => {
+    const x = fold(a)
+    const y = fold(b)
+    if (!x || !y) return false
+    if (x === y) return true
+    const [short, long] = x.length <= y.length ? [x, y] : [y, x]
+    return short.length >= 12 && long.startsWith(`${short} `)
+  }
+  let filled = 0
+  const items = ai.map((item) => {
+    const rule = fromRules.find((r) => r.category === item.category && same(r.title, item.title))
+    if (!rule) return item
+    const next: ImportAchievement = {
+      ...item,
+      description: item.description ?? rule.description,
+      issuer: item.issuer ?? rule.issuer,
+      achievement_date: item.achievement_date ?? rule.achievement_date,
+      url: item.url ?? rule.url,
+    }
+    const changed = next.description !== item.description || next.issuer !== item.issuer || next.achievement_date !== item.achievement_date || next.url !== item.url
+    if (!changed) return item
+    filled++
+    return next
+  })
+  return { items, filled }
 }
 
 export function isEmptyExtraction(n: NormalizedExtraction): boolean {

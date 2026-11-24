@@ -5,6 +5,7 @@ import {
   buildModelPrompt,
   cleanPdfText,
   emptyMainSections,
+  fillAchievementGaps,
   hasCvSkillsSection,
   isEmptyExtraction,
   LIMITS,
@@ -147,6 +148,14 @@ export class LinkedInImportService {
         result = { ...result, skills: [...fromRules, ...languages].slice(0, LIMITS.maxSkills) }
         warnings.push('AI tidak menemukan skill, jadi bagian Skill dibaca dengan aturan sederhana. Periksa hasilnya dengan teliti.')
       }
+    }
+
+    // AI sering menjawab null untuk keterangan di bawah judul penghargaan atau publikasi. Bidang yang kosong dilengkapi dari
+    // parser aturan untuk judul yang sama; yang sudah diisi AI tidak disentuh.
+    if (method === 'ai' && result.achievements.some((a) => !a.description || !a.url || !a.issuer || !a.achievement_date)) {
+      const fromRules = normalizeExtraction(parseWithRules(text), { sourceText: text, now }).achievements
+      const gaps = fillAchievementGaps(result.achievements, fromRules)
+      if (gaps.filled > 0) result = { ...result, achievements: gaps.items }
     }
 
     // Bagian yang ada di PDF tetapi tidak menghasilkan satu item pun: beri tahu, supaya kosongnya tidak dikira data kosong.

@@ -242,7 +242,7 @@ test('hasil model: achievements bukan daftar atau tipe salah tidak melempar gala
 test('buildModelPrompt: bentuk achievements, kind, aturan judul terpotong, dan label Authors dijelaskan', () => {
   const p = buildModelPrompt(EN)
   assert.match(p.system, /Honors-Awards, Publications/)
-  assert.match(p.user, /"achievements": \[ \{ "title": string, "kind": "award" \| "publication", "issuer": string \| null, "date": string \| null, "description": string \| null \} \]/)
+  assert.match(p.user, /"achievements": \[ \{ "title": string, "kind": "award" \| "publication", "issuer": string \| null, "date": string \| null, "description": string \| null, "url": string \| null \} \]/)
   assert.match(p.user, /Join the wrapped lines of ONE title/)
   assert.match(p.user, /Penghargaan/)
   assert.match(p.user, /Publikasi/)
