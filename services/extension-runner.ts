@@ -601,7 +601,7 @@ export interface ActionLogEntry {
   reason?: string
 }
 
-const ACTION_LOG_ACTIONS = new Set(['set', 'select', 'check', 'click', 'attach', 'skip'])
+const ACTION_LOG_ACTIONS = new Set(['set', 'select', 'check', 'click', 'attach', 'skip', 'peek'])
 const ACTION_LOG_RESULTS = new Set(['verified', 'retried', 'unverified', 'missing', 'skipped'])
 const ACTION_LOG_KINDS = new Set(['text', 'textarea', 'select', 'checkbox', 'radio', 'file', 'button'])
 const ACTION_LOG_REASON = /^[a-z0-9_]{1,40}$/

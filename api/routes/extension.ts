@@ -182,6 +182,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
         hasPasswordInput: Boolean(body.hasPasswordInput),
         hasCaptchaIframe: Boolean(body.hasCaptchaIframe),
         rawControls: body.controls,
+        retryHints: body.retryHints,
       })
     } catch (err: any) {
       if (err instanceof ExtensionPlanRateLimitError) {

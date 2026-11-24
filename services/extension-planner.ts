@@ -219,6 +219,41 @@ export function sanitizeExtensionControls(rawControls: unknown): SanitizedExtCon
   return out
 }
 
+/**
+ * Kode alasan putaran kedua. Hanya daftar tertutup ini yang diterima dari ekstensi (tanpa teks bebas, tanpa nilai
+ * isian), jadi petunjuk tidak bisa dipakai menyelundupkan teks halaman ke prompt. Harus sama dengan `RETRY_REASONS`
+ * di `extension/src/lib/planRetry.ts`.
+ */
+export const EXT_RETRY_REASONS = ['option_not_found', 'option_ambiguous', 'value_mismatch'] as const
+export type ExtRetryReason = (typeof EXT_RETRY_REASONS)[number]
+const VALID_RETRY_REASONS = new Set<string>(EXT_RETRY_REASONS)
+export const EXT_MAX_RETRY_HINTS = 40
+
+/**
+ * `retryHints` kiriman ekstensi: `[{ controlId, reasons: [kode, ...] }]`. Hanya untuk kontrol yang ada di `controls`
+ * dan bisa dijawab (bukan berkas atau tombol kirim), paling banyak 40 kontrol dan 3 kode unik per kontrol. Bentuk
+ * rusak, kode tak dikenal, dan kontrol tak dikenal dibuang. Hasil kosong berarti ini permintaan perencanaan biasa.
+ */
+export function sanitizeRetryHints(raw: unknown, controls: SanitizedExtControl[]): Map<string, ExtRetryReason[]> {
+  const out = new Map<string, ExtRetryReason[]>()
+  if (!Array.isArray(raw)) return out
+  const answerable = new Set(controls.filter((c) => c.kind !== 'file' && c.kind !== 'submit').map((c) => c.controlId))
+  for (const item of raw) {
+    if (out.size >= EXT_MAX_RETRY_HINTS) break
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const controlId = cleanLine(rec.controlId, 120)
+    if (!controlId || !answerable.has(controlId) || out.has(controlId)) continue
+    const reasons: ExtRetryReason[] = []
+    for (const r of Array.isArray(rec.reasons) ? rec.reasons : []) {
+      if (reasons.length >= 3) break
+      if (typeof r === 'string' && VALID_RETRY_REASONS.has(r) && !reasons.includes(r as ExtRetryReason)) reasons.push(r as ExtRetryReason)
+    }
+    if (reasons.length > 0) out.set(controlId, reasons)
+  }
+  return out
+}
+
 const AI_PROHIBITION_PATTERNS = [
   /\bwritten in your own words\b/i,
   /\bno\s+(?:use\s+of\s+)?(?:ai|artificial intelligence|llm|chatgpt|generative)\b/i,
@@ -644,6 +679,12 @@ export class ExtensionPlanner {
     hasPasswordInput?: boolean
     hasCaptchaIframe?: boolean
     rawControls: unknown
+    /**
+     * Putaran kedua dari ekstensi: kode alasan per kontrol yang gagal menempel sesudah dibaca ulang. Dengan petunjuk
+     * yang valid, hanya kontrol berpetunjuk yang direncanakan, jawaban tersimpan dan fakta tidak dipakai ulang (nilai
+     * itu sudah gagal), dan model diberi petunjuknya.
+     */
+    retryHints?: unknown
   }): Promise<PlanExtensionResult> {
     const { db, userId, jobId } = args
     const pageUrl = sanitizeHttpUrl(args.pageUrl)
@@ -655,7 +696,11 @@ export class ExtensionPlanner {
       })
     }
 
-    const controls = sanitizeExtensionControls(args.rawControls)
+    const allControls = sanitizeExtensionControls(args.rawControls)
+    const retryHints = sanitizeRetryHints(args.retryHints, allControls)
+    const isRetry = retryHints.size > 0
+    // Putaran kedua hanya merencanakan kontrol berpetunjuk; kontrol lain di kiriman diabaikan.
+    const controls = isRetry ? allControls.filter((c) => retryHints.has(c.controlId)) : allControls
     const noticeText = cleanLine(args.noticeText, EXT_MAX_NOTICE_CHARS)
 
     const blocker = detectExtensionBlocker({
@@ -720,8 +765,9 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
     const actions: ExtFillAction[] = []
     const plannedControlIds = new Set<string>()
 
-    // 1. Jawaban tersimpan pengguna (`user_form_answers`) selalu menang pertama.
-    for (const c of fillable) {
+    // 1. Jawaban tersimpan pengguna (`user_form_answers`) selalu menang pertama. Putaran kedua melewatkannya: nilai
+    //    tersimpan sudah dicoba dan tidak menempel di halaman.
+    for (const c of isRetry ? [] : fillable) {
       const qLabel = controlQuestionLabel(c)
       const k = questionKey(qLabel)
       const saved = k ? savedMap.get(k) : undefined
@@ -753,8 +799,8 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       jobLocation: typeof job?.location === 'string' ? job.location : null,
     })
 
-    // 2. Pencocokan faktual deterministik sebelum memanggil model.
-    for (const c of fillable) {
+    // 2. Pencocokan faktual deterministik sebelum memanggil model (juga dilewati pada putaran kedua).
+    for (const c of isRetry ? [] : fillable) {
       if (plannedControlIds.has(c.controlId)) continue
       const fact = directFactMatch(c, tokens)
       if (!fact) continue
@@ -777,8 +823,10 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
         label: controlQuestionLabel(c),
         ...(c.placeholder ? { placeholder: c.placeholder } : {}),
         ...(c.options.length ? { options: c.options } : {}),
+        ...(retryHints.has(c.controlId) ? { retryHints: retryHints.get(c.controlId) } : {}),
         required: c.required,
       }))
+      const hasOptionControls = serializedControls.some((c) => 'options' in c)
 
       const systemPrompt = [
         'Kamu merencanakan pengisian kontrol formulir lamaran kerja untuk browser extension Applify.',
@@ -787,6 +835,12 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
         'Jangan menebak fakta kandidat yang tidak tersedia; lewati controlId yang datanya tidak jelas.',
         'Untuk data pribadi standar gunakan persis token seperti {{full_name}}, {{email}}, {{phone}}, {{location}}, {{city}}, {{country}}, {{linkedin_url}}, {{portfolio_url}}, {{github_url}}, {{years_of_experience}}, {{cover_letter}}.',
         'Untuk kontrol bertipe select/radio, nilai wajib persis salah satu dari array options.',
+        hasOptionControls
+          ? 'Kontrol mana pun yang punya options (dropdown kustom ikut): value WAJIB salinan persis satu elemen options, huruf, spasi, dan tanda baca sama. Jangan menerjemahkan, meringkas, atau menggabungkan pilihan. Bila tidak ada pilihan yang sesuai dengan data kandidat, lewati controlId itu.'
+          : '',
+        isRetry
+          ? 'PERCOBAAN ULANG: kontrol dengan retryHints gagal terisi pada percobaan sebelumnya. option_not_found = nilai tadi tidak ada di pilihan halaman, pilih satu elemen options dengan persis. option_ambiguous = nilai tadi cocok dengan lebih dari satu pilihan, pakai teks satu pilihan selengkap mungkin. value_mismatch = nilai tadi tidak diterima kolom, pakai format paling sederhana sesuai jenis kolom (angka saja untuk kolom angka, tanpa satuan atau teks tambahan). Jawab hanya bila data kandidat jelas, jangan mengulang nilai yang sama.'
+          : '',
         'Untuk kontrol checkbox, gunakan true atau false.',
         achievements.length ? ACHIEVEMENT_GROUNDING_RULE : '',
       ]
