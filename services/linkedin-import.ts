@@ -316,6 +316,8 @@ export interface ParsedYears {
   start: number
   /** tahun selesai, 'present' bila masih berjalan, null bila tidak tercantum */
   end: number | 'present' | null
+  /** true bila tahun akhir ditulis sebagai perkiraan ("Expected Mar 2027", "Est.", "Perkiraan", "Rencana lulus"). Hanya ada bila true. */
+  expected?: boolean
 }
 
 /** Tanda strip: "-", strip tak terputus, strip angka, en dash, em dash, garis horizontal, dan minus Unicode. */
@@ -324,6 +326,12 @@ const DASH = '[-\\u2010-\\u2015\\u2212]'
 const RANGE_SEP = `(?:${DASH}|to|until|till|through|thru|sampai(?:\\s+dengan)?|hingga|s\\s*[/.]\\s*d\\.?|sd\\.?)`
 /** Penanda "masih berjalan" untuk tahun akhir. */
 const END_WORDS = 'sampai\\s+sekarang|hingga\\s+sekarang|saat\\s+ini|sekarang|present|current|now|kini|ongoing|berlangsung|sedang\\s+(?:berjalan|menempuh|studi|kuliah)|masih\\s+(?:kuliah|studi|menempuh|aktif)'
+/** Kata "perkiraan lulus" di depan tahun akhir: "Expected (graduation)", "Exp.", "Anticipated", "Est.", "Perkiraan", "Rencana lulus". */
+const EXPECTED_WORDS =
+  'expected(?:\\s+graduation)?|exp\\.?|anticipated(?:\\s+graduation)?|estimated(?:\\s+graduation)?|est\\.?|perkiraan(?:\\s+lulus)?|diperkirakan(?:\\s+lulus)?|estimasi(?:\\s+lulus)?|rencana\\s+lulus|target\\s+lulus|akan\\s+lulus'
+const EXPECTED_BOUNDED = `(?<![\\p{L}\\p{N}])(?:${EXPECTED_WORDS})(?![\\p{L}\\p{N}])\\s*:?`
+const EXPECTED_RE = new RegExp(EXPECTED_BOUNDED, 'iu')
+const EXPECTED_ALL_RE = new RegExp(EXPECTED_BOUNDED, 'giu')
 
 const YEAR_RANGE_RE = new RegExp(`\\b(\\d{4})\\b(?:\\s*${RANGE_SEP}\\s*(?:(?:\\p{L}+\\.?\\s+)?(\\d{4})|(${END_WORDS}))\\b)?`, 'iu')
 
@@ -332,19 +340,27 @@ const YEAR_RANGE_RE = new RegExp(`\\b(\\d{4})\\b(?:\\s*${RANGE_SEP}\\s*(?:(?:\\p
  * atau Inggris seperti "Agustus 2023 - November 2026" atau "Feb 2025 – Mar 2025". Nama bulan sebelum tahun akhir
  * dilewati; tanpa itu tahun akhir terbaca kosong dan seluruh riwayat pendidikan terbuang. Bentuk yang lazim di CV
  * juga terbaca: "2019 s/d 2023", "2019 s.d. 2023", "08/2019 - 07/2023", "2019-08 - 2023-07", minus Unicode, dan
- * "s/d Sekarang". Tahun tunggal ("2018") mengembalikan end null; pemanggil memutuskan artinya.
+ * "s/d Sekarang". Tahun tunggal ("2018") mengembalikan end null; pemanggil memutuskan artinya. Kata perkiraan di depan
+ * tahun akhir ("Sep 2023 - Expected Mar 2027", "Exp. 2027", "(expected)", "Rencana lulus") dibuang sebelum dibaca dan
+ * ditandai lewat `expected: true`; tanpa itu tahun akhir terbaca kosong dan seluruh entri pendidikan terbuang.
  */
 export function parseYearRange(raw: unknown): ParsedYears | null {
+  let expected = false
   const s = (typeof raw === 'number' && Number.isFinite(raw) ? String(raw) : line(raw))
+    .replace(EXPECTED_ALL_RE, () => {
+      expected = true
+      return ' '
+    })
     .replace(/[()·•]/g, ' ')
     .replace(/\b\d{1,2}\s*[/.]\s*((?:19|20)\d{2})\b/g, '$1') // 08/2019 -> 2019
     .replace(/\b((?:19|20)\d{2})\s*[-/]\s*(?:0?[1-9]|1[0-2])\b(?!\d)/g, '$1') // 2019-08 -> 2019
   const m = YEAR_RANGE_RE.exec(s)
   if (!m) return null
   const start = Number(m[1])
-  if (m[2]) return { start, end: Number(m[2]) }
-  if (m[3]) return { start, end: 'present' }
-  return { start, end: null }
+  const flag = expected ? { expected: true as const } : {}
+  if (m[2]) return { start, end: Number(m[2]), ...flag }
+  if (m[3]) return { start, end: 'present', ...flag }
+  return { start, end: null, ...flag }
 }
 
 // ───────────────────────────────────────────────────────────── tanggal penghargaan dan publikasi
@@ -736,7 +752,7 @@ const MONTH_ALT = [...MONTH_LOOKUP.keys()].sort((a, b) => b.length - a.length).j
 const CV_YEAR = `(?:\\b(?:${MONTH_ALT})\\.?\\s+|\\b\\d{1,2}\\s*[/.]\\s*)?\\b(?:19[5-9]\\d|20\\d{2})\\b`
 const GRAD_WORDS = '(?:tahun\\s+lulus|lulus(?:\\s+tahun)?|graduated(?:\\s+in)?|graduation(?:\\s+year)?|expected(?:\\s+graduation)?|estimasi\\s+lulus|class\\s+of|angkatan)'
 /** Rentang tahun, atau satu tahun (kata "Lulus" di depannya ikut terbuang dari nama). */
-const CV_DATE_RE = new RegExp(`\\(?\\s*(?:\\b${GRAD_WORDS}\\s*[:\\-]?\\s*)?${CV_YEAR}(?:\\s*${RANGE_SEP}\\s*(?:${CV_YEAR}|\\b(?:${END_WORDS})\\b))?\\s*\\)?`, 'iu')
+const CV_DATE_RE = new RegExp(`\\(?\\s*(?:\\b${GRAD_WORDS}\\s*[:\\-]?\\s*)?${CV_YEAR}(?:\\s*${RANGE_SEP}\\s*(?:${EXPECTED_BOUNDED}\\s*)?(?:${CV_YEAR}|\\b(?:${END_WORDS})\\b))?\\s*\\)?`, 'iu')
 const CV_GPA_RE = /\(?\s*(?:cumulative\s+)?(?:IPK|IP\s+kumulatif|indeks\s+prestasi(?:\s+kumulatif)?|C?GPA)\s*[:=]?\s*(\d{1,3}(?:[.,]\d{1,2})?)(?:\s*(?:\/|dari|of|out\s+of)\s*(\d{1,3}(?:[.,]\d{1,2})?))?\s*\)?/iu
 
 const INSTITUTION_RE = /\b(?:universitas|university|universiti|institut|institute|politeknik|polytechnic|akademi|academy|college|sekolah|school|stmik|stikom|stie|stikes|sma|smk|smp|sman|smkn|smpn|madrasah)\b/iu
@@ -1214,13 +1230,26 @@ function clipText(s: string, max: number): string {
 /** Teks tahun pendidikan dari bentuk apa pun yang dipakai model: "years", angka, "period", atau start_year/end_year. */
 function educationYearsText(e: Record<string, unknown>): string {
   const pick = (v: unknown): string => (typeof v === 'number' && Number.isFinite(v) ? String(v) : line(v))
+  // Model kadang menandai tahun akhir sebagai perkiraan lewat bendera ("expected": true) atau bidang bernilai
+  // ("expected_graduation": "Mar 2027"). Penandanya diteruskan ke parseYearRange sebagai kata "(expected)".
+  const expectedKeys = Object.entries(e).filter(([k]) => EXPECTED_KEY_RE.test(k))
+  const flagged = expectedKeys.some(([, v]) => v === true)
+  const expectedEnd = expectedKeys.map(([, v]) => pick(v)).find(Boolean) ?? ''
   const direct = pick(e.years) || pick(e.dates) || pick(e.period) || pick(e.date_range)
-  // Model yang hanya menulis tahun masuk ("2022") tetapi menandai is_current tidak boleh dibaca sebagai tahun lulus.
-  if (direct) return e.is_current === true && isSingleYear(direct) ? `${direct} - Present` : direct
-  const start = pick(e.start_year ?? e.start)
-  const end = pick(e.end_year ?? e.end ?? e.graduation_year ?? e.year) || (e.is_current === true ? 'Present' : '')
-  return [start, end].filter(Boolean).join(' - ')
+  let text: string
+  if (direct) {
+    // Model yang hanya menulis tahun masuk ("2022") tetapi menandai is_current tidak boleh dibaca sebagai tahun lulus.
+    text = expectedEnd && isSingleYear(direct) ? `${direct} - ${expectedEnd}` : e.is_current === true && isSingleYear(direct) ? `${direct} - Present` : direct
+  } else {
+    const start = pick(e.start_year ?? e.start)
+    const end = pick(e.end_year ?? e.end ?? e.graduation_year ?? e.year) || expectedEnd || (e.is_current === true ? 'Present' : '')
+    text = [start, end].filter(Boolean).join(' - ')
+  }
+  return text && (flagged || expectedEnd) && !EXPECTED_RE.test(text) ? `${text} (expected)` : text
 }
+
+/** Nama bidang jawaban model yang menandai perkiraan: expected, expected_graduation, is_expected, anticipated_end_year. */
+const EXPECTED_KEY_RE = /expected|anticipated|estimated/i
 
 /** Tepat satu angka empat digit dan tidak ada pemisah rentang yang menggantung di ujung ("2019 -", "2019 s/d"). */
 function isSingleYear(text: string): boolean {
@@ -1392,7 +1421,9 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     let endYear: number | null = null
     let isCurrent = false
     if (ok && years) {
-      if (years.start < MIN_YEAR || years.start > nowYear) ok = false
+      // Hanya satu tahun dan itu perkiraan lulus ("Expected 2027"): tahun masuknya tidak diketahui, jadi tidak ditebak.
+      if (years.expected && years.end === null) ok = false
+      else if (years.start < MIN_YEAR || years.start > nowYear) ok = false
       else if (years.end === 'present') isCurrent = true
       else if (years.end === null) {
         // CV sering hanya menulis tahun lulus ("Lulus 2023"). Satu tahun itu dipakai untuk masuk dan lulus, dengan
@@ -1402,7 +1433,12 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
           notes.push(`Hanya satu tahun (${years.start}) tercantum di PDF, jadi dipakai sebagai tahun masuk dan tahun lulus. Ubah bila perlu.`)
         } else ok = false
       } else if (years.end < years.start || years.end > nowYear + MAX_YEARS_AHEAD) ok = false
-      else endYear = years.end
+      else {
+        // Tahun lulus yang ditandai perkiraan atau yang belum lewat berarti masih menempuh; tahun perkiraannya tetap disimpan.
+        endYear = years.end
+        isCurrent = years.expected === true || years.end > nowYear
+        if (isCurrent) notes.push(`Tahun lulus ${years.end} masih perkiraan, jadi ditandai masih menempuh.`)
+      }
     }
     const key = `${fold(school)}|${fold(degree)}`
     if (!ok || !years || seenEdu.has(key)) {
