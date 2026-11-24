@@ -121,7 +121,7 @@ test('planner: contenteditable (textarea, role textbox) tetap cocok dengan fakta
   const { res, prompt } = await plan(
     [
       { controlId: 'e1', kind: 'textarea', label: 'Full name', inputType: 'textarea', role: 'textbox', required: true },
-      { controlId: 's1', kind: 'checkbox', label: 'Saya setuju dengan syarat', inputType: 'checkbox', role: 'switch', checked: false, required: true },
+      { controlId: 's1', kind: 'checkbox', label: 'Buka untuk relokasi', inputType: 'checkbox', role: 'switch', checked: false, required: true },
       {
         controlId: 'rg_1',
         kind: 'radio',

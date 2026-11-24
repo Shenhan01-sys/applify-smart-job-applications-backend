@@ -151,7 +151,7 @@ test('ExtensionPlanner membaca kolom skema DB nyata dari user_automation_setting
     ],
   })
 
-  assert.equal(plan.actions.find((a) => a.controlId === 'c1')?.value, '081299998888')
+  assert.equal(plan.actions.find((a) => a.controlId === 'c1')?.value, '+6281299998888')
   assert.equal(plan.actions.find((a) => a.controlId === 'c2')?.value, 'https://sari.dev')
   assert.equal(plan.actions.find((a) => a.controlId === 'c3')?.value, 'sari@example.id')
   assert.equal(plan.actions.find((a) => a.controlId === 'c4')?.value, '4')

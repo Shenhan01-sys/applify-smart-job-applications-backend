@@ -202,7 +202,7 @@ test('putaran kedua: hanya kontrol berpetunjuk direncanakan; jawaban tersimpan d
   })
   assert.equal(cap.calls, 1)
   assert.equal(valueOf(res, 'cb1'), 'Singapore', 'nilai tersimpan "Indonesia" tidak dipakai ulang')
-  assert.equal(valueOf(res, 'p1'), '0812345')
+  assert.equal(valueOf(res, 'p1'), '+62812345')
   assert.equal(valueOf(res, 'x1'), undefined, 'kontrol tanpa petunjuk diabaikan walau model menjawab')
   assert.ok(res.actions.every((a) => a.source === 'ai'))
   assert.deepEqual(res.fileTargets, [])
@@ -269,7 +269,7 @@ test('putaran kedua: kontrol rahasia tidak pernah direncanakan, juga bila diberi
   )
   assert.ok(!/PIN/.test(cap.user))
   assert.equal(valueOf(res, 'pin'), undefined)
-  assert.equal(valueOf(res, 'p1'), '0812345')
+  assert.equal(valueOf(res, 'p1'), '+62812345')
 })
 
 // ---------- Jalur HTTP ----------
