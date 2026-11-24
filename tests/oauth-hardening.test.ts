@@ -91,14 +91,25 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
       },
     })
 
-    // 1. Same-site init (`app.applify.id` -> `api.applify.id`) menerbitkan cookie HttpOnly, SameSite=Lax, Secure, Path sempit.
-    const initVictim = await app.inject({
-      method: 'POST',
-      url: '/api/oauth/google/init',
-      headers: { authorization: 'Bearer valid-victim', origin: 'https://app.applify.id', host: 'api.applify.id' },
-    })
-    assert.equal(initVictim.statusCode, 200)
-    const setCookieHeader = String(initVictim.headers['set-cookie'])
+    // Alur dua langkah: init (fetch, JWT) hanya menerbitkan tiket; navigasi GET /google/start memasang cookie first-party.
+    const startFlow = async (headers: Record<string, string>) => {
+      const init = await app.inject({ method: 'POST', url: '/api/oauth/google/init', headers })
+      assert.equal(init.statusCode, 200)
+      assert.equal(init.headers['set-cookie'], undefined, 'init (fetch lintas situs) tidak lagi memasang cookie')
+      const startUrl = new URL(init.json().url)
+      assert.equal(startUrl.origin, 'https://api.applify.id', 'tiket diarahkan ke host callback')
+      assert.equal(startUrl.pathname, '/api/oauth/google/start')
+      // Navigasi tingkat atas: tanpa header Origin.
+      const start = await app.inject({ method: 'GET', url: startUrl.pathname + startUrl.search, headers: { host: startUrl.host } })
+      return { init, start, startUrl }
+    }
+
+    // 1. Init + start menerbitkan cookie HttpOnly, SameSite=Lax, Secure, Path sempit, lalu 302 ke Google.
+    const victimFlow = await startFlow({ authorization: 'Bearer valid-victim', origin: 'https://app.applify.id', host: 'api.applify.id' })
+    assert.equal(victimFlow.start.statusCode, 302)
+    const initVictim = { json: () => ({ url: String(victimFlow.start.headers.location) }) }
+    assert.match(initVictim.json().url, /^https:\/\/accounts\.google\.com\//)
+    const setCookieHeader = String(victimFlow.start.headers['set-cookie'])
     assert.match(setCookieHeader, /HttpOnly/)
     assert.match(setCookieHeader, /SameSite=Lax/)
     assert.match(setCookieHeader, /Secure/)
@@ -113,12 +124,25 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
     assert.equal(rawCookieValue, hashOAuthNonce(decoded.nonce))
 
     // 2. Serangan login-CSRF: penyerang memberi link bertanda tangan miliknya ke korban -> korban tidak punya cookie yang cocok -> ditolak (kembali ke Pengaturan dengan reason=session_mismatch) + cookie dihapus.
-    const initAttacker = await app.inject({
-      method: 'POST',
-      url: '/api/oauth/google/init',
-      headers: { authorization: 'Bearer valid-attacker', host: 'api.applify.id' },
+    const attackerFlow = await startFlow({ authorization: 'Bearer valid-attacker', host: 'api.applify.id' })
+    const attackerState = new URL(String(attackerFlow.start.headers.location)).searchParams.get('state')!
+
+    // 2b. Tiket sekali pakai; tiket bukan state OAuth dan state OAuth bukan tiket.
+    const replay = await app.inject({ method: 'GET', url: victimFlow.startUrl.pathname + victimFlow.startUrl.search })
+    assert.equal(replay.statusCode, 302)
+    assert.match(String(replay.headers.location), /gmail=error&reason=invalid_state/)
+    const stateAsTicket = await app.inject({ method: 'GET', url: `/api/oauth/google/start?ticket=${encodeURIComponent(attackerState)}` })
+    assert.match(String(stateAsTicket.headers.location), /reason=invalid_state/)
+    const freshTicket = new URL((await app.inject({ method: 'POST', url: '/api/oauth/google/init', headers: { authorization: 'Bearer valid-victim' } })).json().url).searchParams.get('ticket')!
+    const ticketAsState = await app.inject({
+      method: 'GET',
+      url: `/api/oauth/google/callback?code=c1&state=${encodeURIComponent(freshTicket)}`,
+      headers: { cookie: cookiePairFromSetCookie(setCookieHeader) },
     })
-    const attackerState = new URL(initAttacker.json().url).searchParams.get('state')!
+    assert.match(String(ticketAsState.headers.location), /reason=invalid_state/)
+    assert.equal(googleExchangeCalls, 0)
+    const noTicket = await app.inject({ method: 'GET', url: '/api/oauth/google/start' })
+    assert.match(String(noTicket.headers.location), /reason=invalid_state/)
 
     const noCookieRes = await app.inject({
       method: 'GET',
@@ -162,19 +186,11 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
     assert.equal(googleExchangeCalls, 1)
     assert.equal(store.tables.platform_sessions[0].user_id, 'victim-uid')
 
-    // 5. Lintas situs HTTPS (*.vercel.app -> *.up.railway.app) memakai SameSite=None; Secure agar peramban menyimpan cookie dari fetch().
-    const crossSiteInit = await app.inject({
-      method: 'POST',
-      url: '/api/oauth/google/init',
-      headers: {
-        authorization: 'Bearer valid-victim',
-        origin: 'https://applify-web.vercel.app',
-        host: 'applify-api.up.railway.app',
-      },
-    })
-    assert.equal(crossSiteInit.statusCode, 200)
-    const crossCookie = String(crossSiteInit.headers['set-cookie'])
-    assert.match(crossCookie, /SameSite=None/)
+    // 5. Lintas situs (*.vercel.app -> backend): init tidak memasang cookie; start (navigasi first-party) memasang
+    //    cookie SameSite=Lax, yang tidak dibuang Brave/Safari/Chrome tanpa cookie pihak ketiga.
+    const crossFlow = await startFlow({ authorization: 'Bearer valid-victim', origin: 'https://applify-web.vercel.app', host: 'applify-api.up.railway.app' })
+    const crossCookie = String(crossFlow.start.headers['set-cookie'])
+    assert.match(crossCookie, /SameSite=Lax/)
     assert.match(crossCookie, /Secure/)
     assert.match(crossCookie, /HttpOnly/)
     assert.match(crossCookie, /Path=\/api\/oauth\/google\/callback/)
@@ -258,11 +274,13 @@ test('OAuth callback: penukaran kode gagal (HTTP 400 atau jaringan putus) kembal
       const store = makeExtensionTestDb({ platform_sessions: [] })
       const app = await buildOAuthApp({ db: store.db, fetchImpl })
       const init = await app.inject({ method: 'POST', url: '/api/oauth/google/init', headers: { authorization: 'Bearer valid', host: 'api.applify.id' } })
-      const state = new URL(init.json().url).searchParams.get('state')!
+      const startUrl = new URL(init.json().url)
+      const start = await app.inject({ method: 'GET', url: startUrl.pathname + startUrl.search })
+      const state = new URL(String(start.headers.location)).searchParams.get('state')!
       const res = await app.inject({
         method: 'GET',
         url: `/api/oauth/google/callback?code=c1&state=${encodeURIComponent(state)}`,
-        headers: { cookie: cookiePairFromSetCookie(init.headers['set-cookie']) },
+        headers: { cookie: cookiePairFromSetCookie(start.headers['set-cookie']) },
       })
       assert.equal(res.statusCode, 302)
       assert.equal(res.headers.location, 'https://app.applify.id/settings?gmail=error&reason=token_exchange')

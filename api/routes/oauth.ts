@@ -16,6 +16,8 @@ const getDbDefault = async (): Promise<any> => (await import('../index.js')).sup
 
 export const OAUTH_NONCE_COOKIE = 'applify_oauth_nonce'
 export const OAUTH_STATE_TTL_SEC = 600
+/** Umur tiket mulai OAuth (navigasi langsung ke backend). Pendek dan sekali pakai. */
+export const OAUTH_START_TTL_SEC = 120
 
 const SCOPES = ['https://www.googleapis.com/auth/gmail.send'].join(' ')
 
@@ -165,6 +167,35 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
   }
   const requireUser = opts.resolveUserId ?? defaultRequireUser
 
+  /**
+   * Alur dua langkah agar cookie nonce selalu first-party (24 Nov 2026). Dulu cookie di-set pada respons fetch
+   * dari frontend (vercel.app) ke backend (railway.app); Brave, Safari, dan Chrome dengan blokir cookie pihak
+   * ketiga membuangnya, sehingga callback selalu gagal session_mismatch. Sekarang POST /google/init (butuh JWT)
+   * hanya menerbitkan tiket bertanda tangan, berlaku 120 detik dan sekali pakai; peramban lalu dinavigasi ke
+   * GET /google/start?ticket=... di host backend, yang memasang cookie nonce sebagai cookie first-party
+   * (SameSite=Lax) dan meneruskan ke Google. Callback tetap memeriksa state + nonce seperti sebelumnya.
+   */
+  const startPath = callbackPath.replace(/\/callback$/, '/start')
+  const usedStartTickets = new Map<string, number>()
+  const callbackOrigin = () => {
+    try {
+      return new URL(googleRedirectUri()).origin
+    } catch {
+      return ''
+    }
+  }
+  function issueStartUrl(userId: string): string {
+    const ticket = signState({
+      purpose: 'gmail_start',
+      uid: userId,
+      jti: crypto.randomBytes(12).toString('hex'),
+      exp: Date.now() + OAUTH_START_TTL_SEC * 1000,
+    })
+    return `${callbackOrigin()}${startPath}?ticket=${encodeURIComponent(ticket)}`
+  }
+  const failRedirect = (reply: FastifyReply, reason: string) =>
+    reply.redirect(`${frontendUrl()}/settings?gmail=error&reason=${encodeURIComponent(reason)}`)
+
   function startOAuthFlow(request: FastifyRequest, reply: FastifyReply, userId: string): string {
     const nonce = crypto.randomBytes(16).toString('hex')
     const state = signState({
@@ -228,7 +259,29 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
     if (!googleClientId()) {
       return reply.status(503).send({ error: 'Gmail not configured (GOOGLE_CLIENT_ID missing)' })
     }
-    return { url: startOAuthFlow(request, reply, userId) }
+    return { url: issueStartUrl(userId) }
+  })
+
+  // ---- GET /api/oauth/google/start — navigasi langsung peramban: tiket sekali pakai -> cookie nonce first-party -> Google ----
+  app.get('/google/start', async (request, reply) => {
+    const { ticket } = (request.query ?? {}) as { ticket?: unknown }
+    if (!googleClientId()) return failRedirect(reply, 'not_configured')
+    if (typeof ticket !== 'string' || !ticket) return failRedirect(reply, 'invalid_state')
+    let payload: { purpose?: unknown; uid?: unknown; jti?: unknown; exp?: unknown }
+    try {
+      payload = verifyState(ticket, OAUTH_START_TTL_SEC)
+    } catch {
+      return failRedirect(reply, 'invalid_state')
+    }
+    // State OAuth biasa (uid + nonce) tidak boleh dipakai sebagai tiket, dan sebaliknya (tiket tidak punya nonce).
+    if (payload?.purpose !== 'gmail_start' || typeof payload.uid !== 'string' || !payload.uid || typeof payload.jti !== 'string') {
+      return failRedirect(reply, 'invalid_state')
+    }
+    const now = Date.now()
+    for (const [jti, exp] of usedStartTickets) if (exp < now) usedStartTickets.delete(jti)
+    if (usedStartTickets.has(payload.jti)) return failRedirect(reply, 'invalid_state')
+    usedStartTickets.set(payload.jti, typeof payload.exp === 'number' ? payload.exp : now + OAUTH_START_TTL_SEC * 1000)
+    return reply.redirect(startOAuthFlow(request, reply, payload.uid))
   })
 
   // ---- GET /api/oauth/google — dikunci: menolak ?uid= mentah tanpa otorisasi JWT (Audit 11 #3) ----
