@@ -24,45 +24,12 @@ import {
  * Lowongan tanpa satu pun URL ditolak. LinkedIn diblokir lebih awal oleh pemanggil.
  */
 
-/** Daftar yang sama dengan `KNOWN_ATS_HOSTS` di `worker/src/lib/pageGuard.ts`, ditambah `PUBLIC_ATS_DOMAINS`. */
-export const KNOWN_ATS_DOMAINS: readonly string[] = [
-  ...new Set<string>([
-    ...PUBLIC_ATS_DOMAINS,
-    'greenhouse.io',
-    'lever.co',
-    'ashbyhq.com',
-    'workable.com',
-    'smartrecruiters.com',
-    'bamboohr.com',
-    'recruitee.com',
-    'breezy.hr',
-    'jazzhr.com',
-    'applytojob.com',
-    'personio.de',
-    'personio.com',
-    'teamtailor.com',
-    'pinpointhq.com',
-    'myworkdayjobs.com',
-    'icims.com',
-    'jobvite.com',
-    'taleo.net',
-    'successfactors.com',
-    'successfactors.eu',
-    'rippling-ats.com',
-    'keka.com',
-    'freshteam.com',
-  ]),
-]
+import {
+  KNOWN_ATS_DOMAINS,
+  LOGIN_PORTAL_FAMILIES,
+} from './domain-manifest.generated.js'
 
-/**
- * Domain-domain satu portal login yang sama (alias lama dan baru); semuanya ada di `EXTENSION_LOGIN_PORTAL_DOMAINS`
- * (`apply-channel.ts`). Portal login sengaja BUKAN bagian `KNOWN_ATS_DOMAINS`: daftar itu adalah ATS publik yang boleh
- * menjadi tujuan lompatan dari situs non-ATS, dan portal login tidak pernah menjadi tujuan lompatan itu.
- */
-const LOGIN_PORTAL_FAMILIES: ReadonlyArray<readonly string[]> = [
-  ['jobstreet.com', 'jobstreet.co.id'],
-  ['kalibrr.com', 'kalibrr.id'],
-]
+export { KNOWN_ATS_DOMAINS }
 
 /** ATS yang memberi tiap perusahaan subdomain sendiri: kecocokan domain saja tidak cukup, host harus sama persis. */
 const TENANT_SUBDOMAIN_ATS_DOMAINS: readonly string[] = [

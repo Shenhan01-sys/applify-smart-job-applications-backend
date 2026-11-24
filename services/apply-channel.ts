@@ -38,47 +38,18 @@ export interface ChannelClassification {
   reason: string
 }
 
-export const PUBLIC_ATS_DOMAINS = [
-  'greenhouse.io',
-  'lever.co',
-  'ashbyhq.com',
-  'workable.com',
-  'smartrecruiters.com',
-  'recruitee.com',
-  'breezy.hr',
-  'bamboohr.com',
-  'jazzhr.com',
-] as const
+import {
+  EXTENSION_LOGIN_PORTAL_DOMAINS,
+  OTHER_AUTH_PORTAL_DOMAINS,
+  PUBLIC_ATS_DOMAINS,
+} from './domain-manifest.generated.js'
 
-/**
- * Portal lowongan Indonesia yang butuh login pengguna dan diisi oleh EKSTENSI browser (pengguna masuk sendiri,
- * ekstensi mengisi formulir di tabnya). Ini bukan ATS publik: tidak pernah masuk `PUBLIC_ATS_DOMAINS`, tidak pernah
- * `autoWorkerSupported`, dan worker tidak boleh mengirim lamaran di sana. Subdomain ikut (`id.jobstreet.com`).
- *
- * Daftar ini DISALIN ke `extension/src/lib/atsDomains.ts` (`LOGIN_PORTAL_DOMAINS`) dan `worker/src/lib/pageGuard.ts`
- * (`LOGIN_PORTAL_HOSTS`, yang memblokir kirim). Ubah ketiganya bersamaan; tes ekstensi membandingkan salinannya.
- */
-export const EXTENSION_LOGIN_PORTAL_DOMAINS = [
-  'jobstreet.com',
-  'jobstreet.co.id',
-  'glints.com',
-  'kalibrr.com',
-  'kalibrr.id',
-  'dealls.com',
-] as const
+export { EXTENSION_LOGIN_PORTAL_DOMAINS, PUBLIC_ATS_DOMAINS }
 
 export const AUTH_PORTAL_DOMAINS = [
   'linkedin.com',
   ...EXTENSION_LOGIN_PORTAL_DOMAINS,
-  'karir.com',
-  'techinasia.com',
-  'indeed.com',
-  'glassdoor.com',
-  'myworkdayjobs.com',
-  'workday.com',
-  'icims.com',
-  'taleo.net',
-  'successfactors.com',
+  ...OTHER_AUTH_PORTAL_DOMAINS,
 ] as const
 
 const AUTH_PORTAL_PLATFORMS = new Set([
