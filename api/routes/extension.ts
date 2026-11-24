@@ -299,6 +299,7 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
           filledCount: typeof body.filledCount === 'number' ? body.filledCount : 0,
           filledFields: Array.isArray(body.filledFields) ? body.filledFields : [],
           filesAttached: body.filesAttached,
+          actionLog: body.actionLog,
           remainingRequired:
             Array.isArray(body.remainingRequired) || typeof body.remainingRequired === 'number' ? body.remainingRequired : 0,
           questions: Array.isArray(body.questions) ? body.questions : [],

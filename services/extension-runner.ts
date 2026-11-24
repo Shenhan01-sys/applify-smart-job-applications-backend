@@ -49,6 +49,8 @@ export const APPROVAL_CLAIM_TABLE = 'approval_submit_claims'
  */
 export const REPORT_RUN_BODY_LIMIT = 8 * 1024 * 1024
 export const MAX_FILLED_FIELDS = 40
+/** Batas catatan audit per aksi (`actionLog`) dari ekstensi. */
+export const MAX_ACTION_LOG = 200
 const MAX_REMAINING_REQUIRED = 20
 
 export type ExtensionRunOutcome =
@@ -590,6 +592,48 @@ export function sanitizeFilesAttached(raw: unknown): Record<ExtFileKind, boolean
   return out
 }
 
+export interface ActionLogEntry {
+  step: number
+  ref: string
+  kind: string
+  action: string
+  result: string
+  reason?: string
+}
+
+const ACTION_LOG_ACTIONS = new Set(['set', 'select', 'check', 'click', 'attach', 'skip'])
+const ACTION_LOG_RESULTS = new Set(['verified', 'retried', 'unverified', 'missing', 'skipped'])
+const ACTION_LOG_KINDS = new Set(['text', 'textarea', 'select', 'checkbox', 'radio', 'file', 'button'])
+const ACTION_LOG_REASON = /^[a-z0-9_]{1,40}$/
+
+/**
+ * `actionLog` kiriman ekstensi -> `details.action_log`: catatan audit per aksi pengisian. Daftar tertutup (aksi, hasil,
+ * jenis), ref dibersihkan, alasan hanya kode `snake_case`, paling banyak `MAX_ACTION_LOG` entri. Kunci lain
+ * (nilai isian, label, teks halaman) tidak pernah disalin, sekalipun ekstensi mengirimnya.
+ */
+export function sanitizeActionLog(raw: unknown): ActionLogEntry[] {
+  if (!Array.isArray(raw)) return []
+  const out: ActionLogEntry[] = []
+  for (const item of raw) {
+    if (out.length >= MAX_ACTION_LOG) break
+    if (!isRecord(item)) continue
+    const action = typeof item.action === 'string' && ACTION_LOG_ACTIONS.has(item.action) ? item.action : null
+    const result = typeof item.result === 'string' && ACTION_LOG_RESULTS.has(item.result) ? item.result : null
+    if (!action || !result) continue
+    const stepRaw = typeof item.step === 'number' && Number.isFinite(item.step) ? Math.floor(item.step) : 1
+    const entry: ActionLogEntry = {
+      step: Math.min(20, Math.max(1, stepRaw)),
+      ref: String(item.ref ?? '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'unknown',
+      kind: typeof item.kind === 'string' && ACTION_LOG_KINDS.has(item.kind) ? item.kind : 'other',
+      action,
+      result,
+    }
+    if (typeof item.reason === 'string' && ACTION_LOG_REASON.test(item.reason)) entry.reason = item.reason
+    out.push(entry)
+  }
+  return out
+}
+
 /** `remainingRequired`: daftar label (bentuk worker). Angka (kiriman lama) diganti label pertanyaan WAJIB yang diketahui. */
 function sanitizeRemainingRequired(raw: unknown, questionLabels: string[]): string[] {
   const labels: string[] = []
@@ -673,6 +717,8 @@ export interface ReportRunInput {
   filledFields?: unknown
   /** Berkas yang terpasang: `{ resume, cover_letter, transcript, portfolio }` (boolean), disimpan ke `details.documents_attached`. */
   filesAttached?: unknown
+  /** Catatan audit per aksi pengisian dari ekstensi, disimpan ke `details.action_log` (tanpa nilai isian). */
+  actionLog?: unknown
   /** Daftar label kolom wajib yang belum terisi (bentuk worker). Angka diterima sebagai kiriman lama. */
   remainingRequired?: number | unknown[]
   questions?: unknown[]
@@ -803,6 +849,7 @@ export async function reportExtensionRun(
   // Kontrol rahasia dicatat terpisah (label saja): `details.questions` hanya berisi yang bisa dijawab di Applify.
   const secretSkipped = sent || awaitingLogin ? [] : sanitizeSecretSkips(input.questions)
   const documentsAttached = awaitingLogin ? null : sanitizeFilesAttached(input.filesAttached)
+  const actionLog = sanitizeActionLog(input.actionLog)
   const rawCount = awaitingLogin ? 0 : Math.max(0, Math.floor(Number(input.filledCount ?? 0) || 0))
   const filledCount = Math.max(rawCount, filledFields.length)
   const stepsCount =
@@ -844,6 +891,7 @@ export async function reportExtensionRun(
     ...(questions.length > 0 ? { questions, questions_pending: questions.length } : {}),
     ...(secretSkipped.length > 0 ? { secret_skipped: secretSkipped.map((q) => ({ key: q.key, label: q.label, required: q.required })) } : {}),
     ...(documentsAttached ? { documents_attached: documentsAttached } : {}),
+    ...(actionLog.length > 0 ? { action_log: actionLog } : {}),
     submit_clicked: sent || outcome === 'validation_error',
     submit_check: buildSubmitCheck(input.submitCheck, outcome, pageUrl),
     screenshots: { filled: filledRef, after: afterRef },
