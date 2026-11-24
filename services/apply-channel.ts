@@ -40,11 +40,20 @@ export interface ChannelClassification {
 
 import {
   EXTENSION_LOGIN_PORTAL_DOMAINS,
+  KNOWN_ATS_DOMAINS,
   OTHER_AUTH_PORTAL_DOMAINS,
   PUBLIC_ATS_DOMAINS,
 } from './domain-manifest.generated.js'
 
 export { EXTENSION_LOGIN_PORTAL_DOMAINS, PUBLIC_ATS_DOMAINS }
+
+/**
+ * Host yang benar-benar bisa dibuka dan diisi Ekstensi Browser: portal login (JobStreet, Glints, Kalibrr,
+ * Dealls) dan ATS dikenal. Daftarnya sama dengan `optional_host_permissions` di extension/manifest.json (keduanya
+ * dibangkitkan dari shared/domains.json). Host di luar daftar ini tidak bisa diberi izin oleh ekstensi, jadi
+ * lowongannya tidak boleh dikirim ke antrean `extension_apply`.
+ */
+export const EXTENSION_HOST_DOMAINS: readonly string[] = [...EXTENSION_LOGIN_PORTAL_DOMAINS, ...KNOWN_ATS_DOMAINS]
 
 export const AUTH_PORTAL_DOMAINS = [
   'linkedin.com',
@@ -122,6 +131,18 @@ export function sanitizeHttpUrl(raw: unknown): string | null {
 /** Host adalah portal login yang diisi ekstensi (JobStreet, Glints, Kalibrr, Dealls) atau subdomainnya. */
 export function isLoginPortalHost(hostname: string): boolean {
   return hostMatchesDomain(hostname, EXTENSION_LOGIN_PORTAL_DOMAINS)
+}
+
+/** Host (atau subdomainnya) ada di daftar yang bisa dibuka ekstensi. */
+export function isExtensionHost(hostname: string): boolean {
+  return hostMatchesDomain(hostname, EXTENSION_HOST_DOMAINS)
+}
+
+/** URL lamaran http(s) yang hostnya bisa dibuka ekstensi. LinkedIn tidak pernah masuk daftar. */
+export function isExtensionUrl(rawUrl: unknown): boolean {
+  const safe = sanitizeHttpUrl(rawUrl)
+  if (!safe) return false
+  return isExtensionHost(new URL(safe).hostname)
 }
 
 export function isLinkedInHost(hostname: string): boolean {
@@ -217,7 +238,7 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
       applyEmail,
       autoWorkerSupported: Boolean(targetUrl),
       emailApplySupported: Boolean(applyEmail),
-      extensionSupported: Boolean(targetUrl),
+      extensionSupported: isExtensionUrl(targetUrl),
       manualOnly: false,
       reason:
         resolvedAtsUrl && primaryUrl && resolvedAtsUrl !== primaryUrl
@@ -235,7 +256,7 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
       applyEmail,
       autoWorkerSupported: false,
       emailApplySupported: true,
-      extensionSupported: Boolean(primaryUrl),
+      extensionSupported: isExtensionUrl(primaryUrl),
       manualOnly: false,
       reason: `Alamat email rekruter (${applyEmail}) terdeteksi; dapat dikirim via Gmail Applify setelah persetujuan.`,
     }
@@ -247,6 +268,7 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
     (platform ? AUTH_PORTAL_PLATFORMS.has(platform) : false)
 
   if (isPortal) {
+    const viaExtension = isExtensionUrl(primaryUrl)
     return {
       channel: 'auth_portal',
       platform: platform || primaryHost || 'portal',
@@ -255,12 +277,15 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
       applyEmail: null,
       autoWorkerSupported: false,
       emailApplySupported: false,
-      extensionSupported: Boolean(primaryUrl),
+      extensionSupported: viaExtension,
       manualOnly: false,
-      reason: 'Portal membutuhkan sesi masuk akun pelamar; gunakan Ekstensi Browser Applify langsung di tab Chrome/Edge milikmu.',
+      reason: viaExtension
+        ? 'Portal membutuhkan sesi masuk akun pelamar; gunakan Ekstensi Browser Applify langsung di tab Chrome/Edge milikmu.'
+        : 'Portal membutuhkan sesi masuk akun pelamar dan belum didukung Ekstensi Browser Applify; lamar manual di situsnya.',
     }
   }
 
+  const externalViaExtension = isExtensionUrl(primaryUrl)
   return {
     channel: 'external_web',
     platform: platform || primaryHost || 'web',
@@ -269,12 +294,22 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
     applyEmail: null,
     autoWorkerSupported: false,
     emailApplySupported: false,
-    extensionSupported: Boolean(primaryUrl),
+    extensionSupported: externalViaExtension,
     manualOnly: false,
-    reason: primaryUrl
-      ? 'Situs karier eksternal; gunakan Ekstensi Browser Applify agar tahan terhadap login/CAPTCHA, atau lamar manual.'
-      : 'Lowongan belum memiliki tautan lamaran eksternal.',
+    reason: !primaryUrl
+      ? 'Lowongan belum memiliki tautan lamaran eksternal.'
+      : externalViaExtension
+        ? 'Situs karier eksternal; gunakan Ekstensi Browser Applify agar tahan terhadap login/CAPTCHA, atau lamar manual.'
+        : 'Situs karier eksternal yang belum didukung Ekstensi Browser Applify; lamar manual di situsnya.',
   }
+}
+
+/**
+ * Lowongan ini harus dikerjakan Ekstensi Browser (antrean `extension_apply`): bukan LinkedIn, bukan ATS publik
+ * yang diisi worker, dan hostnya ada di daftar yang bisa dibuka ekstensi. Selain itu jalurnya tetap worker/manual.
+ */
+export function routesToExtension(c: ChannelClassification | null | undefined): boolean {
+  return Boolean(c && !c.manualOnly && !c.autoWorkerSupported && c.extensionSupported)
 }
 
 export async function resolveApplyChannel(

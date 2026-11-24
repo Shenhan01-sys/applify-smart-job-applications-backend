@@ -347,6 +347,8 @@ test('POST /api/approvals/:id/approve merutekan kalibrr.id & jobstreet.com ke ex
         description: 'Formulir publik',
       },
     ],
+    // Pengguna sudah memilih "selalu pakai ekstensi": persetujuan portal langsung diantrekan (tanpa meminta izin lagi).
+    user_automation_settings: [{ id: 'set-1', user_id: USER_ID, extension_auto_use: true }],
     ai_applications: [
       { id: 'app-portal', user_id: USER_ID, job_id: portalJobId, status: 'pending_approval' },
       { id: 'app-ats', user_id: USER_ID, job_id: atsJobId, status: 'pending_approval' },

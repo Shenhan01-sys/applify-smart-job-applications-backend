@@ -10,7 +10,7 @@
  * The worker repeats its own checks before it sends anything (worker/src/lib/approval.ts verifyApproval),
  * so this guard only keeps useless or abusive jobs out of the queue.
  */
-import { resolveApplyChannel } from './apply-channel.js'
+import { resolveApplyChannel, routesToExtension } from './apply-channel.js'
 import { clientErrorReply, type GuardDb } from './queue-guard.js'
 
 /** One original run plus five reruns. */
@@ -151,7 +151,7 @@ export async function rerunApproval(
     if (!useExtension && facts.approval?.apply_channel !== 'worker' && !facts.existingJobType && facts.approval?.job_id) {
       try {
         const ch = await resolveApplyChannel(db, facts.approval.job_id)
-        if (ch && !ch.manualOnly && !ch.autoWorkerSupported) useExtension = true
+        if (routesToExtension(ch)) useExtension = true
       } catch {
         // biarkan fallback ke jalur worker bila lookup jobs tidak tersedia (mis. FakeDb minimal)
       }

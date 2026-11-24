@@ -1,7 +1,8 @@
 import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify'
 import { QueueService, queueService } from '../../services/queue.service.js'
 import { ApprovalChannelConflictError } from '../../services/queue-guard.js'
-import { resolveApplyChannel } from '../../services/apply-channel.js'
+import { resolveApplyChannel, routesToExtension } from '../../services/apply-channel.js'
+import { grantExtensionConsent, readExtensionAutoUse } from '../../services/extension-consent.js'
 import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { AiAccessError, aiGuardService, type AiGuardService } from '../../services/ai-guard.service.js'
@@ -246,14 +247,14 @@ export async function approvalRoutes(
     const editedCoverLetter =
       typeof body.cover_letter === 'string' && body.cover_letter.trim() ? body.cover_letter : undefined
 
-    // Tentukan kanal eksekusi dari metadata lowongan: portal login / situs eksternal diarahkan ke antrean
-    // ekstensi (`extension_apply`), sedangkan ATS publik diarahkan ke worker (`apply`).
+    // Tentukan kanal eksekusi dari metadata lowongan: ekstensi (`extension_apply`) HANYA untuk host yang bisa
+    // dibuka ekstensi (portal login dan ATS dikenal, lihat EXTENSION_HOST_DOMAINS). Situs eksternal atau email
+    // langsung di luar daftar itu tetap lewat worker/manual seperti sebelumnya, bukan antrean ekstensi yang tak
+    // akan pernah diambil.
     let targetChannel: 'worker' | 'extension' = 'worker'
     try {
       const classified = await resolveApplyChannel(db, requestData.job_id)
-      if (classified && !classified.manualOnly && !classified.autoWorkerSupported) {
-        targetChannel = 'extension'
-      }
+      if (routesToExtension(classified)) targetChannel = 'extension'
     } catch {
       targetChannel = 'worker'
     }
@@ -308,6 +309,17 @@ export async function approvalRoutes(
     // Persetujuan pengguna = izin kirim untuk lamaran ini (HITL). Worker tetap memerlukan
     // ALLOW_REAL_SUBMIT=true sebelum benar-benar menekan tombol kirim; ekstensi menunggu klik Kirim Sekarang.
     try {
+      // Jalur ekstensi butuh izin pengguna. Bila belum memilih "selalu pakai ekstensi", persetujuan tetap
+      // tercatat tetapi TIDAK diantrekan; klien menampilkan pilihan lalu memanggil POST /:id/extension-consent.
+      if (targetChannel === 'extension' && !(await readExtensionAutoUse(db, userId))) {
+        return {
+          success: true,
+          message: 'Application approved; permission to use the browser extension is required before it is queued',
+          queue_job_id: null,
+          apply_channel: 'extension',
+          extension_consent_required: true,
+        }
+      }
       const qs = getQueue()
       const queued =
         targetChannel === 'extension'
@@ -345,6 +357,23 @@ export async function approvalRoutes(
 
     const { id } = request.params as { id: string }
     const result = await rerunApproval(await getDb(), getQueue(), userId, id)
+    return reply.status(result.status).send(result.body)
+  })
+
+  // Izin memakai ekstensi untuk persetujuan yang sudah disetujui: antre `extension_apply` (payload sama dengan
+  // /approve) dan, bila `always: true`, simpan `extension_auto_use` supaya persetujuan berikutnya langsung diantrekan.
+  // Juga dipakai saat worker berhenti karena butuh login (`auth_required` / `external_redirect`) dan lamaran
+  // belum terkirim. Syarat: milik pengguna, status approved, belum kedaluwarsa, belum terkirim, tidak ada
+  // tugas apply/extension_apply yang aktif (409). Logika di services/extension-consent.ts.
+  app.post('/:id/extension-consent', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' })
+    }
+
+    const { id } = request.params as { id: string }
+    const body = (request.body ?? {}) as { always?: unknown }
+    const result = await grantExtensionConsent(await getDb(), getQueue(), userId, id, { always: body.always === true })
     return reply.status(result.status).send(result.body)
   })
 
