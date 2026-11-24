@@ -26,6 +26,7 @@ import {
 } from '../../services/extension-runner.js'
 import { isExtDocumentKind, loadExtensionDocument } from '../../services/extension-documents.js'
 import { saveExtensionAnswers } from '../../services/extension-answers.js'
+import { claimNextExtensionJob, heartbeatExtensionJob, releaseExtensionJob } from '../../services/extension-queue.js'
 
 export interface ExtensionRoutesOptions extends FastifyPluginOptions {
   /** Injeksi tes offline (DB tiruan). */
@@ -289,6 +290,9 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
           pageUrl: typeof body.pageUrl === 'string' ? body.pageUrl : '',
           outcome: body.outcome as any,
           runId: typeof body.runId === 'string' ? body.runId : null,
+          queueJobId: typeof body.queueJobId === 'string' ? body.queueJobId : null,
+          awaitingUntil: typeof body.awaitingUntil === 'string' ? body.awaitingUntil : null,
+          loginUrl: typeof body.loginUrl === 'string' ? body.loginUrl : null,
           reason: typeof body.reason === 'string' ? body.reason : null,
           filledCount: typeof body.filledCount === 'number' ? body.filledCount : 0,
           filledFields: Array.isArray(body.filledFields) ? body.filledFields : [],
@@ -308,6 +312,66 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
         return reply.status(err.statusCode).send({ error: err.message, code: err.code })
       }
       return reply.status(500).send({ error: err?.message ?? 'Gagal menyimpan laporan ekstensi' })
+    }
+  })
+
+  // 6. Antrean ekstensi (Fase 2): klaim satu tugas `extension_apply` milik pemegang token, heartbeat, dan lepas.
+  app.post('/jobs/claim', async (request, reply) => {
+    const userId = await requireExtensionUser(request, reply)
+    if (!userId) return reply
+    const body = (request.body ?? {}) as Record<string, unknown>
+    try {
+      const job = await claimNextExtensionJob(await getDb(), userId, {
+        claimer: typeof body.claimer === 'string' ? body.claimer : undefined,
+        now: new Date(now()),
+      })
+      if (!job) return reply.status(204).send()
+      return { job }
+    } catch (err: any) {
+      if (err instanceof ExtensionRunnerError) {
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+      }
+      return reply.status(500).send({ error: 'Gagal mengambil antrean ekstensi', code: 'extension_claim_failed' })
+    }
+  })
+
+  app.post('/jobs/:id/heartbeat', async (request, reply) => {
+    const userId = await requireExtensionUser(request, reply)
+    if (!userId) return reply
+    const { id } = request.params as { id: string }
+    try {
+      return await heartbeatExtensionJob(await getDb(), userId, id, new Date(now()))
+    } catch (err: any) {
+      if (err instanceof ExtensionRunnerError) {
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+      }
+      return reply.status(500).send({ error: 'Gagal memperbarui heartbeat antrean', code: 'heartbeat_failed' })
+    }
+  })
+
+  app.post('/jobs/:id/release', async (request, reply) => {
+    const userId = await requireExtensionUser(request, reply)
+    if (!userId) return reply
+    const { id } = request.params as { id: string }
+    const body = (request.body ?? {}) as Record<string, unknown>
+    try {
+      return await releaseExtensionJob(
+        await getDb(),
+        userId,
+        id,
+        {
+          terminal: body.terminal === true,
+          error: typeof body.error === 'string' ? body.error : undefined,
+          countRetry: body.countRetry !== false,
+          delaySeconds: typeof body.delaySeconds === 'number' ? body.delaySeconds : undefined,
+        },
+        new Date(now())
+      )
+    } catch (err: any) {
+      if (err instanceof ExtensionRunnerError) {
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+      }
+      return reply.status(500).send({ error: 'Gagal melepas antrean ekstensi', code: 'release_failed' })
     }
   })
 }

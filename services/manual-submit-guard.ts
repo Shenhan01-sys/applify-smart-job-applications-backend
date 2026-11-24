@@ -116,7 +116,7 @@ export async function fetchMarkSentFacts(db: MarkSentDb, userId: string, approva
     .from('automation_queue')
     .select('id, status')
     .eq('user_id', userId)
-    .eq('job_type', 'apply')
+    .in('job_type', ['apply', 'extension_apply'])
     .eq('payload->>approval_request_id', approvalId)
   if (runsErr) throw new Error(`queue lookup failed: ${runsErr.message}`)
   const runRows: Array<{ status?: string }> = runs ?? []

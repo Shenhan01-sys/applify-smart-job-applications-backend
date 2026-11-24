@@ -1,4 +1,4 @@
-import { guardQueuePayload, requireApprovedRow, type GuardDb } from './queue-guard.js'
+import { ApprovalChannelConflictError, guardQueuePayload, requireApprovedRow, type GuardDb } from './queue-guard.js'
 
 /**
  * Queue Service — DATABASE-AS-QUEUE (tanpa Redis / BullMQ).
@@ -22,6 +22,7 @@ import { guardQueuePayload, requireApprovedRow, type GuardDb } from './queue-gua
 const JOB = {
   search: 'search',
   apply: 'apply',
+  extensionApply: 'extension_apply',
   emailApply: 'email_apply',
   companyInsight: 'company_insight',
 } as const;
@@ -87,17 +88,61 @@ export class QueueService {
   }
 
   /**
-   * Dipanggil hanya oleh POST /api/approvals/:id/approve setelah pengguna menyetujui. Baris persetujuan
-   * dibaca ulang dari database (status approved, belum kedaluwarsa), bukan dipercaya dari pemanggil.
+   * Eksklusi mutual sebelum memasukkan persetujuan ke antrean: satu persetujuan tidak boleh diklaim atau aktif
+   * di worker (`apply`) dan ekstensi (`extension_apply`) sekaligus.
    */
-  async addApprovedApplyJob(userId: string, approvalId: string) {
+  private async ensureMutualExclusion(
+    supabase: GuardDb,
+    userId: string,
+    approvalId: string,
+    targetChannel: 'worker' | 'extension',
+    rowChannel?: string | null
+  ): Promise<void> {
+    if (rowChannel && rowChannel !== targetChannel) {
+      throw new ApprovalChannelConflictError(
+        `Approval belongs to channel '${rowChannel}', cannot queue to '${targetChannel}'`
+      )
+    }
+    const [claimRes, activeRes] = await Promise.all([
+      supabase.from('approval_submit_claims').select('approval_request_id').eq('approval_request_id', approvalId).limit(1),
+      supabase
+        .from('automation_queue')
+        .select('id, job_type')
+        .eq('user_id', userId)
+        .in('job_type', [JOB.apply, JOB.extensionApply])
+        .in('status', ['pending', 'processing'])
+        .eq('payload->>approval_request_id', approvalId)
+        .limit(1),
+    ])
+    if (claimRes.error && claimRes.error.code !== '42P01' && claimRes.error.code !== 'PGRST205') {
+      throw new Error(`claim lookup failed: ${claimRes.error.message}`)
+    }
+    if (Array.isArray(claimRes.data) && claimRes.data.length > 0) {
+      throw new ApprovalChannelConflictError('Approval submit claim is already active or consumed')
+    }
+    if (activeRes.error) {
+      throw new Error(`active queue check failed: ${activeRes.error.message}`)
+    }
+    if (Array.isArray(activeRes.data) && activeRes.data.length > 0) {
+      throw new ApprovalChannelConflictError('Approval already has an active queue job')
+    }
+  }
+
+  private async addApprovedChannelJob(
+    userId: string,
+    approvalId: string,
+    jobType: typeof JOB.apply | typeof JOB.extensionApply
+  ): Promise<{ id: string }> {
     const supabase = await this.db()
     const row = await requireApprovedRow(supabase, userId, approvalId)
+    const targetChannel = jobType === JOB.extensionApply ? 'extension' : 'worker'
+    await this.ensureMutualExclusion(supabase, userId, row.id, targetChannel, row.apply_channel ?? null)
+
     const { data, error } = await supabase
       .from('automation_queue')
       .insert({
         user_id: userId,
-        job_type: JOB.apply,
+        job_type: jobType,
         payload: {
           job_id: row.job_id,
           application_id: row.application_id ?? null,
@@ -109,8 +154,28 @@ export class QueueService {
       .select('id')
       .single();
 
-    if (error) throw new Error(`addApprovedApplyJob failed: ${error.message}`);
+    if (error) {
+      if (error.code === '23505') {
+        throw new ApprovalChannelConflictError('Approval already has an active queue job')
+      }
+      throw new Error(`${jobType === JOB.extensionApply ? 'addApprovedExtensionApplyJob' : 'addApprovedApplyJob'} failed: ${error.message}`)
+    }
     return { id: data.id };
+  }
+
+  /**
+   * Dipanggil hanya oleh POST /api/approvals/:id/approve (atau rerun) setelah pengguna menyetujui untuk kanal worker (`apply`).
+   */
+  async addApprovedApplyJob(userId: string, approvalId: string) {
+    return this.addApprovedChannelJob(userId, approvalId, JOB.apply);
+  }
+
+  /**
+   * Dipanggil untuk lowongan kanal ekstensi (`auth_portal` / `external_web`): memasukkan antrean `extension_apply`
+   * yang diabaikan worker dan diklaim ekstensi browser.
+   */
+  async addApprovedExtensionApplyJob(userId: string, approvalId: string) {
+    return this.addApprovedChannelJob(userId, approvalId, JOB.extensionApply);
   }
 
   /**

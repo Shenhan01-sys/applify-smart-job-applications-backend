@@ -1,5 +1,7 @@
 import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify'
-import { queueService } from '../../services/queue.service.js'
+import { QueueService, queueService } from '../../services/queue.service.js'
+import { ApprovalChannelConflictError } from '../../services/queue-guard.js'
+import { resolveApplyChannel } from '../../services/apply-channel.js'
 import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { AiAccessError, aiGuardService, type AiGuardService } from '../../services/ai-guard.service.js'
@@ -50,6 +52,7 @@ function failServer(request: FastifyRequest, reply: FastifyReply, err: unknown, 
 
 export interface ApprovalRoutesOptions extends FastifyPluginOptions {
   db?: any
+  queue?: QueueService
   guard?: Pick<AiGuardService, 'checkActionRateLimit'>
 }
 
@@ -59,6 +62,7 @@ export async function approvalRoutes(
 ) {
   // Dimuat di dalam handler agar import file ini di tes offline tidak memicu api/index.ts.
   const getDb = async (): Promise<any> => opts.db ?? (await import('../index.js')).supabase
+  const getQueue = (): QueueService => opts.queue ?? (opts.db ? new QueueService(opts.db as any) : queueService)
   const guard = opts.guard ?? aiGuardService
 
   // Semua rute `/:id/*` menerima id persetujuan. Id yang bukan UUID ditolak 400 sebelum menyentuh Postgres (kolom
@@ -242,19 +246,49 @@ export async function approvalRoutes(
     const editedCoverLetter =
       typeof body.cover_letter === 'string' && body.cover_letter.trim() ? body.cover_letter : undefined
 
+    // Tentukan kanal eksekusi dari metadata lowongan: portal login / situs eksternal diarahkan ke antrean
+    // ekstensi (`extension_apply`), sedangkan ATS publik diarahkan ke worker (`apply`).
+    let targetChannel: 'worker' | 'extension' = 'worker'
+    try {
+      const classified = await resolveApplyChannel(db, requestData.job_id)
+      if (classified && !classified.manualOnly && !classified.autoWorkerSupported) {
+        targetChannel = 'extension'
+      }
+    } catch {
+      targetChannel = 'worker'
+    }
+
     // Update status to approved. Guarded on status 'pending' so a double click (or two tabs) approves,
-    // and queues, exactly once.
-    const { data: updated, error } = await db
+    // and queues, exactly once.Kolom apply_channel opsional sampai migrasi DRAFT diterapkan.
+    const baseApprovalPatch: Record<string, any> = {
+      status: 'approved',
+      reviewed_at: new Date().toISOString(),
+      ...(editedCoverLetter ? { cover_letter: editedCoverLetter } : {}),
+    }
+    let approveRes = await db
       .from('approval_requests')
-      .update({
-        status: 'approved',
-        reviewed_at: new Date().toISOString(),
-        ...(editedCoverLetter ? { cover_letter: editedCoverLetter } : {}),
-      })
+      .update({ ...baseApprovalPatch, apply_channel: targetChannel })
       .eq('id', id)
       .eq('user_id', userId)
       .eq('status', 'pending')
       .select('id')
+
+    if (
+      approveRes.error &&
+      (approveRes.error.code === '42703' ||
+        approveRes.error.code === 'PGRST204' ||
+        /apply_channel/i.test(String(approveRes.error.message ?? '')))
+    ) {
+      approveRes = await db
+        .from('approval_requests')
+        .update(baseApprovalPatch)
+        .eq('id', id)
+        .eq('user_id', userId)
+        .eq('status', 'pending')
+        .select('id')
+    }
+
+    const { data: updated, error } = approveRes
 
     if (error) {
       return failServer(request, reply, error)
@@ -272,13 +306,24 @@ export async function approvalRoutes(
     }
 
     // Persetujuan pengguna = izin kirim untuk lamaran ini (HITL). Worker tetap memerlukan
-    // ALLOW_REAL_SUBMIT=true sebelum benar-benar menekan tombol kirim.
+    // ALLOW_REAL_SUBMIT=true sebelum benar-benar menekan tombol kirim; ekstensi menunggu klik Kirim Sekarang.
     try {
-      // addApprovedApplyJob re-reads the row: `approved: true` is written by the server, from the database.
-      const queued = await queueService.addApprovedApplyJob(userId, id)
-      return { success: true, message: 'Application approved and queued for submission', queue_job_id: queued.id }
+      const qs = getQueue()
+      const queued =
+        targetChannel === 'extension'
+          ? await qs.addApprovedExtensionApplyJob(userId, id)
+          : await qs.addApprovedApplyJob(userId, id)
+      return {
+        success: true,
+        message: 'Application approved and queued for submission',
+        queue_job_id: queued.id,
+        apply_channel: targetChannel,
+      }
     } catch (err: any) {
-      // Jangan biarkan status "approved" tanpa pekerjaan di antrean.
+      // Jangan biarkan status "approved" tanpa pekerjaan di antrean (kecuali konflik kanal/klaim lain yang memang sudah ada).
+      if (err instanceof ApprovalChannelConflictError) {
+        return reply.status(409).send({ error: err.message, code: err.code })
+      }
       await db
         .from('approval_requests')
         .update({ status: 'pending', reviewed_at: null })
@@ -299,7 +344,7 @@ export async function approvalRoutes(
     }
 
     const { id } = request.params as { id: string }
-    const result = await rerunApproval(await getDb(), queueService, userId, id)
+    const result = await rerunApproval(await getDb(), getQueue(), userId, id)
     return reply.status(result.status).send(result.body)
   })
 

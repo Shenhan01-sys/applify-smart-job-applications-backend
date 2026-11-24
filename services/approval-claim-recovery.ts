@@ -71,7 +71,7 @@ export async function getClaimStatuses(
   const [claimsRes, logsRes, queueRes] = await Promise.all([
     db.from(APPROVAL_CLAIM_TABLE).select('approval_request_id, channel, queue_job_id, run_id, created_at').eq('user_id', userId).in('approval_request_id', ids),
     db.from('application_logs').select('status, details').eq('user_id', userId).in('status', ['success', 'submit_unverified', 'incomplete']).in('details->>approval_request_id', ids),
-    db.from('automation_queue').select('id, status, payload').eq('user_id', userId).eq('job_type', 'apply').in('status', ['pending', 'processing']).in('payload->>approval_request_id', ids),
+    db.from('automation_queue').select('id, status, payload').eq('user_id', userId).in('job_type', ['apply', 'extension_apply']).in('status', ['pending', 'processing']).in('payload->>approval_request_id', ids),
   ])
 
   if (claimsRes.error) {

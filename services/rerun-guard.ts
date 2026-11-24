@@ -10,6 +10,7 @@
  * The worker repeats its own checks before it sends anything (worker/src/lib/approval.ts verifyApproval),
  * so this guard only keeps useless or abusive jobs out of the queue.
  */
+import { resolveApplyChannel } from './apply-channel.js'
 import { clientErrorReply, type GuardDb } from './queue-guard.js'
 
 /** One original run plus five reruns. */
@@ -19,6 +20,7 @@ export interface RerunApproval {
   status?: string | null
   expires_at?: string | null
   job_id?: string | null
+  apply_channel?: string | null
 }
 
 export interface RerunFacts {
@@ -27,10 +29,12 @@ export interface RerunFacts {
   now: Date
   /** application_logs rows of this approval with status success or submit_unverified. */
   usedCount: number
-  /** automation_queue apply rows of this approval that are pending or processing. */
+  /** automation_queue apply/extension_apply rows of this approval that are pending or processing. */
   activeCount: number
-  /** automation_queue apply rows of this approval in any status (original run and earlier reruns). */
+  /** automation_queue apply/extension_apply rows of this approval in any status (original run and earlier reruns). */
   totalCount: number
+  /** Saluran tugas sebelumnya bila terbaca (`extension_apply` -> extension). */
+  existingJobType?: string | null
 }
 
 export type RerunVerdict =
@@ -73,12 +77,21 @@ export async function fetchRerunFacts(
   approvalId: string,
   now: Date = new Date()
 ): Promise<RerunFacts> {
-  const { data: approval, error: approvalErr } = await db
+  let appRes = await db
     .from('approval_requests')
-    .select('id, user_id, job_id, status, expires_at')
+    .select('id, user_id, job_id, status, expires_at, apply_channel')
     .eq('id', approvalId)
     .eq('user_id', userId)
     .maybeSingle()
+  if (appRes.error && (appRes.error.code === '42703' || appRes.error.code === 'PGRST204' || /apply_channel/i.test(String(appRes.error.message ?? '')))) {
+    appRes = await db
+      .from('approval_requests')
+      .select('id, user_id, job_id, status, expires_at')
+      .eq('id', approvalId)
+      .eq('user_id', userId)
+      .maybeSingle()
+  }
+  const { data: approval, error: approvalErr } = appRes
   if (approvalErr) throw new Error(`approval lookup failed: ${approvalErr.message}`)
   if (!approval) return { approval: null, now, usedCount: 0, activeCount: 0, totalCount: 0 }
 
@@ -94,12 +107,12 @@ export async function fetchRerunFacts(
 
   const { data: runs, error: runsErr } = await db
     .from('automation_queue')
-    .select('id, status')
+    .select('id, status, job_type')
     .eq('user_id', userId)
-    .eq('job_type', 'apply')
+    .in('job_type', ['apply', 'extension_apply'])
     .eq('payload->>approval_request_id', approvalId)
   if (runsErr) throw new Error(`queue lookup failed: ${runsErr.message}`)
-  const rows: Array<{ status?: string }> = runs ?? []
+  const rows: Array<{ status?: string; job_type?: string }> = runs ?? []
 
   return {
     approval,
@@ -107,11 +120,13 @@ export async function fetchRerunFacts(
     usedCount: used?.length ?? 0,
     activeCount: rows.filter((r) => r.status === 'pending' || r.status === 'processing').length,
     totalCount: rows.length,
+    existingJobType: rows.find((r) => r.job_type === 'extension_apply' || r.job_type === 'apply')?.job_type ?? null,
   }
 }
 
 export interface RerunQueue {
   addApprovedApplyJob(userId: string, approvalId: string): Promise<{ id: string }>
+  addApprovedExtensionApplyJob?(userId: string, approvalId: string): Promise<{ id: string }>
 }
 
 export interface RerunReply {
@@ -128,11 +143,24 @@ export async function rerunApproval(
   now: Date = new Date()
 ): Promise<RerunReply> {
   try {
-    const verdict = decideRerun(await fetchRerunFacts(db, userId, approvalId, now))
+    const facts = await fetchRerunFacts(db, userId, approvalId, now)
+    const verdict = decideRerun(facts)
     if ('error' in verdict) return { status: verdict.status, body: { error: verdict.error } }
 
-    // addApprovedApplyJob re-reads the approval and writes `approved: true` itself, from the database.
-    const queued = await queue.addApprovedApplyJob(userId, approvalId)
+    let useExtension = facts.approval?.apply_channel === 'extension' || facts.existingJobType === 'extension_apply'
+    if (!useExtension && facts.approval?.apply_channel !== 'worker' && !facts.existingJobType && facts.approval?.job_id) {
+      try {
+        const ch = await resolveApplyChannel(db, facts.approval.job_id)
+        if (ch && !ch.manualOnly && !ch.autoWorkerSupported) useExtension = true
+      } catch {
+        // biarkan fallback ke jalur worker bila lookup jobs tidak tersedia (mis. FakeDb minimal)
+      }
+    }
+
+    const queued =
+      useExtension && typeof queue.addApprovedExtensionApplyJob === 'function'
+        ? await queue.addApprovedExtensionApplyJob(userId, approvalId)
+        : await queue.addApprovedApplyJob(userId, approvalId)
     return { status: 200, body: { success: true, queue_job_id: queued.id } }
   } catch (err: any) {
     // Consent that lapsed between the checks above and the enqueue is a client-side condition (403).

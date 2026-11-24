@@ -24,6 +24,16 @@ export class ApprovalRequiredError extends Error {
   }
 }
 
+/** Konflik kanal atau eksklusi mutual: persetujuan sedang aktif di antrean lain atau sudah diklaim. */
+export class ApprovalChannelConflictError extends Error {
+  readonly statusCode = 409
+  readonly code = 'channel_conflict'
+  constructor(message: string) {
+    super(message)
+    this.name = 'ApprovalChannelConflictError'
+  }
+}
+
 /** The client sent a payload the queue will not accept (HTTP 400), as opposed to a missing consent (403). */
 export class InvalidPayloadError extends Error {
   readonly statusCode = 400
@@ -36,11 +46,11 @@ export class InvalidPayloadError extends Error {
 }
 
 /**
- * HTTP reply for an error the client caused (forged or stale approval: 403, malformed payload: 400), or null
- * for anything else (the caller then answers 500). Shared by every route that enqueues through the guard.
+ * HTTP reply for an error the client caused (forged or stale approval: 403, channel conflict: 409,
+ * malformed payload: 400), or null for anything else (the caller then answers 500).
  */
 export function clientErrorReply(error: unknown): { statusCode: number; body: { error: string; code: string } } | null {
-  if (error instanceof ApprovalRequiredError || error instanceof InvalidPayloadError) {
+  if (error instanceof ApprovalRequiredError || error instanceof ApprovalChannelConflictError || error instanceof InvalidPayloadError) {
     return { statusCode: error.statusCode, body: { error: error.message, code: error.code } }
   }
   return null
@@ -53,6 +63,7 @@ export interface ApprovedRow {
   application_id: string | null
   status: string
   expires_at: string
+  apply_channel?: string | null
 }
 
 /** Load an approval row and make sure it is a usable consent. Throws ApprovalRequiredError otherwise. */
@@ -65,12 +76,21 @@ export async function requireApprovedRow(
   if (typeof approvalId !== 'string' || !approvalId) {
     throw new ApprovalRequiredError('approval_request_id is required')
   }
-  const { data: row, error } = await db
+  let res = await db
     .from('approval_requests')
-    .select('id, user_id, job_id, application_id, status, expires_at')
+    .select('id, user_id, job_id, application_id, status, expires_at, apply_channel')
     .eq('id', approvalId)
     .eq('user_id', userId)
     .maybeSingle()
+  if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204' || /apply_channel/i.test(String(res.error.message ?? '')))) {
+    res = await db
+      .from('approval_requests')
+      .select('id, user_id, job_id, application_id, status, expires_at')
+      .eq('id', approvalId)
+      .eq('user_id', userId)
+      .maybeSingle()
+  }
+  const { data: row, error } = res
   if (error) throw new Error(`approval lookup failed: ${error.message}`)
   if (!row) throw new ApprovalRequiredError('approval request not found')
   if (row.status !== 'approved') {
