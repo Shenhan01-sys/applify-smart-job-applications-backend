@@ -232,24 +232,31 @@ const MONTH_NAMES: Record<number, string[]> = {
 const MONTH_LOOKUP = new Map<string, number>()
 for (const [m, names] of Object.entries(MONTH_NAMES)) for (const n of names) MONTH_LOOKUP.set(n, Number(m))
 
-const PRESENT_RE = /^(?:present|sekarang|saat ini|kini|now|current|sampai sekarang|hingga sekarang)$/i
+/** Penanda "masih berjalan" pada tanggal akhir: Present, Now, Current(ly), Sekarang, Saat ini, Hingga/Sampai (sekarang|kini), To date, Ongoing. */
+const PRESENT_RE =
+  /^(?:present|sekarang|saat ini|kini|now|current|currently|ongoing|berlangsung|to date|till date|up to date|date|sampai sekarang|hingga sekarang|sampai kini|hingga kini|s\/?d sekarang|s\/?d kini|sampai saat ini|hingga saat ini)$/i
 
 const pad2 = (n: number) => String(n).padStart(2, '0')
 const ymd = (year: number, month: number) => `${year}-${pad2(month)}-01`
 
-function parseMonthYear(raw: string): { year: number; month: number | null } | null {
+interface YearMonth {
+  year: number
+  month: number | null
+}
+
+function parseMonthYear(raw: string): YearMonth | null {
   const t = line(raw).replace(/,/g, '')
   let m = /^(\d{4})-(\d{1,2})(?:-\d{1,2})?$/.exec(t)
   if (m) {
     const month = Number(m[2])
     return month >= 1 && month <= 12 ? { year: Number(m[1]), month } : null
   }
-  m = /^(\d{1,2})[/.](\d{4})$/.exec(t)
+  m = /^(\d{1,2})\s*[/.-]\s*(\d{4})$/.exec(t)
   if (m) {
     const month = Number(m[1])
     return month >= 1 && month <= 12 ? { year: Number(m[2]), month } : null
   }
-  m = /^(\p{L}+)\.?\s+(\d{4})$/u.exec(t)
+  m = /^(\p{L}+)\.?\s*(\d{4})$/u.exec(t)
   if (m) {
     const month = MONTH_LOOKUP.get(fold(m[1]))
     return month ? { year: Number(m[2]), month } : null
@@ -259,6 +266,88 @@ function parseMonthYear(raw: string): { year: number; month: number | null } | n
   return null
 }
 
+/** Nama bulan saja ("Aug", "Agustus"): bulan tanpa tahun pada awal rentang seperti "Aug - Dec 2025". */
+function parseMonthOnly(raw: string): number | null {
+  const m = /^(\p{L}{3,10})\.?$/u.exec(line(raw))
+  return m ? (MONTH_LOOKUP.get(fold(m[1])) ?? null) : null
+}
+
+/**
+ * Garis miring sisa ekstraksi PDF di sekitar tanggal: "Mar /2016 /- /Present" menjadi "Mar 2016 - Present". Hanya
+ * menyentuh garis miring yang menempel pada nama bulan sebelum tahun dan pada tanda strip; "08/2019", "s/d", dan
+ * "CI/CD" tidak berubah.
+ */
+export function cleanDateNoise(s: string): string {
+  return s
+    .replace(/(\p{L})\s*\/\s*(?=(?:19|20)\d{2}\b)/gu, '$1 ')
+    .replace(/\s*\/\s*(?=[-‐-―−](?:\s|$))/g, ' ')
+    .replace(/([-‐-―−])\s*\/\s*/g, '$1 ')
+}
+
+/** Pemisah rentang tanggal: strip berspasi, en/em dash, to, until, sampai (dengan), hingga, s/d, s.d., sd. */
+const DATE_SPLIT_RE = /\s+[-‐-―−]\s+|\s*[–—]\s*|\s+(?:to|until|till|sampai(?:\s+dengan)?|hingga|s\s*[/.]\s*d\.?|sd\.?)\s+/i
+
+type RangeEnd = YearMonth | 'present'
+
+interface ReadRange {
+  start: YearMonth
+  end: RangeEnd
+  notes: string[]
+}
+
+/** Pisahkan "A - B" menjadi dua potong. Strip tanpa spasi ("2010-2014", "Aug-Dec 2025") dicoba di tiap posisi strip. */
+function splitRangeTokens(s: string): [string, string] | null {
+  const parts = s.split(DATE_SPLIT_RE)
+  if (parts.length === 2) return [parts[0], parts[1]]
+  if (parts.length > 2) return null
+  const isStart = (t: string) => parseMonthYear(t) !== null || parseMonthOnly(t) !== null
+  const isEnd = (t: string) => isStart(t) || PRESENT_RE.test(line(t))
+  for (let i = 1; i < s.length - 1; i++) {
+    if (s[i] !== '-') continue
+    const left = s.slice(0, i).trim()
+    const right = s.slice(i + 1).trim()
+    if (isStart(left) && isEnd(right)) return [left, right]
+  }
+  return null
+}
+
+/**
+ * Baca satu rentang tanggal tanpa memeriksa waktu sekarang. Bentuk yang dikenali: "January 2022 - Present (2 years)",
+ * "Mar 2019 - Jun 2021", "Mar /2019 /- /Jun /2021" (garis miring sisa PDF), "2019 - 2021", "2019-2021", "03/2019 - 06/2021",
+ * "2022-01 - 2023-05", "2020-01-01 - 2021-12-31", "Agu 2019 s/d Sekarang". Bulan tanpa tahun di awal ("Aug - Dec 2025")
+ * meminjam tahun dari akhir (bulan mulai setelah bulan selesai berarti tahun sebelumnya); bulan tanpa tahun di akhir
+ * ("Nov 2025 - Feb") meminjam dari awal (tahun berikutnya bila bulan selesai lebih awal).
+ */
+function readRange(raw: unknown): ReadRange | null {
+  const s = cleanDateNoise(line(raw)).replace(/\s*\([^()]*\)\s*$/, '').trim()
+  if (!s) return null
+  const tokens = splitRangeTokens(s)
+  if (!tokens) return null
+  const [startTok, endTok] = tokens
+  const notes: string[] = []
+
+  let start = parseMonthYear(startTok)
+  let end: RangeEnd | null = PRESENT_RE.test(line(endTok)) ? 'present' : parseMonthYear(endTok)
+  if (end === null) {
+    const endMonth = parseMonthOnly(endTok)
+    if (endMonth === null || !start) return null
+    end = { year: start.year + (endMonth < (start.month ?? 1) ? 1 : 0), month: endMonth }
+    notes.push('Tahun selesai tidak tercantum di PDF, diambil dari tahun mulai.')
+  }
+  if (!start) {
+    const startMonth = parseMonthOnly(startTok)
+    if (startMonth === null || end === 'present') return null
+    start = { year: end.year - (end.month !== null && startMonth > end.month ? 1 : 0), month: startMonth }
+    notes.push('Tahun mulai tidak tercantum di PDF, diambil dari tahun selesai.')
+  }
+  return { start, end, notes }
+}
+
+/** Seluruh teks adalah satu rentang tanggal (mis. baris tanggal LinkedIn "Januari 2022 - Sekarang (2 tahun)"). */
+export function isDateRangeText(raw: unknown): boolean {
+  return readRange(raw) !== null
+}
+
 export interface ParsedRange {
   start: string
   end: string | null
@@ -266,50 +355,41 @@ export interface ParsedRange {
   notes: string[]
 }
 
-/**
- * "January 2022 - Present (2 years 3 months)", "Januari 2022 - Sekarang", "Mar 2019 - Jun 2021", "2019 - 2021",
- * "2022-01 - 2023-05". Hasil `YYYY-MM-01`. null bila tidak terbaca, mulai di masa depan, selesai di masa depan,
- * atau selesai sebelum mulai (aturan yang sama dengan validateExperience di frontend). Bulan yang tidak tercantum
- * diisi Januari (mulai) dan Desember atau bulan ini (selesai), dengan catatan untuk pengguna.
- */
-export function parseDateRange(raw: unknown, now: Date = new Date()): ParsedRange | null {
-  const s = line(raw).replace(/\s*\([^()]*\)\s*$/, '')
-  if (!s) return null
-  let startTok: string
-  let endTok: string
-  const parts = s.split(/\s+[-–—]\s+|\s*[–—]\s*|\s+(?:to|sampai|hingga|s\.d\.?)\s+/i)
-  if (parts.length === 2) {
-    ;[startTok, endTok] = parts
-  } else {
-    const m = /^(\d{4})\s*-\s*(\S+)$/.exec(s)
-    if (!m) return null
-    ;[startTok, endTok] = [m[1], m[2]]
-  }
+export type DateRangeFailure = 'unreadable' | 'start_in_future' | 'end_in_future' | 'end_before_start'
 
+/** Seperti parseDateRange, tetapi gagal dengan kode alasan (untuk log hitungan item terbuang). */
+export function explainDateRange(raw: unknown, now: Date = new Date()): { ok: true; range: ParsedRange } | { ok: false; reason: DateRangeFailure } {
+  const r = readRange(raw)
+  if (!r) return { ok: false, reason: 'unreadable' }
   const nowYear = now.getUTCFullYear()
   const nowIdx = nowYear * 12 + now.getUTCMonth()
   const idx = (y: number, mo: number) => y * 12 + (mo - 1)
-  const notes: string[] = []
+  const notes = [...r.notes]
 
-  const start = parseMonthYear(startTok)
-  if (!start) return null
-  const startMonth = start.month ?? 1
-  if (start.month === null) notes.push('Bulan mulai tidak tercantum di PDF, diisi Januari.')
-  if (idx(start.year, startMonth) > nowIdx) return null
+  const startMonth = r.start.month ?? 1
+  if (r.start.month === null) notes.push('Bulan mulai tidak tercantum di PDF, diisi Januari.')
+  if (idx(r.start.year, startMonth) > nowIdx) return { ok: false, reason: 'start_in_future' }
+  if (r.end === 'present') return { ok: true, range: { start: ymd(r.start.year, startMonth), end: null, is_current: true, notes } }
 
-  if (PRESENT_RE.test(line(endTok))) {
-    return { start: ymd(start.year, startMonth), end: null, is_current: true, notes }
-  }
-  const end = parseMonthYear(endTok)
-  if (!end) return null
-  let endMonth = end.month
+  let endMonth = r.end.month
   if (endMonth === null) {
-    endMonth = end.year === nowYear ? now.getUTCMonth() + 1 : 12
+    endMonth = r.end.year === nowYear ? now.getUTCMonth() + 1 : 12
     notes.push(endMonth === 12 ? 'Bulan selesai tidak tercantum di PDF, diisi Desember.' : 'Bulan selesai tidak tercantum di PDF, diisi bulan ini.')
   }
-  if (idx(end.year, endMonth) > nowIdx) return null
-  if (idx(end.year, endMonth) < idx(start.year, startMonth)) return null
-  return { start: ymd(start.year, startMonth), end: ymd(end.year, endMonth), is_current: false, notes }
+  if (idx(r.end.year, endMonth) > nowIdx) return { ok: false, reason: 'end_in_future' }
+  if (idx(r.end.year, endMonth) < idx(r.start.year, startMonth)) return { ok: false, reason: 'end_before_start' }
+  return { ok: true, range: { start: ymd(r.start.year, startMonth), end: ymd(r.end.year, endMonth), is_current: false, notes } }
+}
+
+/**
+ * "January 2022 - Present (2 years 3 months)", "Januari 2022 - Sekarang", "Mar 2019 - Jun 2021", "2019 - 2021",
+ * "2022-01 - 2023-05", "Aug - Dec 2025". Hasil `YYYY-MM-01`. null bila tidak terbaca, mulai di masa depan, selesai di
+ * masa depan, atau selesai sebelum mulai (aturan yang sama dengan validateExperience di frontend). Bulan yang tidak
+ * tercantum diisi Januari (mulai) dan Desember atau bulan ini (selesai), dengan catatan untuk pengguna.
+ */
+export function parseDateRange(raw: unknown, now: Date = new Date()): ParsedRange | null {
+  const r = explainDateRange(raw, now)
+  return r.ok ? r.range : null
 }
 
 export interface ParsedYears {
@@ -325,7 +405,7 @@ const DASH = '[-\\u2010-\\u2015\\u2212]'
 /** Pemisah rentang di CV: strip, "to", "until", "sampai (dengan)", "hingga", "s/d", "s.d.", "sd". */
 const RANGE_SEP = `(?:${DASH}|to|until|till|through|thru|sampai(?:\\s+dengan)?|hingga|s\\s*[/.]\\s*d\\.?|sd\\.?)`
 /** Penanda "masih berjalan" untuk tahun akhir. */
-const END_WORDS = 'sampai\\s+sekarang|hingga\\s+sekarang|saat\\s+ini|sekarang|present|current|now|kini|ongoing|berlangsung|sedang\\s+(?:berjalan|menempuh|studi|kuliah)|masih\\s+(?:kuliah|studi|menempuh|aktif)'
+const END_WORDS = 'sampai\\s+sekarang|hingga\\s+sekarang|sampai\\s+kini|hingga\\s+kini|sampai\\s+saat\\s+ini|hingga\\s+saat\\s+ini|saat\\s+ini|sekarang|present|currently|current|to\\s+date|till\\s+date|up\\s+to\\s+date|date|now|kini|ongoing|berlangsung|sedang\\s+(?:berjalan|menempuh|studi|kuliah)|masih\\s+(?:kuliah|studi|menempuh|aktif)'
 /** Kata "perkiraan lulus" di depan tahun akhir: "Expected (graduation)", "Exp.", "Anticipated", "Est.", "Perkiraan", "Rencana lulus". */
 const EXPECTED_WORDS =
   'expected(?:\\s+graduation)?|exp\\.?|anticipated(?:\\s+graduation)?|estimated(?:\\s+graduation)?|est\\.?|perkiraan(?:\\s+lulus)?|diperkirakan(?:\\s+lulus)?|estimasi(?:\\s+lulus)?|rencana\\s+lulus|target\\s+lulus|akan\\s+lulus'
@@ -479,7 +559,7 @@ const HEADINGS: Array<[SectionKey, string[]]> = [
   ['summary', ['Summary', 'About', 'Ringkasan', 'Tentang']],
   // Judul tambahan di bawah ini dipakai CV biasa (bukan ekspor LinkedIn). Tanpa itu seksinya tidak dikenali, jadi tidak
   // ada parser aturan dan tidak ada peringatan "bagian ada di PDF tetapi tidak terbaca".
-  ['experience', ['Experience', 'Pengalaman', 'Work Experience', 'Professional Experience', 'Employment History', 'Work History', 'Pengalaman Kerja', 'Pengalaman Profesional', 'Riwayat Pekerjaan']],
+  ['experience', ['Experience', 'Pengalaman', 'Work Experience', 'Professional Experience', 'Employment History', 'Work History', 'Pengalaman Kerja', 'Pengalaman Profesional', 'Riwayat Pekerjaan', 'Riwayat Kerja', 'Riwayat Karir', 'Pengalaman Bekerja', 'Relevant Experience', 'Career History', 'Employment', 'Internship Experience', 'Pengalaman Magang']],
   [
     'education',
     [
@@ -497,6 +577,12 @@ const HEADINGS: Array<[SectionKey, string[]]> = [
       'Pendidikan Terakhir',
       'Latar Belakang Pendidikan',
       'Pendidikan dan Pelatihan',
+      'Pendidikan & Pelatihan',
+      'Educational Qualifications',
+      'Qualifications',
+      'Riwayat Akademik',
+      'Latar Belakang Akademik',
+      'Kualifikasi Akademik',
     ],
   ],
   [
@@ -507,6 +593,10 @@ const HEADINGS: Array<[SectionKey, string[]]> = [
       'Organizational Experience', 'Pengalaman Organisasi',
       'Training', 'Trainings', 'Pelatihan', 'Seminar', 'References', 'Referensi', 'Interests', 'Minat', 'Hobi', 'Profile', 'Profil', 'Professional Summary', 'Career Objective', 'Objective', 'Tujuan Karir',
       'Personal Data', 'Data Pribadi', 'Personal Information', 'Informasi Pribadi',
+      // Seksi gabungan dan proyek pada CV biasa; tanpa ini isinya ikut terbaca sebagai Pendidikan atau Pengalaman.
+      'Certifications & Achievements', 'Certifications and Achievements', 'Awards & Certifications', 'Awards and Certifications', 'Penghargaan & Sertifikasi', 'Penghargaan dan Sertifikasi',
+      'Core Competencies', 'Competencies', 'Kompetensi Utama', 'Key Projects', 'Selected Projects', 'Notable Projects', 'Proyek Utama', 'Proyek Pilihan',
+      'Additional Information', 'Informasi Tambahan',
     ],
   ],
 ]
@@ -608,16 +698,15 @@ export function splitSkillItems(lines: unknown[]): string[] {
 }
 
 
-const MONTH_YEAR = '(?:\\p{L}{3,10}\\.?\\s+)?\\d{4}'
-const PRESENT = 'present|sekarang|saat ini|kini|now'
-const DATE_LINE_RE = new RegExp(`^${MONTH_YEAR}\\s*(?:-|–|—|to|sampai|hingga)\\s*(?:${PRESENT}|${MONTH_YEAR})(?:\\s*\\([^)]*\\))?$`, 'iu')
+/** Baris yang seluruhnya satu rentang tanggal (baris tanggal PDF LinkedIn: "Januari 2022 - Sekarang (2 tahun)"). */
+const isDateRangeLine = (l: string): boolean => l.length <= 70 && isDateRangeText(l)
 const DURATION_RE = /^(?:\d+\s+(?:years?|yrs?|tahun|thn)(?:\s+\d+\s+(?:months?|mos?|bulan|bln))?|\d+\s+(?:months?|mos?|bulan|bln))$/i
 const BULLET_RE = /^[•·\-–*▪◦]\s*/
 
 const wordCount = (s: string) => s.split(/\s+/).filter(Boolean).length
 
 function looksLikeCompany(l: string): boolean {
-  return l.length <= 80 && wordCount(l) <= 9 && !/[.,;:!?]$/.test(l) && !BULLET_RE.test(l) && !DATE_LINE_RE.test(l) && !DURATION_RE.test(l)
+  return l.length <= 80 && wordCount(l) <= 9 && !/[.,;:!?]$/.test(l) && !BULLET_RE.test(l) && !isDateRangeLine(l) && !DURATION_RE.test(l)
 }
 
 function looksLikeLocation(l: string): boolean {
@@ -648,7 +737,7 @@ function parseExperienceRules(lines: string[]): RawExtraction[] {
   let currentCompany: string | null = null
 
   lines.forEach((l, d) => {
-    if (!DATE_LINE_RE.test(l)) return
+    if (!isDateRangeLine(l)) return
     const titleIdx = d - 1
     if (titleIdx <= boundary) return
     let start = titleIdx
@@ -734,10 +823,12 @@ function parseLinkedInEducationRules(rawLines: string[]): RawExtraction[] {
     usedUpTo = i
     const rest = m[1].replace(/[·•\s]+$/, '').trim()
     const comma = rest.indexOf(',')
+    // Tanpa koma ("S1 Sistem Informasi (2019 - 2023)"): kode gelar di depan dipisah dari bidangnya; selain itu seluruhnya gelar.
+    const level = comma > 0 ? null : readLevel(rest)
     out.push({
       school,
-      degree: comma > 0 ? rest.slice(0, comma).trim() : rest,
-      field: comma > 0 ? rest.slice(comma + 1).trim() : null,
+      degree: comma > 0 ? rest.slice(0, comma).trim() : level?.rest ? level.degree.trim() : rest,
+      field: comma > 0 ? rest.slice(comma + 1).trim() : level?.rest ? level.rest : null,
       years: m[2].trim(),
     })
   })
@@ -752,14 +843,33 @@ const MONTH_ALT = [...MONTH_LOOKUP.keys()].sort((a, b) => b.length - a.length).j
 const CV_YEAR = `(?:\\b(?:${MONTH_ALT})\\.?\\s+|\\b\\d{1,2}\\s*[/.]\\s*)?\\b(?:19[5-9]\\d|20\\d{2})\\b`
 const GRAD_WORDS = '(?:tahun\\s+lulus|lulus(?:\\s+tahun)?|graduated(?:\\s+in)?|graduation(?:\\s+year)?|expected(?:\\s+graduation)?|estimasi\\s+lulus|class\\s+of|angkatan)'
 /** Rentang tahun, atau satu tahun (kata "Lulus" di depannya ikut terbuang dari nama). */
-const CV_DATE_RE = new RegExp(`\\(?\\s*(?:\\b${GRAD_WORDS}\\s*[:\\-]?\\s*)?${CV_YEAR}(?:\\s*${RANGE_SEP}\\s*(?:${EXPECTED_BOUNDED}\\s*)?(?:${CV_YEAR}|\\b(?:${END_WORDS})\\b))?\\s*\\)?`, 'iu')
+const CV_DATE_RE = new RegExp(`\\(?\\s*(?:\\b${GRAD_WORDS}\\s*[:\\-]?\\s*)?${CV_YEAR}(?:\\s*${RANGE_SEP}\\s*(?:${EXPECTED_BOUNDED}\\s*)?(?:${CV_YEAR}|\\b(?:${END_WORDS})\\b))?(?:\\s*\\(\\s*(?:${EXPECTED_WORDS})\\s*\\))?\\s*\\)?`, 'iu')
 const CV_GPA_RE = /\(?\s*(?:cumulative\s+)?(?:IPK|IP\s+kumulatif|indeks\s+prestasi(?:\s+kumulatif)?|C?GPA)\s*[:=]?\s*(\d{1,3}(?:[.,]\d{1,2})?)(?:\s*(?:\/|dari|of|out\s+of)\s*(\d{1,3}(?:[.,]\d{1,2})?))?\s*\)?/iu
 
-const INSTITUTION_RE = /\b(?:universitas|university|universiti|institut|institute|politeknik|polytechnic|akademi|academy|college|sekolah|school|stmik|stikom|stie|stikes|sma|smk|smp|sman|smkn|smpn|madrasah)\b/iu
+const INSTITUTION_RE = /\b(?:universitas|university|universiti|institut|institute|politeknik|polytechnic|akademi|academy|college|sekolah|school|stmik|stikom|stie|stikes|sma|smk|smp|sman|smkn|smpn|madrasah|sdn?|mtsn?|slta|sltp)\b/iu
 const LEVEL_CODE_RE = /\b(?:S-?[123]|D-?(?:[1-4]|IV|III|II|I))\b/iu
 const LEVEL_WORD_RE =
   /\b(?:bachelor(?:['’]s)?(?:\s+degree)?|master(?:['’]s)?(?:\s+degree)?|doctor(?:ate)?(?:\s+degree)?|ph\.?\s?d|associate(?:['’]s)?(?:\s+degree)?|sarjana(?:\s+terapan)?|magister(?:\s+terapan)?|doktor|diploma(?:\s+(?:iv|iii|ii|i|satu|dua|tiga|empat|[1-4]))?|strata\s*[123]|profesi)\b/iu
-const SCHOOL_LEVEL_RE = /\b(?:SMA|SMK|SMP|Sekolah\s+Menengah\s+(?:Atas|Kejuruan|Pertama))\b/iu
+const SCHOOL_LEVEL_RE =
+  /\b(?:SMA[NS]?|SMK[NS]?|SMP[NS]?|SLTA|SLTP|Sekolah\s+(?:Menengah\s+(?:Atas|Kejuruan|Pertama)|Dasar)|Madrasah\s+(?:Aliyah|Tsanawiyah|Ibtidaiyah)|(?:Senior\s+|Junior\s+)?High\s+School|Secondary\s+School)\b/iu
+/** SD dan MTs ditulis huruf besar; tanpa pembeda huruf, "sd" (s/d) dan kata lain ikut terbaca sebagai jenjang. */
+const SCHOOL_LEVEL_CS_RE = /\b(?:SDN?|MTsN?)\b/u
+/** Jenjang sekolah (SMA, SMK, SD, High School, ...) dari teks, atau null. Di sekolah menengah, jenjang itulah gelarnya. */
+const schoolLevelOf = (text: string): string | null => SCHOOL_LEVEL_RE.exec(text)?.[0] ?? SCHOOL_LEVEL_CS_RE.exec(text)?.[0] ?? null
+/**
+ * Singkatan gelar: B.Sc., BSc, B.A., B.Eng., B.Tech., BBA, M.Sc., MBA, Ph.D., S.Kom., S.T., M.Kom., dan sejenisnya.
+ * Huruf besar kecilnya dipertahankan supaya kata biasa tidak terbaca sebagai gelar.
+ */
+const DEGREE_ABBR_RE =
+  /(?<![\p{L}\p{N}.])(?:B\.?\s?Sc|B\.\s?S|BS|B\.\s?A|BA|B\.?\s?Eng|B\.?\s?Tech|B\.?\s?Ed|B\.?\s?Com|BBA|M\.?\s?Sc|M\.\s?S|M\.\s?A|M\.?\s?Eng|M\.?\s?Tech|M\.?\s?Ed|MBA|Ph\.?\s?D|A\.\s?A\.?\s?S|AAS|A\.\s?S|A\.\s?A|A\.\s?Md|S\.\s?Tr\.\s?Kom|S\.\s?Kom|S\.\s?T|S\.\s?Si|S\.\s?E|S\.\s?Ak|S\.\s?H|S\.\s?Pd|S\.\s?Ds|S\.\s?Sos|S\.\s?Psi|S\.\s?Farm|S\.\s?Kep|S\.\s?IP|M\.\s?Kom|M\.\s?T|M\.\s?M|M\.\s?Si|M\.\s?Pd|M\.\s?Ak)\.?(?![\p{L}\p{N}])/u
+/** Gelar bernama lengkap yang diikuti bidang ilmu baku: "Bachelor of Science", "Master of Business Administration". */
+const DEGREE_PHRASE_RE =
+  /(?<![\p{L}])(?:Bachelor|Master|Doctor)(?:['’]s)?\s+of\s+(?:Business\s+Administration|Applied\s+Science|Fine\s+Arts|Science|Arts|Engineering|Technology|Computing|Commerce|Education|Economics|Laws|Philosophy|Management|Medicine)(?![\p{L}])/u
+/** Kata yang menandai baris pendidikan bukan sekolah: penghargaan, peringkat lomba, bootcamp, inkubator, kohort, daftar nilai mata kuliah. */
+const NON_SCHOOL_RE =
+  /\b(?:awards?|winners?|finalists?|delegates?|delegasi|bootcamps?|incubat(?:or|ion)|inkubator|cohorts?|hackathons?|competitions?|kompetisi|lomba|juara|\d+(?:st|nd|rd|th)\s+place|grade\s+[a-d][+-]?\s*:|course\s*work\s*:|mata\s+kuliah\s*:)/iu
+/** Kata institusi yang terlalu umum untuk berdiri sendiri: baru dianggap sekolah bila baris yang sama memuat gelar. */
+const WEAK_INSTITUTION_RE = /\b(?:academy|akademi|college|school)\b/giu
 const PIECE_SPLIT_RE = /\s+[-‐-―−]\s+|[|·•;,]|\s\/\s/u
 /** Kata sambung di depan bidang studi: "of Computer Science", "Jurusan IPA", "Program Studi Akuntansi". */
 const FIELD_LEAD_RE = /^(?:[\s,:;\-‐-―−·|/]+|(?:of|in|dalam|bidang|jurusan|program\s+studi|prodi|konsentrasi|peminatan|major(?:\s+in)?)\b\s*)+/iu
@@ -784,14 +894,21 @@ function isInstitutionPiece(piece: string): boolean {
 }
 
 interface CvEduEntry {
+  /** Potongan tepat sesudah nama sekolah adalah kota ("SMA Negeri 1 Contoh, Bandung"), bukan jurusan. */
+  cityAfter?: boolean
   pieces: string[]
   school: number
   years: string | null
   gpa: string | null
+  /** Entri satu baris ("Institusi, Kota | Gelar Bidang Tanggal"): gelar dan bidang sudah pasti, baris sesudahnya hanya boleh menambah IPK. */
+  fixed?: { degree: string | null; field: string | null }
 }
 
 /** Baca jenjang dari satu potongan: kode ("S1", "D3"), lalu kata ("Bachelor", "Sarjana"), dan sisa potongan sebagai bidang. */
 function readLevel(piece: string): { degree: string; rest: string } | null {
+  // Nama lengkap lebih dulu: "Master of Science in Data Science" = gelar "Master of Science", bidang "Data Science".
+  const phrase = DEGREE_PHRASE_RE.exec(piece)
+  if (phrase) return { degree: phrase[0], rest: tidyPiece(piece.slice(0, phrase.index) + ' ' + piece.slice(phrase.index + phrase[0].length)) }
   const code = LEVEL_CODE_RE.exec(piece)
   if (code) {
     const withoutCode = piece.slice(0, code.index) + ' ' + piece.slice(code.index + code[0].length)
@@ -799,12 +916,15 @@ function readLevel(piece: string): { degree: string; rest: string } | null {
   }
   const word = LEVEL_WORD_RE.exec(piece)
   if (word) return { degree: word[0], rest: tidyPiece(piece.slice(0, word.index) + ' ' + piece.slice(word.index + word[0].length)) }
+  const abbr = DEGREE_ABBR_RE.exec(piece)
+  if (abbr) return { degree: abbr[0].trim(), rest: tidyPiece(piece.slice(0, abbr.index) + ' ' + piece.slice(abbr.index + abbr[0].length)) }
   return null
 }
 
 function resolveCvEntry(e: CvEduEntry): RawExtraction {
   const school = tidyPiece(e.pieces[e.school])
-  const others = e.pieces.filter((_, i) => i !== e.school)
+  if (e.fixed) return { school, degree: e.fixed.degree, field: e.fixed.field, years: e.years, gpa: e.gpa }
+  const others = e.pieces.filter((_, i) => i !== e.school && !(e.cityAfter && i === e.school + 1))
   let degree: string | null = null
   let field: string | null = null
   const nextField = (after: number): string | null => {
@@ -819,41 +939,158 @@ function resolveCvEntry(e: CvEduEntry): RawExtraction {
   }
   if (!degree) {
     // Sekolah menengah: jenjang ada di nama sekolah ("SMA Negeri 1 ..."), jurusan di baris sesudahnya.
-    const own = SCHOOL_LEVEL_RE.exec(e.pieces[e.school])
-    const inOthers = others.findIndex((p) => SCHOOL_LEVEL_RE.test(p))
+    const own = schoolLevelOf(e.pieces[e.school])
+    const inOthers = others.findIndex((p) => schoolLevelOf(p) !== null)
     if (own) {
-      degree = own[0]
+      degree = own
       field = nextField(-1)
     } else if (inOthers >= 0) {
-      degree = SCHOOL_LEVEL_RE.exec(others[inOthers])![0]
+      degree = schoolLevelOf(others[inOthers])
       field = nextField(inOthers)
     }
   }
   return { school, degree, field, years: e.years, gpa: e.gpa }
 }
 
+/** Potong di koma pertama yang berada di luar tanda kurung: "Universitas Contoh (UC), Bandung" -> "Universitas Contoh (UC)". */
+function beforeTopLevelComma(s: string): string {
+  let depth = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === '(') depth++
+    else if (c === ')') depth = Math.max(0, depth - 1)
+    else if (c === ',' && depth === 0) return s.slice(0, i)
+  }
+  return s
+}
+
+/** Gelar dari satu potongan (nama lengkap, kode, kata, atau singkatan) dengan sisanya sebagai bidang. */
+function readDegree(seg: string): { degree: string; field: string | null } | null {
+  const level = readLevel(seg.trim())
+  return level ? { degree: level.degree.trim(), field: level.rest || null } : null
+}
+
+/** Institusi yang pasti sekolah: kata umum seperti Academy, College, dan School tidak cukup tanpa gelar di baris yang sama. */
+const isStrongInstitution = (piece: string): boolean => INSTITUTION_RE.test(piece.replace(WEAK_INSTITUTION_RE, ' '))
+
+/** Baris kontak, tautan, atau penanda halaman yang ikut terbawa ke blok pendidikan; bukan isi pendidikan. */
+const CONTACT_LINE_RE = /@|https?:\/\/|\blinkedin\.com\b|\bwww\.|^generated by\b/i
+/** Nomor telepon: diawali "+" atau "0" lalu angka; rentang tahun berspasi strip ("2019 - 2023") bukan telepon. */
+const PHONE_LINE_RE = /^(?:\+\d|0\d)[\d\s().-]{7,}$/
+const isContactLine = (l: string): boolean => CONTACT_LINE_RE.test(l) || (PHONE_LINE_RE.test(l) && !/\s[-\u2013\u2014]\s/.test(l))
+
+/** "Gelar in Bidang" tanpa kode gelar yang dikenal ("Manajemen in Manajemen"): sebelum "in" = gelar, sesudahnya = bidang. */
+const DEGREE_IN_FIELD_RE = /^(.{2,60}?)\s+in\s+(.{2,80})$/i
+
+/**
+ * Satu baris pendidikan ala CV modern, urutan bagian bebas: "Institusi (SINGKATAN), Kota | Gelar Bidang Tanggal",
+ * "Gelar in Bidang | Institusi | 2014-2018", atau "Bidang | Institusi | 2014-2018". Dipisah di "|" dan di tanda
+ * pisah panjang (en dash, em dash); institusi = potongan yang memuat kata institusi (kota di belakang koma dibuang),
+ * gelar = potongan yang memuat kode atau nama gelar (B.Sc., S1, Sarjana, Bachelor of ..., S.Kom., ...), tanggal di
+ * mana pun. Tanpa institusi atau tanpa potongan lain, baris bukan entri satu baris (mis. baris bootcamp) dan null
+ * yang dikembalikan. Gelar bisa null (nama sekolah memuat jenjangnya, atau CV tidak menulis gelar).
+ */
+function parsePipeEducationLine(rest: string, hasYears: boolean): { school: string; degree: string | null; field: string | null } | null {
+  const segments = rest.split(/\s*\|\s*|\s+[–—]\s+/).map((p) => p.trim()).filter((p) => /[\p{L}\p{N}]/u.test(p))
+  if (segments.length < 2) return null
+  const nameOf = (seg: string) => tidyPiece(beforeTopLevelComma(seg))
+  const candidates = segments.map((seg, i) => i).filter((i) => isInstitutionPiece(nameOf(segments[i])))
+  // Potongan gelar bisa memuat kata institusi ("Master of Education in School Counseling"): institusi pasti yang bukan gelar didahulukan.
+  const at = candidates.find((i) => isStrongInstitution(nameOf(segments[i])) && !readDegree(segments[i])) ?? candidates.find((i) => isStrongInstitution(nameOf(segments[i]))) ?? candidates[0] ?? -1
+  if (at < 0) return null
+  const school = nameOf(segments[at])
+  const others = segments.filter((_, i) => i !== at)
+  let degree: string | null = null
+  let field: string | null = null
+  for (const seg of others) {
+    const deg = readDegree(seg)
+    if (!deg) continue
+    degree = deg.degree
+    field = deg.field
+    break
+  }
+  if (!degree) {
+    // Sekolah menengah dan sejenisnya: jenjang ada di nama sekolah ("SMA Negeri 1 Contoh | IPA | 2017 - 2020").
+    const level = schoolLevelOf(school)
+    const rest2 = others.filter((seg) => !isInstitutionPiece(seg))
+    if (level) {
+      degree = level
+      field = rest2[0] ? tidyPiece(rest2[0]) || null : null
+    } else {
+      for (const seg of rest2) {
+        const m = DEGREE_IN_FIELD_RE.exec(seg)
+        if (!m) continue
+        degree = tidyPiece(m[1]) || null
+        field = fold(m[1]) === fold(m[2]) ? null : tidyPiece(m[2]) || null
+        break
+      }
+      if (!degree && hasYears && rest2[0] && wordCount(rest2[0]) <= 8) field = tidyPiece(rest2[0]) || null
+    }
+  }
+  // Institusi umum (Academy, College, School) hanya sah bila potongan lain memastikan ini pendidikan formal.
+  if (!isStrongInstitution(school) && !degree) return null
+  if (!degree && !field) return null
+  return { school, degree, field }
+}
+
+/** Nama kota: satu sampai tiga kata berhuruf kapital, tanpa angka, bukan gelar atau institusi. */
+const isCityPiece = (p: string): boolean => wordCount(p) <= 3 && /^\p{Lu}[^\d]*$/u.test(p) && readLevel(p) === null && schoolLevelOf(p) === null && !isInstitutionPiece(p)
+
+/** Semua potongan sudah lengkap: gelar dan tahun terbaca, sehingga baris berikutnya yang memuat gelar atau tahun milik entri berikutnya. */
+const isCompleteEntry = (e: CvEduEntry): boolean => {
+  const r = resolveCvEntry(e)
+  return !!r.degree && !!e.years
+}
+
 /**
  * Pendidikan pada CV biasa (bukan ekspor LinkedIn). Tiap baris yang memuat nama institusi (Universitas, Politeknik,
  * SMA, ...) membuka satu entri. Tahun dan IPK dikenali di baris mana pun; baris yang hanya berisi tahun dipasang ke
  * entri yang sedang dibaca bila entri itu belum punya tahun, selain itu ke entri berikutnya (tata letak "tahun di
- * depan"). Jenjang dicari dari kode (S1, D3), kata (Sarjana, Bachelor), atau nama sekolah (SMA); entri tanpa jenjang
- * atau tanpa tahun tetap dikeluarkan supaya normalizeExtraction menghitungnya sebagai dibuang. Tidak ada yang ditebak.
+ * depan"). Baris gelar yang datang sebelum baris institusi (tata letak "gelar di depan") dipasang ke entri berikutnya
+ * bila entri yang sedang dibaca sudah lengkap. Jenjang dicari dari kode (S1, D3), kata (Sarjana, Bachelor), singkatan
+ * (B.Sc., S.Kom.), atau nama sekolah (SMA, SD, High School); entri tanpa jenjang atau tanpa tahun tetap dikeluarkan
+ * supaya normalizeExtraction menghitungnya sebagai dibuang. Tidak ada yang ditebak.
+ *
+ * Bukan entri baru: baris penghargaan, peringkat lomba, bootcamp, inkubator, kohort, dan daftar nilai mata kuliah;
+ * baris kontak; kata institusi yang umum (Academy, College, School) tanpa gelar di baris yang sama; dan kata institusi
+ * yang bukan di awal baris tanpa gelar ("2nd Place, University ..."). Baris satu entri dibaca utuh (lihat
+ * parsePipeEducationLine); baris sesudahnya (IPK, daftar nilai) tidak lagi menambah potongan ke entri itu.
  */
 function parseCvEducationRules(lines: string[]): RawExtraction[] {
   const entries: CvEduEntry[] = []
   let cur: CvEduEntry | null = null
   let pendingYears: string | null = null
+  let prelude: string[] = []
   for (const raw of lines) {
+    if (isContactLine(raw)) continue
     const g = takeMatch(raw, CV_GPA_RE)
     const d = takeMatch(g.rest, CV_DATE_RE)
     const gpa = g.match ? (g.match[2] ? `${g.match[1]}/${g.match[2]}` : g.match[1]) : null
     const years = d.match ? d.match[0].replace(/^[\s(]+|[\s)]+$/g, '') : null
+    const one = parsePipeEducationLine(d.rest, !!years || !!pendingYears)
+    if (one) {
+      cur = { pieces: [one.school], school: 0, years: years ?? pendingYears, gpa, fixed: { degree: one.degree, field: one.field } }
+      if (!years) pendingYears = null
+      prelude = []
+      entries.push(cur)
+      continue
+    }
+    if (NON_SCHOOL_RE.test(raw)) {
+      if (cur && gpa && !cur.gpa) cur.gpa = gpa
+      continue
+    }
     const pieces = d.rest.split(PIECE_SPLIT_RE).map((p) => p.trim()).filter((p) => /[\p{L}\p{N}]/u.test(p))
     const schoolAt = pieces.findIndex(isInstitutionPiece)
     if (schoolAt >= 0) {
-      cur = { pieces, school: schoolAt, years: years ?? pendingYears, gpa }
-      if (!years) pendingYears = null
-      entries.push(cur)
+      const lineHasDegree = readLevel(raw) !== null || schoolLevelOf(raw) !== null
+      if ((schoolAt === 0 || lineHasDegree) && (isStrongInstitution(pieces[schoolAt]) || lineHasDegree)) {
+        const after = pieces[schoolAt + 1]
+        const cityAfter = !!after && schoolLevelOf(pieces[schoolAt]) !== null && isCityPiece(after) && d.rest.includes(`${pieces[schoolAt]},`)
+        cur = { pieces: [...prelude, ...pieces], school: prelude.length + schoolAt, years: years ?? pendingYears, gpa, cityAfter }
+        if (!years) pendingYears = null
+        prelude = []
+        entries.push(cur)
+      } else if (cur && gpa && !cur.gpa) cur.gpa = gpa
       continue
     }
     if (pieces.length === 0) {
@@ -865,10 +1102,17 @@ function parseCvEducationRules(lines: string[]): RawExtraction[] {
       }
       continue
     }
-    if (!cur) continue
-    cur.pieces.push(...pieces)
-    if (years && !cur.years) cur.years = years
+    const hasDegree = pieces.some((p) => readLevel(p) !== null || schoolLevelOf(p) !== null)
+    if (!cur || (isCompleteEntry(cur) && (hasDegree || years))) {
+      // Belum ada entri, atau entri sebelumnya sudah lengkap: baris ini mendahului institusi berikutnya.
+      prelude = [...prelude, ...pieces].slice(-4)
+      if (years && !pendingYears) pendingYears = years
+      continue
+    }
     if (gpa && !cur.gpa) cur.gpa = gpa
+    if (years && !cur.years) cur.years = years
+    if (cur.fixed) continue
+    cur.pieces.push(...pieces)
   }
   return entries.map(resolveCvEntry)
 }
@@ -1399,7 +1643,8 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     const title = line(e?.title ?? e?.role_title)
     const rangeText = line(e?.date_range ?? e?.dates) || [line(e?.start), line(e?.end) || (e?.is_current === true ? 'Present' : '')].filter(Boolean).join(' - ')
     const range = e ? parseDateRange(rangeText, ctx.now) : null
-    const key = `${fold(company)}|${fold(title)}`
+    // Jabatan yang sama di perusahaan yang sama pada dua periode (kembali bekerja di sana) adalah dua pengalaman; kuncinya memuat tanggal mulai.
+    const key = `${fold(company)}|${fold(title)}|${range?.start ?? ''}`
     if (!e || !company || !title || company.length > LIMITS.name || title.length > LIMITS.name || !grounded(company) || !grounded(title) || !range || seenExp.has(key)) {
       dropped.experiences++
       continue
@@ -1454,15 +1699,15 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     let endYear: number | null = null
     let isCurrent = false
     if (ok && years) {
-      // Hanya satu tahun dan itu perkiraan lulus ("Expected 2027"): tahun masuknya tidak diketahui, jadi tidak ditebak.
-      if (years.expected && years.end === null) ok = false
-      else if (years.start < MIN_YEAR || years.start > nowYear) ok = false
+      // Satu tahun yang di masa depan ("Expected 2027", "Estimasi lulus 2030") tidak punya tahun masuk yang bisa dipakai, jadi terbuang.
+      if (years.start < MIN_YEAR || years.start > nowYear) ok = false
       else if (years.end === 'present') isCurrent = true
       else if (years.end === null) {
         // CV sering hanya menulis tahun lulus ("Lulus 2023"). Satu tahun itu dipakai untuk masuk dan lulus, dengan
         // catatan; rentang yang menggantung ("2019 -") tetap dibuang karena maksudnya tidak jelas.
         if (isSingleYear(yearsText)) {
           endYear = years.start
+          isCurrent = years.expected === true
           notes.push(`Hanya satu tahun (${years.start}) tercantum di PDF, jadi dipakai sebagai tahun masuk dan tahun lulus. Ubah bila perlu.`)
         } else ok = false
       } else if (years.end < years.start || years.end > nowYear + MAX_YEARS_AHEAD) ok = false

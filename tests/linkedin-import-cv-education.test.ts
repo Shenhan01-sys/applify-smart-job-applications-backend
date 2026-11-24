@@ -221,7 +221,7 @@ test('aturan: CV Inggris, satu baris per entri (tahun, institusi, gelar, GPA) da
     ].join('\n'),
   )
   assert.deepEqual(rows(n), [
-    ['Universitas Fiktif Barat', 'Master', 'Science in Data Science', 2025, 2025, false],
+    ['Universitas Fiktif Barat', 'Master of Science', 'Data Science', 2025, 2025, false],
     ['Fiktif Institute of Technology', 'Bachelor', 'Computer Science', 2019, 2023, false],
   ])
   assert.equal(n.education[1].gpa, 3.8)
