@@ -145,7 +145,8 @@ test('flag off: GET says enabled false, PUT and test answer 403, DELETE still wo
   const list = await get(b)
   assert.equal(list.statusCode, 200)
   assert.equal(list.json().enabled, false)
-  assert.equal(list.json().keys.length, 1)
+  assert.deepEqual(list.json().keys, [], 'flag off: the table is not read and no key is listed')
+  assert.equal(b.selects.filter((s) => s.table === LLM_KEYS_TABLE).length, 0, 'flag off: GET does not query the table')
 
   const p = await put(b, 'anthropic', { apiKey: KEY2 })
   assert.equal(p.statusCode, 403)
@@ -162,6 +163,39 @@ test('flag off: GET says enabled false, PUT and test answer 403, DELETE still wo
   assert.equal(d.statusCode, 200)
   assert.deepEqual(d.json(), { deleted: true })
   assert.equal(rows(b).length, 0)
+  await b.app.close()
+})
+
+test('GET with the flag off answers 200 { enabled:false, keys:[] } even when the table is missing or broken', async () => {
+  for (const [code, message] of [['42P01', 'relation "user_llm_keys" does not exist'], ['PGRST205', 'Could not find the table'], ['XX000', 'boom']]) {
+    const broken = new FakeDb()
+    broken.failOn(LLM_KEYS_TABLE, 'select', message, code)
+    const b = await build({ db: broken, env: {} })
+    const res = await get(b)
+    assert.equal(res.statusCode, 200, code)
+    assert.deepEqual(res.json(), { enabled: false, providers: ALL_PROVIDERS, keys: [] }, code)
+    assert.equal(b.selects.filter((s) => s.table === LLM_KEYS_TABLE).length, 0, `${code}: table not queried`)
+    await b.app.close()
+  }
+})
+
+test('GET with the flag on but the table missing (migration not run): 200 { enabled:false, keys:[] }, not 500', async () => {
+  for (const code of ['42P01', 'PGRST205']) {
+    const broken = new FakeDb()
+    broken.failOn(LLM_KEYS_TABLE, 'select', 'relation "user_llm_keys" does not exist', code)
+    const b = await build({ db: broken })
+    const res = await get(b)
+    assert.equal(res.statusCode, 200, code)
+    assert.deepEqual(res.json(), { enabled: false, providers: ALL_PROVIDERS, keys: [] }, code)
+    await b.app.close()
+  }
+  // Any other database failure with the flag on is still a server error without the database text.
+  const broken = new FakeDb()
+  broken.failOn(LLM_KEYS_TABLE, 'select', 'secret db detail', 'XX000')
+  const b = await build({ db: broken })
+  const res = await get(b)
+  assert.equal(res.statusCode, 500)
+  assert.equal(res.body.includes('secret db detail'), false)
   await b.app.close()
 })
 

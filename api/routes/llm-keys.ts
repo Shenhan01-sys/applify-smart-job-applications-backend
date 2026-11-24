@@ -113,12 +113,22 @@ export async function llmKeysRoutes(app: FastifyInstance, opts: LlmKeysRouteOpti
     const userId = (request as any).user?.id
     if (!userId) return reply.status(401).send({ code: 'unauthorized' })
 
+    // Flag mati: jawab tanpa menyentuh tabel. Tabel `user_llm_keys` belum tentu ada di database yang belum dimigrasi,
+    // dan fitur yang dimatikan tidak perlu membaca apa pun (dulu ini 500 `internal_error` untuk setiap pengguna).
+    const enabled = byokEnabled(env)
+    if (!enabled) return reply.send({ enabled: false, providers: [...BYOK_PROVIDERS], keys: [] })
+
     const db = await getDb()
     const { data, error } = await db
       .from(LLM_KEYS_TABLE)
       .select('provider, key_last4, status, last_validated_at, updated_at, model')
       .eq('user_id', userId)
       .order('provider', { ascending: true })
+    // Tabel belum dimigrasi (42P01 / PGRST205): fitur belum tersedia, bukan galat server.
+    if (error && (error.code === '42P01' || error.code === 'PGRST205')) {
+      request.log.warn({ dbCode: error.code }, 'llm-keys table missing, reporting the feature as disabled')
+      return reply.send({ enabled: false, providers: [...BYOK_PROVIDERS], keys: [] })
+    }
     if (error) return dbFailure(request, reply, 'list', error)
 
     const keys = (data ?? []).map((row: any) => ({
@@ -129,7 +139,7 @@ export async function llmKeysRoutes(app: FastifyInstance, opts: LlmKeysRouteOpti
       updatedAt: row.updated_at ?? null,
       model: row.model ?? null,
     }))
-    return reply.send({ enabled: byokEnabled(env), providers: [...BYOK_PROVIDERS], keys })
+    return reply.send({ enabled: true, providers: [...BYOK_PROVIDERS], keys })
   })
 
   // ---- PUT /:provider ----------------------------------------------------------------------------------------
