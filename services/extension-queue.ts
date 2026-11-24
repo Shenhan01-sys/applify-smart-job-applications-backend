@@ -3,6 +3,7 @@ import { ExtensionRunnerError, isUuid, verifyExtensionApproval } from './extensi
 import type { GuardDb } from './queue-guard.js'
 import { sweepExtensionJobs } from './extension-sweep.js'
 import { leaseHolds, newLeaseId, parseLeaseId, readQueueRow, warnMissingLease } from './extension-lease.js'
+import { describeExtensionWait, sanitizeReleaseError, type ExtensionWait } from './extension-wait-reason.js'
 
 /**
  * Layanan antrean khusus Ekstensi Browser (`job_type = 'extension_apply'`).
@@ -52,12 +53,6 @@ export function isMissingQueueSchemaError(err: { code?: string; message?: string
 
 function validQueueId(id: unknown): id is string {
   return isUuid(id)
-}
-
-function cleanReleaseError(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null
-  const text = raw.replace(/[\r\n\t]+/g, ' ').trim().slice(0, 240)
-  return text || null
 }
 
 function lastHeartbeatMs(row: Record<string, any>): number {
@@ -374,7 +369,7 @@ export async function releaseExtensionJob(
   queueJobId: string,
   opts: { terminal?: boolean; error?: string; countRetry?: boolean; delaySeconds?: number; leaseId?: unknown } = {},
   now: Date = new Date()
-): Promise<{ ok: true; queueJobId: string; status: 'pending' | 'failed'; retryCount: number }> {
+): Promise<{ ok: true; queueJobId: string; status: 'pending' | 'failed'; retryCount: number } & ExtensionWait> {
   if (!validQueueId(queueJobId)) {
     throw new ExtensionRunnerError(400, 'invalid_job_id', 'ID tugas antrean tidak valid')
   }
@@ -407,11 +402,15 @@ export async function releaseExtensionJob(
   const delaySec = Math.max(0, Math.min(Number(opts.delaySeconds ?? DEFAULT_RELEASE_DELAY_SEC) || 0, 900))
   const iso = now.toISOString()
 
+  // Alasan menunggu (mis. `permission_required:<host> — ...`) disimpan sebagai awalan stabil di error_message; kolom
+  // alasan tidak ada. Awalan dengan host rusak diganti pesan lama (extension-wait-reason.ts).
+  const errorMessage = sanitizeReleaseError(opts.error)
+  const scheduledAt = nextStatus === 'pending' ? new Date(now.getTime() + delaySec * 1000).toISOString() : iso
   const basePatch: Record<string, any> = {
     status: nextStatus,
     retry_count: nextRetry,
-    error_message: cleanReleaseError(opts.error),
-    scheduled_at: nextStatus === 'pending' ? new Date(now.getTime() + delaySec * 1000).toISOString() : iso,
+    error_message: errorMessage,
+    scheduled_at: scheduledAt,
     ...(nextStatus === 'failed' ? { completed_at: iso } : { processed_at: null }),
   }
   const fullPatch = { ...basePatch, heartbeat_at: null, claimed_by: null }
@@ -436,5 +435,9 @@ export async function releaseExtensionJob(
   if (!Array.isArray(res.data) || res.data.length === 0) {
     throw new ExtensionRunnerError(409, 'release_conflict', 'Status tugas berubah sebelum dilepas')
   }
-  return { ok: true, queueJobId, status: nextStatus, retryCount: nextRetry }
+  const wait = describeExtensionWait(
+    { job_type: EXTENSION_QUEUE_JOB_TYPE, status: nextStatus, error_message: errorMessage, scheduled_at: scheduledAt },
+    now.getTime()
+  )
+  return { ok: true, queueJobId, status: nextStatus, retryCount: nextRetry, ...wait }
 }
