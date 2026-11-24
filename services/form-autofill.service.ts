@@ -34,6 +34,13 @@ export interface FillResult {
   needsReview: boolean
 }
 
+/** Angka positif dari kolom numerik pengaturan. Kosong, null, NaN, 0, atau negatif = belum diisi (null). */
+export function positiveSettingNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const n = typeof value === 'number' ? value : Number(String(value).trim())
+  return String(value).trim() !== '' && Number.isFinite(n) && n > 0 ? n : null
+}
+
 export class FormAutofillService {
   /**
    * Fill a single form field based on type and label
@@ -174,19 +181,22 @@ export class FormAutofillService {
       return { value: years, confidence: years ? 0.95 : 0 }
     }
 
-    // Salary
+    // Salary. Kolom kosong, 0, atau tidak terbaca bukan gaji: jawaban "0" menyesatkan (UI lama menyimpan 0 untuk kolom
+    // yang dikosongkan), jadi nilainya kosong dengan keyakinan 0 dan pengguna yang mengisi, sama seperti kota.
     if (label.includes('salary') || label.includes('compensation') || label.includes('ctc') || label.includes('pay')) {
-      if (label.includes('current') || label.includes('present')) {
-        return { value: settings.current_ctc?.toString() || '', confidence: 0.9 }
-      }
-      return { value: settings.desired_salary?.toString() || '', confidence: 0.9 }
+      const amount = positiveSettingNumber(
+        label.includes('current') || label.includes('present') ? settings.current_ctc : settings.desired_salary
+      )
+      return amount === null ? { value: '', confidence: 0 } : { value: String(amount), confidence: 0.9 }
     }
 
-    // Notice period
+    // Notice period. Hanya nilai tersimpan yang dipakai; 30 hari bukan jawaban bawaan yang boleh diada-adakan.
+    // Satuan yang menghasilkan 0 (mis. 14 hari dalam bulan) juga dibiarkan kosong untuk pengguna.
     if (label.includes('notice') || label.includes('availability')) {
-      if (label.includes('month')) return { value: Math.floor((settings.notice_period || 30) / 30).toString(), confidence: 0.9 }
-      if (label.includes('week')) return { value: Math.floor((settings.notice_period || 30) / 7).toString(), confidence: 0.9 }
-      return { value: (settings.notice_period || 30).toString(), confidence: 0.9 }
+      const days = positiveSettingNumber(settings.notice_period)
+      if (days === null) return { value: '', confidence: 0 }
+      const inUnit = label.includes('month') ? Math.floor(days / 30) : label.includes('week') ? Math.floor(days / 7) : days
+      return inUnit > 0 ? { value: String(inUnit), confidence: 0.9 } : { value: '', confidence: 0 }
     }
 
     // Visa

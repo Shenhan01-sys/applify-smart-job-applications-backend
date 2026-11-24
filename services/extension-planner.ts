@@ -9,6 +9,7 @@ export interface CompleteJsonRequest {
   deadlineAt?: number
 }
 import { stripCodeFence, stripReasoning } from './ai-output-guard.js'
+import { positiveSettingNumber } from './form-autofill.service.js'
 import { cityFromLocation, countryFromLocation, isUnconfirmedVisaDefault } from './applicant-fallbacks.js'
 import { isYesLike, workAuthorizationFromUsCitizenship } from './us-work-authorization.js'
 import { matchOptionStrict } from './option-match.js'
@@ -413,8 +414,9 @@ function buildFactTokens(args: {
   put('linkedin_url', cleanLine(settings?.linkedin_url || profile?.linkedin_url || '', 240))
   put('portfolio_url', cleanLine(settings?.website || settings?.portfolio_url || profile?.portfolio_url || '', 240))
   put('github_url', cleanLine(settings?.github_url || profile?.github_url || '', 240))
-  const desiredSalary = settings?.desired_salary ?? settings?.expected_salary
-  put('expected_salary', desiredSalary != null && String(desiredSalary).trim() !== '' ? String(desiredSalary) : '')
+  // Gaji 0 (UI lama menyimpan 0 untuk kolom kosong) bukan jawaban: token dikosongkan supaya tidak terisi "0".
+  const desiredSalary = positiveSettingNumber(settings?.desired_salary ?? settings?.expected_salary)
+  put('expected_salary', desiredSalary !== null ? String(desiredSalary) : '')
   put('years_of_experience', expYears)
   const authFromCitizen = workAuthorizationFromUsCitizenship(settings?.us_citizenship, jobLocation)
   put('work_authorization', cleanLine(settings?.work_authorization || authFromCitizen, 120))

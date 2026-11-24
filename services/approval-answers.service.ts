@@ -1,4 +1,4 @@
-import { formAutofillService, type FillResult, type FormContext, type FormField } from './form-autofill.service.js'
+import { formAutofillService, positiveSettingNumber, type FillResult, type FormContext, type FormField } from './form-autofill.service.js'
 import { buildAchievementLines } from './profile-context.js'
 import { deriveExperienceYears } from './experience-years.js'
 import {
@@ -7,6 +7,9 @@ import {
   countryFromLocation,
   isUnconfirmedVisaDefault,
 } from './applicant-fallbacks.js'
+
+/** Kolom numerik Pengaturan Otomasi yang nilainya harus positif agar dianggap sudah diisi. */
+const POSITIVE_NUMBER_REQUIRES = new Set(['desired_salary', 'current_ctc', 'notice_period'])
 
 /**
  * Jawaban formulir standar yang disiapkan agen untuk satu lamaran, lengkap dengan skor keyakinan, supaya
@@ -228,7 +231,11 @@ export async function buildApprovalAnswers(
 
   const out: ApprovalAnswer[] = []
   for (const q of standardQuestions(job.company)) {
-    const missing = q.requires ? isBlank(q.requires === 'email' ? profile.email : settings[q.requires]) : false
+    const missing = q.requires
+      ? isBlank(q.requires === 'email' ? profile.email : settings[q.requires]) ||
+        // Gaji dan masa pemberitahuan 0 (UI lama menyimpan 0 untuk kolom kosong) belum diisi, bukan jawaban.
+        (POSITIVE_NUMBER_REQUIRES.has(q.requires) && positiveSettingNumber(settings[q.requires]) === null)
+      : false
     if (missing) {
       // Tanpa data sumber, nilai bawaan aturan (mis. "0 tahun") hanya menyesatkan: kosongkan dan tandai.
       out.push({ question: q.display, answer: '', confidence: 0, needs_review: true, source: 'default' })
