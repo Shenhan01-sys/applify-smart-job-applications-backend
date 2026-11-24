@@ -13,6 +13,7 @@ import { cityFromLocation, countryFromLocation, isUnconfirmedVisaDefault } from 
 import { isYesLike, workAuthorizationFromUsCitizenship } from './us-work-authorization.js'
 import { matchOptionStrict } from './option-match.js'
 import { isLinkedInUrl, sanitizeHttpUrl } from './apply-channel.js'
+import { EXTERNAL_AUTH_PORTAL_MAP } from './domain-manifest.generated.js'
 import { deriveExperienceYears } from './experience-years.js'
 import { ACHIEVEMENT_GROUNDING_RULE, ACHIEVEMENT_HEADING, buildAchievementLines } from './profile-context.js'
 import type { GuardDb } from './queue-guard.js'
@@ -190,8 +191,27 @@ const CLOSED_PATTERNS = [
   /\blowongan\s+(?:sudah\s+)?(?:ditutup|berakhir)\b/i,
 ]
 
-const AUTH_URL_HINTS = [/\/login\b/i, /\/signin\b/i, /\/sign-in\b/i, /\/auth\b/i, /\/sso\b/i]
-const AUTH_TEXT_HINTS = [/\bsign in to apply\b/i, /\blog in to apply\b/i, /\bmasuk untuk melamar\b/i]
+const EXTERNAL_AUTH_HOSTS: readonly string[] = [
+  'accounts.google.com',
+  ...new Set(Object.values(EXTERNAL_AUTH_PORTAL_MAP).flat()),
+]
+
+function isExternalAuthHostname(rawHost: string): boolean {
+  const host = rawHost.toLowerCase().replace(/^www\./, '').replace(/\.$/, '')
+  if (!host) return false
+  return EXTERNAL_AUTH_HOSTS.some((d) => host === d || host.endsWith(`.${d}`))
+}
+
+const AUTH_URL_HINTS = [/\/login\b/i, /\/signin\b/i, /\/sign-in\b/i, /\/signup\b/i, /\/sign-up\b/i, /\/oauth\b/i, /\/auth\b/i, /\/sso\b/i, /\/daftar\b/i, /\/masuk\b/i]
+const AUTH_TEXT_HINTS = [
+  /\bsign in to apply\b/i,
+  /\blog in to apply\b/i,
+  /\bmasuk untuk melamar\b/i,
+  /\bkirimkan saya kode masuk\b/i,
+  /\bsign in with google\b/i,
+  /\bcontinue with google\b/i,
+  /\bmasuk dengan (?:email|google)\b/i,
+]
 
 export function detectExtensionBlocker(args: {
   pageUrl: string
@@ -231,13 +251,24 @@ export function detectExtensionBlocker(args: {
     }
   }
 
-  const path = (() => {
+  const parsedUrl = (() => {
     try {
-      return new URL(pageUrl).pathname
+      return new URL(pageUrl)
     } catch {
-      return ''
+      return null
     }
   })()
+  const path = parsedUrl?.pathname ?? ''
+  const host = parsedUrl?.hostname ?? ''
+
+  // Host autentikasi eksternal (mis. login.seek.com untuk JobStreet yang memakai OTP email tanpa input password)
+  // langsung dikenali sebagai butuh login meski ada input email OTP di halaman.
+  if (isExternalAuthHostname(host)) {
+    return {
+      reason: 'auth_required',
+      note: 'Halaman berada di domain autentikasi portal (login). Masuk dulu di tab browser hingga kembali ke halaman lamaran.',
+    }
+  }
 
   if (hasPasswordInput || (formControlsCount === 0 && (AUTH_URL_HINTS.some((p) => p.test(path)) || AUTH_TEXT_HINTS.some((p) => p.test(noticeText))))) {
     return {

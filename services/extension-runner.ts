@@ -53,6 +53,7 @@ const MAX_REMAINING_REQUIRED = 20
 export type ExtensionRunOutcome =
   | 'ready'
   | 'incomplete'
+  | 'awaiting_login'
   | 'submitted'
   | 'submit_unverified'
   | 'not_submitted'
@@ -74,6 +75,7 @@ export const RELEASE_OUTCOMES: ReadonlySet<ExtensionRunOutcome> = new Set<Extens
 const VALID_OUTCOMES: ReadonlySet<string> = new Set<ExtensionRunOutcome>([
   'ready',
   'incomplete',
+  'awaiting_login',
   'submitted',
   'submit_unverified',
   'not_submitted',
@@ -105,6 +107,8 @@ export interface ExtensionApprovalSummary {
   reason: string
   coverLetter: string | null
   expiresAt: string
+  queueJobId?: string | null
+  queueStatus?: string | null
 }
 
 export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v)
@@ -272,9 +276,9 @@ export async function listPendingExtensionApprovals(
     db.from(APPROVAL_CLAIM_TABLE).select('approval_request_id').in('approval_request_id', approvalIds),
     db
       .from('automation_queue')
-      .select('id, status, payload')
+      .select('id, job_type, status, payload')
       .eq('user_id', userId)
-      .eq('job_type', 'apply')
+      .in('job_type', ['apply', 'extension_apply'])
       .in('status', ['pending', 'processing'])
       .in('payload->>approval_request_id', approvalIds)
       .limit(100),
@@ -286,6 +290,7 @@ export async function listPendingExtensionApprovals(
   if (queueRes.error) throw new ExtensionRunnerError(500, 'queue_lookup_failed', 'Gagal memeriksa antrian worker')
 
   const blockedApprovalIds = new Set<string>()
+  const extQueueByApproval = new Map<string, { id: string; status: string }>()
   for (const l of Array.isArray(sentRes.data) ? sentRes.data : []) {
     const id = l?.details?.approval_request_id
     if (typeof id === 'string') blockedApprovalIds.add(id)
@@ -295,7 +300,12 @@ export async function listPendingExtensionApprovals(
   }
   for (const q of Array.isArray(queueRes.data) ? queueRes.data : []) {
     const id = q?.payload?.approval_request_id
-    if (typeof id === 'string') blockedApprovalIds.add(id)
+    if (typeof id !== 'string') continue
+    if (q?.job_type === 'apply') {
+      blockedApprovalIds.add(id)
+    } else if (q?.job_type === 'extension_apply' && !extQueueByApproval.has(id)) {
+      extQueueByApproval.set(id, { id: String(q.id), status: String(q.status ?? 'pending') })
+    }
   }
 
   const jobById = new Map<string, any>((Array.isArray(jobsRes.data) ? jobsRes.data : []).map((j: any) => [j.id, j]))
@@ -306,6 +316,7 @@ export async function listPendingExtensionApprovals(
     const job = jobById.get(a.job_id) ?? {}
     const classified = classifyJobChannel(job)
     if (classified.manualOnly) continue
+    const qInfo = extQueueByApproval.get(a.id)
     results.push({
       approvalId: a.id,
       jobId: a.job_id,
@@ -320,6 +331,7 @@ export async function listPendingExtensionApprovals(
       reason: classified.reason,
       coverLetter: typeof a.cover_letter === 'string' ? a.cover_letter : null,
       expiresAt: a.expires_at,
+      ...(qInfo ? { queueJobId: qInfo.id, queueStatus: qInfo.status } : {}),
     })
   }
 
@@ -439,6 +451,20 @@ export async function authorizeExtensionSubmit(
       'daily_quota_exceeded',
       `Batas kiriman harian (${quota.used}/${quota.limit}) sudah penuh untuk paket ${quota.tier}.`
     )
+  }
+
+  // Pastikan tidak ada tugas worker `apply` yang sedang berjalan untuk persetujuan ini sebelum klaim.
+  const { data: activeWorker, error: workerQueueErr } = await db
+    .from('automation_queue')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('job_type', 'apply')
+    .in('status', ['pending', 'processing'])
+    .eq('payload->>approval_request_id', input.approvalId)
+    .limit(1)
+  if (workerQueueErr) throw new ExtensionRunnerError(500, 'queue_lookup_failed', 'Gagal memeriksa antrian worker')
+  if (Array.isArray(activeWorker) && activeWorker.length > 0) {
+    throw new ExtensionRunnerError(409, 'agent_working', 'Agen worker sedang mengerjakan persetujuan ini.')
   }
 
   // Terakhir, setelah semua pemeriksaan lain: klaim atomik. Hanya satu pemanggil yang boleh menekan Submit.
@@ -613,6 +639,8 @@ function buildSubmitCheck(raw: unknown, outcome: ExtensionRunOutcome, pageUrl: s
 function reasonFor(outcome: ExtensionRunOutcome, clientReason: unknown, filledCount: number): string | null {
   const given = typeof clientReason === 'string' && /^[a-z0-9_]{1,40}$/.test(clientReason) ? clientReason : null
   switch (outcome) {
+    case 'awaiting_login':
+      return 'awaiting_login'
     case 'validation_error':
       return 'validation_failed'
     case 'cancelled':
@@ -626,12 +654,17 @@ function reasonFor(outcome: ExtensionRunOutcome, clientReason: unknown, filledCo
   }
 }
 
+export const EXTENSION_AWAITING_LOGIN_MAX_MS = 15 * 60 * 1000
+
 export interface ReportRunInput {
   approvalId: string
   jobId: string
   pageUrl: string
   outcome: ExtensionRunOutcome
   runId?: string | null
+  queueJobId?: string | null
+  awaitingUntil?: string | null
+  loginUrl?: string | null
   reason?: string | null
   filledCount?: number
   filledFields?: unknown
@@ -648,7 +681,7 @@ export interface ReportRunInput {
 export interface ReportRunResult {
   ok: true
   runId: string
-  logStatus: 'success' | 'submit_unverified' | 'ready' | 'incomplete'
+  logStatus: 'success' | 'submit_unverified' | 'ready' | 'incomplete' | 'awaiting_login'
   applicationStatus: ApplicationStatus | null
   screenshots: { filledPath: string | null; afterPath: string | null }
   /** true bila klaim `approval_submit_claims` milik run ini dihapus (hanya pada hasil "tidak terkirim" dengan `runId` yang cocok). */
@@ -734,21 +767,53 @@ export async function reportExtensionRun(
 
   // 3. Baris log dengan kunci `details` worker.
   const logStatus: ReportRunResult['logStatus'] =
-    outcome === 'submitted' ? 'success' : outcome === 'submit_unverified' ? 'submit_unverified' : outcome === 'ready' ? 'ready' : 'incomplete'
+    outcome === 'submitted'
+      ? 'success'
+      : outcome === 'submit_unverified'
+        ? 'submit_unverified'
+        : outcome === 'ready'
+          ? 'ready'
+          : outcome === 'awaiting_login'
+            ? 'awaiting_login'
+            : 'incomplete'
 
-  const filledFields = sanitizeFilledFields(input.filledFields)
-  const questions = sent ? [] : sanitizePendingQuestions(input.questions)
+  const awaitingLogin = outcome === 'awaiting_login'
+  const queueJobId = isUuid(input.queueJobId) ? input.queueJobId : null
+  const awaitingUntilIso = (() => {
+    if (!awaitingLogin) return null
+    const maxAt = now.getTime() + EXTENSION_AWAITING_LOGIN_MAX_MS
+    const raw = typeof input.awaitingUntil === 'string' ? Date.parse(input.awaitingUntil) : NaN
+    const clamped = Number.isFinite(raw) && raw > now.getTime() ? Math.min(raw, maxAt) : maxAt
+    return new Date(clamped).toISOString()
+  })()
+  const cleanLoginUrl = (() => {
+    if (!awaitingLogin) return null
+    const safe = sanitizeHttpUrl(input.loginUrl ?? pageUrl)
+    if (!safe || isLinkedInUrl(safe)) return null
+    const u = new URL(safe)
+    return `${u.origin}${u.pathname}`
+  })()
+
+  const filledFields = awaitingLogin ? [] : sanitizeFilledFields(input.filledFields)
+  const questions = sent || awaitingLogin ? [] : sanitizePendingQuestions(input.questions)
   // Kontrol rahasia dicatat terpisah (label saja): `details.questions` hanya berisi yang bisa dijawab di Applify.
-  const secretSkipped = sent ? [] : sanitizeSecretSkips(input.questions)
-  const documentsAttached = sanitizeFilesAttached(input.filesAttached)
-  const rawCount = Math.max(0, Math.floor(Number(input.filledCount ?? 0) || 0))
+  const secretSkipped = sent || awaitingLogin ? [] : sanitizeSecretSkips(input.questions)
+  const documentsAttached = awaitingLogin ? null : sanitizeFilesAttached(input.filesAttached)
+  const rawCount = awaitingLogin ? 0 : Math.max(0, Math.floor(Number(input.filledCount ?? 0) || 0))
   const filledCount = Math.max(rawCount, filledFields.length)
-  const remaining = sanitizeRemainingRequired(
-    input.remainingRequired,
-    [...questions, ...secretSkipped].filter((q) => q.required).map((q) => q.label)
-  )
-  const targetAppStatus: ApplicationStatus | null =
-    logStatus === 'success' ? 'submitted' : logStatus === 'ready' || logStatus === 'submit_unverified' || filledCount > 0 ? 'ready' : null
+  const remaining = awaitingLogin
+    ? []
+    : sanitizeRemainingRequired(
+        input.remainingRequired,
+        [...questions, ...secretSkipped].filter((q) => q.required).map((q) => q.label)
+      )
+  const targetAppStatus: ApplicationStatus | null = awaitingLogin
+    ? null
+    : logStatus === 'success'
+      ? 'submitted'
+      : logStatus === 'ready' || logStatus === 'submit_unverified' || filledCount > 0
+        ? 'ready'
+        : null
   const finalUrlClean = (() => {
     const u = new URL(pageUrl)
     return `${u.origin}${u.pathname}`
@@ -757,6 +822,7 @@ export async function reportExtensionRun(
   const details: Record<string, any> = {
     channel: 'extension',
     run_id: runId,
+    ...(queueJobId ? { queue_job_id: queueJobId } : {}),
     reason: reasonFor(outcome, input.reason, filledCount),
     application_status: targetAppStatus ?? 'unchanged',
     approval_request_id: input.approvalId,
@@ -764,6 +830,8 @@ export async function reportExtensionRun(
     fields_by_kind: fieldsByKind(filledFields),
     filled_fields: filledFields,
     remaining_required: remaining,
+    ...(awaitingUntilIso ? { awaiting_until: awaitingUntilIso } : {}),
+    ...(cleanLoginUrl ? { login_url: cleanLoginUrl } : {}),
     ...(questions.length > 0 ? { questions, questions_pending: questions.length } : {}),
     ...(secretSkipped.length > 0 ? { secret_skipped: secretSkipped.map((q) => ({ key: q.key, label: q.label, required: q.required })) } : {}),
     ...(documentsAttached ? { documents_attached: documentsAttached } : {}),
@@ -828,6 +896,33 @@ export async function reportExtensionRun(
   }
 
   const claimReleased = RELEASE_OUTCOMES.has(outcome) ? await releaseApprovalClaim(db, userId, input.approvalId, runId) : false
+
+  // Perbarui antrean `extension_apply` terkait secara best-effort (tidak pernah menggagalkan log).
+  try {
+    const iso = now.toISOString()
+    const baseQueuePatch = awaitingLogin
+      ? { status: 'processing', processed_at: iso, updated_at: iso }
+      : { status: 'completed', completed_at: iso, error_message: null, updated_at: iso }
+    const fullQueuePatch = awaitingLogin
+      ? { ...baseQueuePatch, heartbeat_at: iso }
+      : { ...baseQueuePatch, heartbeat_at: null }
+
+    const runQueueUpdate = (patch: Record<string, any>) => {
+      let q = db.from('automation_queue').update(patch).eq('user_id', userId).eq('job_type', 'extension_apply')
+      q = queueJobId ? q.eq('id', queueJobId) : q.eq('payload->>approval_request_id', input.approvalId).in('status', ['pending', 'processing'])
+      return q
+    }
+
+    let qRes = await runQueueUpdate(fullQueuePatch)
+    if (
+      qRes?.error &&
+      (qRes.error.code === '42703' || qRes.error.code === 'PGRST204' || /heartbeat_at/i.test(String(qRes.error.message ?? '')))
+    ) {
+      await runQueueUpdate(baseQueuePatch)
+    }
+  } catch {
+    // Abaikan kegagalan sinkronisasi baris antrean sesudah log hasil tersimpan aman.
+  }
 
   return {
     ok: true,

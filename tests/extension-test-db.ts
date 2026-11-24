@@ -1,4 +1,5 @@
 import Fastify from 'fastify'
+import crypto from 'node:crypto'
 import { extensionRoutes } from '../api/routes/extension.js'
 import type { ExtensionPlanner } from '../services/extension-planner.js'
 
@@ -176,10 +177,13 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
             return { data: null, error: { code: '23505', message: `duplicate key value violates unique constraint "${this.table}_pkey"` }, count: null }
           }
         }
+        const inserted: any[] = []
         for (const r of this.pendingInsert) {
-          list.push({ id: r.id ?? `log-${list.length + 1}`, created_at: r.created_at ?? new Date().toISOString(), ...r })
+          const row = { id: r.id ?? crypto.randomUUID(), created_at: r.created_at ?? new Date().toISOString(), ...r }
+          list.push(row)
+          inserted.push(row)
         }
-        return { data: this.pendingInsert, error: null, count: null }
+        return { data: inserted, error: null, count: null }
       }
       let rows = list.filter((r) => this.filters.every((f) => f(r)))
       if (this.pendingDelete) {
@@ -203,6 +207,13 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
     async maybeSingle() {
       const res = this.run()
       return { data: Array.isArray(res.data) ? res.data[0] ?? null : null, error: res.error ?? null }
+    }
+
+    async single() {
+      const res = this.run()
+      const first = Array.isArray(res.data) ? res.data[0] ?? null : null
+      if (!first && !res.error) return { data: null, error: { code: 'PGRST116', message: 'Row not found' } }
+      return { data: first, error: res.error ?? null }
     }
 
     then<TResult1 = any, TResult2 = never>(
