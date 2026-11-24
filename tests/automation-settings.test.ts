@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import Fastify from 'fastify'
 import { automationRoutes } from '../api/routes/automation.js'
 import { coerceSettingsNumber, EDITABLE_SETTINGS_COLUMNS, sanitizeSettingsPatch } from '../services/automation-settings.js'
+import { KEYWORDS_REQUIRED_MESSAGE, SearchInputError } from '../services/automation.service.js'
 import { makeExtensionTestDb, OTHER_USER_ID, USER_ID } from './extension-test-db.js'
 
 /**
@@ -171,4 +172,21 @@ test('PUT /settings tanpa login: 401, tidak menulis', async () => {
   const res = await put(app, { first_name: 'A' })
   assert.equal(res.statusCode, 401)
   assert.equal(store.tables.user_automation_settings.length, 0)
+})
+
+test('POST /search: kata kunci kosong dan profil kosong dijawab 400 berpesan Indonesia, galat lain tetap 500', async () => {
+  const run = async (service: any) => {
+    const app = Fastify()
+    app.addHook('preHandler', async (req) => {
+      ;(req as any).user = { id: USER_ID }
+    })
+    await app.register(automationRoutes, { prefix: '/api/automation', db: makeExtensionTestDb().db, service })
+    return app.inject({ method: 'POST', url: '/api/automation/search', payload: {} })
+  }
+  const missing = await run({ searchJobs: async () => { throw new SearchInputError(KEYWORDS_REQUIRED_MESSAGE, 'keywords_required') } })
+  assert.equal(missing.statusCode, 400)
+  assert.deepEqual(missing.json(), { error: KEYWORDS_REQUIRED_MESSAGE, code: 'keywords_required' })
+
+  const broken = await run({ searchJobs: async () => { throw new Error('boom') } })
+  assert.equal(broken.statusCode, 500)
 })

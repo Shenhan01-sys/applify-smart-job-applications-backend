@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
-import { automationService } from '../../services/automation.service.js'
+import { automationService, SearchInputError } from '../../services/automation.service.js'
 import { queueService } from '../../services/queue.service.js'
 import { clientErrorReply } from '../../services/queue-guard.js'
 import {
@@ -11,6 +11,8 @@ import {
 export interface AutomationRoutesOptions extends FastifyPluginOptions {
   /** Hanya tes yang mengisinya. Produksi memakai klien service-role dari api/index.ts (dimuat saat dipakai). */
   db?: any
+  /** Hanya tes yang mengisinya. Produksi memakai automationService. */
+  service?: { searchJobs: (params: any) => Promise<any> }
 }
 
 export async function automationRoutes(
@@ -175,7 +177,7 @@ export async function automationRoutes(
     const pages = Number(body.pages)
 
     try {
-      const result = await automationService.searchJobs({
+      const result = await (opts.service ?? automationService).searchJobs({
         userId,
         keywords: typeof body.keywords === 'string' ? body.keywords : undefined,
         location: typeof body.location === 'string' ? body.location : undefined,
@@ -204,6 +206,10 @@ export async function automationRoutes(
         durationMs: result.durationMs,
       }
     } catch (err: any) {
+      // Masukan kurang (mis. belum ada kata kunci dan profil kosong): 400 dengan pesan yang bisa ditindaklanjuti.
+      if (err instanceof SearchInputError) {
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
+      }
       request.log.error(err)
       return reply.status(500).send({ error: err?.message ?? 'Search failed' })
     }

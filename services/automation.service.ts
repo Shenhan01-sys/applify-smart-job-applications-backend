@@ -15,6 +15,55 @@ export interface SearchParams {
   pages?: number
 }
 
+/** Permintaan pencarian tidak bisa dijalankan karena masukan pengguna kurang (jawaban HTTP 400). */
+export class SearchInputError extends Error {
+  readonly statusCode = 400
+  constructor(
+    message: string,
+    readonly code: string
+  ) {
+    super(message)
+    this.name = 'SearchInputError'
+  }
+}
+
+export const KEYWORDS_REQUIRED_MESSAGE =
+  'Kata kunci pencarian belum ada. Isi jabatan di profil atau kata kunci di Pengaturan Otomasi, lalu coba lagi.'
+
+const MAX_DERIVED_TITLE_LENGTH = 60
+
+/**
+ * Kata kunci cadangan dari profil untuk pengguna baru yang belum mengisi kata kunci: jabatan sekarang (atau
+ * headline bila pendek, karena kolom jabatan sering kosong) lalu tiga skill dengan tingkat kemahiran tertinggi.
+ * Kosong bila profil belum memuat salah satunya.
+ */
+export function deriveKeywordsFromProfile(
+  profile: { current_title?: unknown; headline?: unknown } | null | undefined,
+  skillRows: Array<{ name?: unknown; proficiency_level?: unknown }> | null | undefined
+): string {
+  const clean = (v: unknown) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '')
+  let title = clean(profile?.current_title)
+  if (!title) {
+    const headline = clean(profile?.headline)
+    if (headline && headline.length <= MAX_DERIVED_TITLE_LENGTH) title = headline
+  }
+  const topSkills = (skillRows ?? [])
+    .map((r, index) => ({ name: clean(r?.name), level: Number(r?.proficiency_level ?? 0) || 0, index }))
+    .filter((r) => r.name)
+    .sort((a, b) => b.level - a.level || a.index - b.index)
+    .slice(0, 3)
+    .map((r) => r.name)
+  const seen = new Set<string>()
+  const parts: string[] = []
+  for (const part of [title, ...topSkills]) {
+    const key = part.toLowerCase()
+    if (!part || seen.has(key)) continue
+    seen.add(key)
+    parts.push(part)
+  }
+  return parts.join(' ')
+}
+
 export class AutomationService {
   /**
    * `client` hanya diisi di tes. Tanpa itu, klien Supabase milik server dimuat saat pertama dipakai
@@ -39,13 +88,23 @@ export class AutomationService {
 
     const [{ data: settings }, { data: skillRows }] = await Promise.all([
       supabase.from('user_automation_settings').select('*').eq('user_id', userId).maybeSingle(),
-      supabase.from('user_skills').select('name').eq('user_id', userId),
+      supabase.from('user_skills').select('name, proficiency_level').eq('user_id', userId),
     ])
 
-    const keywords =
-      params.keywords ??
-      (Array.isArray(settings?.search_keywords) ? settings.search_keywords.join(' ') : '') ??
-      ''
+    // Kata kunci: dari permintaan, lalu Pengaturan Otomasi, lalu (pengguna baru) dari profil. Kosong semua = 400,
+    // karena pencarian tanpa kata kunci hanya menghasilkan lowongan acak yang tidak relevan.
+    const fromRequest = typeof params.keywords === 'string' ? params.keywords.trim() : ''
+    const fromSettings = Array.isArray(settings?.search_keywords)
+      ? settings.search_keywords.filter((k: unknown) => typeof k === 'string' && k.trim()).join(' ').trim()
+      : ''
+    let keywords = fromRequest || fromSettings
+    let keywordsSource: 'request' | 'settings' | 'profile' = fromRequest ? 'request' : 'settings'
+    if (!keywords) {
+      const { data: profile } = await supabase.from('profiles').select('current_title, headline').eq('id', userId).maybeSingle()
+      keywords = deriveKeywordsFromProfile(profile, skillRows)
+      keywordsSource = 'profile'
+    }
+    if (!keywords) throw new SearchInputError(KEYWORDS_REQUIRED_MESSAGE, 'keywords_required')
     const location = params.location ?? settings?.search_location ?? 'Indonesia'
     const skills = (skillRows ?? []).map((s: any) => s.name).filter(Boolean)
 
@@ -79,6 +138,7 @@ export class AutomationService {
 
     await this.logAction(userId, 'scan', 'multiple', '', '', 'success', {
       keywords,
+      keywords_source: keywordsSource,
       location,
       platforms: result.query.platforms,
       results_count: result.total,
