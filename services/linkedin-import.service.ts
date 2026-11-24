@@ -9,6 +9,7 @@ import {
   hasCvSkillsSection,
   isEmptyExtraction,
   LIMITS,
+  mergeDropReasons,
   normalizeExtraction,
   parseWithRules,
   type ImportPreview,
@@ -135,7 +136,13 @@ export class LinkedInImportService {
     if (method === 'ai' && result.education.length === 0 && emptyMainSections(text, { experience: 1, education: 0 }).includes('Pendidikan')) {
       const fromRules = normalizeExtraction(parseWithRules(text), { sourceText: text, now })
       if (fromRules.education.length > 0) {
-        result = { ...result, education: fromRules.education, dropped: { ...result.dropped, education: result.dropped.education + fromRules.dropped.education } }
+        result = {
+          ...result,
+          education: fromRules.education,
+          dropped: { ...result.dropped, education: result.dropped.education + fromRules.dropped.education },
+          // Alasan pendidikan dihitung dari pembacaan ulang; alasan pengalaman tetap milik hasil AI.
+          dropReasons: { ...result.dropReasons, education: mergeDropReasons(result.dropReasons, fromRules.dropReasons).education },
+        }
         warnings.push('AI tidak menemukan riwayat pendidikan, jadi bagian Pendidikan dibaca dengan aturan sederhana. Periksa hasilnya dengan teliti.')
       }
     }
@@ -188,6 +195,8 @@ export class LinkedInImportService {
         languages: preview.skills.filter((k) => k.category === 'language').length,
       },
       dropped: preview.meta.dropped,
+      // Hitungan per kode alasan item terbuang (tanpa isi PDF), untuk mendiagnosis impor yang kehilangan item.
+      dropReasons: result.dropReasons,
       emptySections: missing,
     })
     return preview

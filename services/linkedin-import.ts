@@ -118,6 +118,41 @@ export interface DroppedCounts {
   skills: number
 }
 
+/** Kode alasan pengalaman terbuang saat validasi. Hanya kode dan hitungan, tanpa isi PDF, untuk log diagnosis. */
+export const EXPERIENCE_DROP_REASONS = [
+  'not_object', 'no_company', 'no_title', 'too_long', 'not_grounded_company', 'not_grounded_title',
+  'date_unreadable', 'date_start_future', 'date_end_future', 'date_end_before_start', 'duplicate', 'over_limit',
+] as const
+export type ExperienceDropReason = (typeof EXPERIENCE_DROP_REASONS)[number]
+
+/** Kode alasan pendidikan terbuang saat validasi. */
+export const EDUCATION_DROP_REASONS = [
+  'not_object', 'no_school', 'school_too_long', 'not_grounded_school', 'no_degree', 'degree_too_long', 'no_years',
+  'start_year_invalid', 'single_year_unclear', 'end_year_invalid', 'duplicate', 'over_limit',
+] as const
+export type EducationDropReason = (typeof EDUCATION_DROP_REASONS)[number]
+
+export interface DropReasons {
+  experiences: Record<ExperienceDropReason, number>
+  education: Record<EducationDropReason, number>
+  /** Pendidikan yang tetap masuk tetapi sebagian nilainya diubah: gelar atau bidang dari model tidak ada di PDF, atau bidang naik menjadi gelar. */
+  adjusted: { degree_not_grounded: number; field_not_grounded: number; degree_from_field: number }
+}
+
+const zeroed = <K extends string>(keys: readonly K[]): Record<K, number> => Object.fromEntries(keys.map((k) => [k, 0])) as Record<K, number>
+
+export const emptyDropReasons = (): DropReasons => ({
+  experiences: zeroed(EXPERIENCE_DROP_REASONS),
+  education: zeroed(EDUCATION_DROP_REASONS),
+  adjusted: { degree_not_grounded: 0, field_not_grounded: 0, degree_from_field: 0 },
+})
+
+/** Jumlahkan dua hitungan alasan (dipakai saat bagian Pendidikan dibaca ulang dengan parser aturan). */
+export function mergeDropReasons(a: DropReasons, b: DropReasons): DropReasons {
+  const sum = <T extends Record<string, number>>(x: T, y: T): T => Object.fromEntries(Object.keys(x).map((k) => [k, x[k] + y[k]])) as T
+  return { experiences: sum(a.experiences, b.experiences), education: sum(a.education, b.education), adjusted: sum(a.adjusted, b.adjusted) }
+}
+
 export interface ImportPreview {
   profile: ImportProfile
   experiences: ImportExperience[]
@@ -150,6 +185,8 @@ export interface NormalizedExtraction {
   achievements: ImportAchievement[]
   skills: ImportSkill[]
   dropped: DroppedCounts
+  /** Rincian alasan item terbuang (jumlah per kode). Tidak masuk pratinjau; hanya untuk log. */
+  dropReasons: DropReasons
 }
 
 // ───────────────────────────────────────────────────────────── utilitas teks
@@ -1769,6 +1806,13 @@ export interface NormalizeContext {
   now: Date
 }
 
+const DATE_DROP_REASON: Record<DateRangeFailure, ExperienceDropReason> = {
+  unreadable: 'date_unreadable',
+  start_in_future: 'date_start_future',
+  end_in_future: 'date_end_future',
+  end_before_start: 'date_end_before_start',
+}
+
 /** Nama bidang tingkat atas yang menandai satu jawaban model yang utuh. */
 const EXTRACTION_KEYS = ['experiences', 'experience', 'workexperience', 'workexperiences', 'employment', 'workhistory', 'education', 'educations', 'educationhistory', 'skills', 'certifications', 'fullname']
 
@@ -1809,6 +1853,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     return !!family && family.some((form) => padded.includes(` ${form} `))
   }
   const dropped: DroppedCounts = { experiences: 0, education: 0, certifications: 0, achievements: 0, skills: 0 }
+  const dropReasons = emptyDropReasons()
 
   // --- profil dasar
   const textField = (v: unknown, max: number): string | null => {
@@ -1826,11 +1871,31 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     const e = asObject(item)
     const company = line(pickAny(e, 'company', 'company_name', 'employer', 'organization', 'organisation', 'workplace', 'perusahaan'))
     const title = line(pickAny(e, 'title', 'role_title', 'position', 'role', 'job_title', 'jabatan', 'posisi'))
-    const range = e ? parseDateRange(experienceRangeText(e), ctx.now) : null
+    const dateResult = e ? explainDateRange(experienceRangeText(e), ctx.now) : null
+    const range = dateResult?.ok ? dateResult.range : null
+    const dateReason: ExperienceDropReason | null = dateResult?.ok === false ? DATE_DROP_REASON[dateResult.reason] : null
     // Jabatan yang sama di perusahaan yang sama pada dua periode (kembali bekerja di sana) adalah dua pengalaman; kuncinya memuat tanggal mulai.
     const key = `${fold(company)}|${fold(title)}|${range?.start ?? ''}`
-    if (!e || !company || !title || company.length > LIMITS.name || title.length > LIMITS.name || !grounded(company) || !grounded(title) || !range || seenExp.has(key)) {
+    const expReason: ExperienceDropReason | null = !e
+      ? 'not_object'
+      : !company
+        ? 'no_company'
+        : !title
+          ? 'no_title'
+          : company.length > LIMITS.name || title.length > LIMITS.name
+            ? 'too_long'
+            : !grounded(company)
+              ? 'not_grounded_company'
+              : !grounded(title)
+                ? 'not_grounded_title'
+                : dateReason
+                  ? dateReason
+                  : seenExp.has(key)
+                    ? 'duplicate'
+                    : null
+    if (expReason || !e || !range) {
       dropped.experiences++
+      dropReasons.experiences[expReason ?? 'date_unreadable']++
       continue
     }
     seenExp.add(key)
@@ -1860,6 +1925,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
   experiences.sort((a, b) => (a.start_date === b.start_date ? Number(b.is_current) - Number(a.is_current) : a.start_date < b.start_date ? 1 : -1))
   if (experiences.length > LIMITS.maxExperiences) {
     dropped.experiences += experiences.length - LIMITS.maxExperiences
+    dropReasons.experiences.over_limit += experiences.length - LIMITS.maxExperiences
     experiences.length = LIMITS.maxExperiences
   }
 
@@ -1873,19 +1939,43 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     const school = line(pickAny(e, 'school', 'institution', 'university', 'school_name', 'institution_name', 'university_name', 'college', 'organization', 'sekolah', 'universitas'))
     let degree = line(pickAny(e, 'degree', 'degree_level', 'level', 'qualification', 'degree_name', 'degree_type', 'gelar', 'jenjang'))
     let field = line(pickAny(e, 'field', 'field_of_study', 'major', 'study_program', 'program', 'jurusan', 'program_studi', 'concentration', 'specialization', 'area_of_study'))
-    if (degree && !degreeGrounded(degree)) degree = ''
-    if (field && !grounded(field)) field = ''
-    if (!degree && field) [degree, field] = [field, '']
+    const adjusted = { degree_not_grounded: 0, field_not_grounded: 0, degree_from_field: 0 }
+    if (degree && !degreeGrounded(degree)) {
+      degree = ''
+      adjusted.degree_not_grounded = 1
+    }
+    if (field && !grounded(field)) {
+      field = ''
+      adjusted.field_not_grounded = 1
+    }
+    if (!degree && field) {
+      ;[degree, field] = [field, '']
+      adjusted.degree_from_field = 1
+    }
     const yearsText = e ? educationYearsText(e) : ''
     const years = parseYearRange(yearsText)
-    let ok = !!e && !!school && school.length <= LIMITS.name && grounded(school) && !!degree && degree.length <= LIMITS.shortText && !!years
+    let eduReason: EducationDropReason | null = !e
+      ? 'not_object'
+      : !school
+        ? 'no_school'
+        : school.length > LIMITS.name
+          ? 'school_too_long'
+          : !grounded(school)
+            ? 'not_grounded_school'
+            : !degree
+              ? 'no_degree'
+              : degree.length > LIMITS.shortText
+                ? 'degree_too_long'
+                : !years
+                  ? 'no_years'
+                  : null
     if (field.length > LIMITS.shortText) field = ''
     const notes: string[] = []
     let endYear: number | null = null
     let isCurrent = false
-    if (ok && years) {
+    if (!eduReason && years) {
       // Satu tahun yang di masa depan ("Expected 2027", "Estimasi lulus 2030") tidak punya tahun masuk yang bisa dipakai, jadi terbuang.
-      if (years.start < MIN_YEAR || years.start > nowYear) ok = false
+      if (years.start < MIN_YEAR || years.start > nowYear) eduReason = 'start_year_invalid'
       else if (years.end === 'present') isCurrent = true
       else if (years.end === null) {
         // CV sering hanya menulis tahun lulus ("Lulus 2023"). Satu tahun itu dipakai untuk masuk dan lulus, dengan
@@ -1894,8 +1984,8 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
           endYear = years.start
           isCurrent = years.expected === true
           notes.push(`Hanya satu tahun (${years.start}) tercantum di PDF, jadi dipakai sebagai tahun masuk dan tahun lulus. Ubah bila perlu.`)
-        } else ok = false
-      } else if (years.end < years.start || years.end > nowYear + MAX_YEARS_AHEAD) ok = false
+        } else eduReason = 'single_year_unclear'
+      } else if (years.end < years.start || years.end > nowYear + MAX_YEARS_AHEAD) eduReason = 'end_year_invalid'
       else {
         // Tahun lulus yang ditandai perkiraan atau yang belum lewat berarti masih menempuh; tahun perkiraannya tetap disimpan.
         endYear = years.end
@@ -1903,12 +1993,15 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
         if (isCurrent) notes.push(`Tahun lulus ${years.end} masih perkiraan, jadi ditandai masih menempuh.`)
       }
     }
-    const key = `${fold(school)}|${fold(degree)}`
-    if (!ok || !years || seenEdu.has(key)) {
+    const key = `${fold(school)}|${fold(degree)}|${years?.start ?? ''}`
+    if (!eduReason && seenEdu.has(key)) eduReason = 'duplicate'
+    if (eduReason || !years) {
       dropped.education++
+      dropReasons.education[eduReason ?? 'no_years']++
       continue
     }
     seenEdu.add(key)
+    for (const k of Object.keys(adjusted) as Array<keyof typeof adjusted>) dropReasons.adjusted[k] += adjusted[k]
     const gpa = readGpa(pickAny(e, 'gpa', 'ipk', 'cgpa', 'grade_point_average'), pickAny(e, 'max_gpa', 'gpa_scale', 'scale', 'gpa_max', 'max_ipk', 'skala'), sourceNumbers)
     if (gpa.note) notes.push(gpa.note)
     education.push({ institution: school, degree, field_of_study: field || null, start_year: years.start, end_year: endYear, is_current: isCurrent, gpa: gpa.gpa, max_gpa: gpa.max, notes })
@@ -1916,6 +2009,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
   education.sort((a, b) => b.start_year - a.start_year)
   if (education.length > LIMITS.maxEducation) {
     dropped.education += education.length - LIMITS.maxEducation
+    dropReasons.education.over_limit += education.length - LIMITS.maxEducation
     education.length = LIMITS.maxEducation
   }
 
@@ -2030,7 +2124,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     skills.length = LIMITS.maxSkills
   }
 
-  return { fullName, headline, location, experiences, education, certifications, achievements, skills, dropped }
+  return { fullName, headline, location, experiences, education, certifications, achievements, skills, dropped, dropReasons }
 }
 
 /**
