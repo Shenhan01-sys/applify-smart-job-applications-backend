@@ -26,6 +26,7 @@ import { authMiddleware } from './middleware/auth.js'
 import { sessionKeyProblem } from '../services/session-crypto.js'
 import { deployConfigWarnings, parseAllowedOrigins } from '../services/deploy-config.js'
 import { buildCorsOptions } from '../services/cors-options.js'
+import { installEmptyJsonBodyGuard } from '../services/empty-json-body.js'
 
 // Produksi (Railway, Docker): log JSON polos ke stdout supaya mudah dibaca penampung log.
 // Lokal: pino-pretty berwarna.
@@ -42,6 +43,8 @@ const app = Fastify({
           },
         },
 })
+// POST/PUT JSON tanpa isi tidak lagi ditolak 400 (services/empty-json-body.ts).
+installEmptyJsonBodyGuard(app)
 
 // Supabase client
 export const supabase = createClient(
