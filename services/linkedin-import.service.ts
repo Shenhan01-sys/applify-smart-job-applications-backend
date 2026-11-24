@@ -127,6 +127,16 @@ export class LinkedInImportService {
       )
     }
 
+    // AI sering melewatkan Pendidikan pada CV biasa (bukan ekspor LinkedIn). Bila seksinya ada di PDF tetapi AI
+    // tidak menghasilkan satu entri pun, bagian itu dibaca ulang dengan parser aturan. Hasil AI lain tidak disentuh.
+    if (method === 'ai' && result.education.length === 0 && emptyMainSections(text, { experience: 1, education: 0 }).includes('Pendidikan')) {
+      const fromRules = normalizeExtraction(parseWithRules(text), { sourceText: text, now })
+      if (fromRules.education.length > 0) {
+        result = { ...result, education: fromRules.education, dropped: { ...result.dropped, education: result.dropped.education + fromRules.dropped.education } }
+        warnings.push('AI tidak menemukan riwayat pendidikan, jadi bagian Pendidikan dibaca dengan aturan sederhana. Periksa hasilnya dengan teliti.')
+      }
+    }
+
     // Bagian yang ada di PDF tetapi tidak menghasilkan satu item pun: beri tahu, supaya kosongnya tidak dikira data kosong.
     const missing = emptyMainSections(text, { experience: result.experiences.length, education: result.education.length })
     if (missing.length > 0) {

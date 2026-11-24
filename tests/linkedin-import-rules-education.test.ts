@@ -113,7 +113,7 @@ test('emptyMainSections: bagian yang ada di PDF tetapi nol item disebut; bagian 
   assert.deepEqual(emptyMainSections(noEdu, { experience: 1, education: 0 }), [])
 })
 
-test('layanan: jalur AI tanpa pendidikan padahal PDF punya seksi Pendidikan = peringatan, bukan diam', async () => {
+test('layanan: jalur AI tanpa pendidikan padahal PDF punya seksi Pendidikan = dibaca ulang oleh parser aturan, dengan peringatan', async () => {
   const withoutEdu = {
     full_name: 'Dewi Lestari Sintetis',
     experiences: [{ company: 'Studio Fiktif Cahaya', title: 'Analis Data', date_range: 'Maret 2022 - Sekarang (4 tahun 9 bulan)' }],
@@ -122,6 +122,20 @@ test('layanan: jalur AI tanpa pendidikan padahal PDF punya seksi Pendidikan = pe
   const svc = new LinkedInImportService({ llm: async () => ({ text: JSON.stringify(withoutEdu), model: 'm' }), now: () => NOW, log: () => {} })
   const preview = await svc.importFromPdf(fixturePdf(ID_NAME))
   assert.equal(preview.meta.method, 'ai')
+  assert.equal(preview.education.length, 4)
+  assert.match(preview.warnings.join(' '), /bagian Pendidikan dibaca dengan aturan sederhana/)
+  assert.doesNotMatch(preview.warnings.join(' '), /Bagian Pendidikan ada di PDF tetapi isinya tidak berhasil dibaca/)
+})
+
+test('layanan: AI tanpa pendidikan dan parser aturan juga tidak bisa membacanya = peringatan "tidak berhasil dibaca", bukan diam', async () => {
+  const pages = ['Tokoh Sintetis\nPengalaman\nFiktif\nEngineer\nJanuari 2020 - Sekarang\nPendidikan\nbelajar di mana-mana sejak kecil dengan tekun dan sabar\nSkill\nPython dan banyak hal lain yang cukup panjang']
+  const svc = new LinkedInImportService({
+    llm: async () => ({ text: JSON.stringify({ experiences: [{ company: 'Fiktif', title: 'Engineer', date_range: 'Januari 2020 - Sekarang' }] }), model: 'm' }),
+    extractPages: async () => pages,
+    now: () => NOW,
+    log: () => {},
+  })
+  const preview = await svc.importFromPdf(Buffer.from('%PDF-tiruan'))
   assert.equal(preview.education.length, 0)
   assert.match(preview.warnings.join(' '), /Bagian Pendidikan ada di PDF tetapi isinya tidak berhasil dibaca/)
 })

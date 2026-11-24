@@ -293,8 +293,12 @@ test('layanan: hanya penghargaan yang terbaca (tanpa pengalaman atau pendidikan)
   const preview = await service(async () => ({ text: JSON.stringify(only), model: 'm' })).importFromPdf(fixturePdf('synthetic-profile-awards-en.txt'))
   assert.equal(preview.meta.method, 'ai')
   assert.equal(preview.achievements.length, 2)
-  // Satu-satunya peringatan: PDF punya seksi Pengalaman dan Pendidikan, tetapi jawaban model tidak memuat itemnya.
-  assert.deepEqual(preview.warnings, ['Bagian Pengalaman dan Pendidikan ada di PDF tetapi isinya tidak berhasil dibaca. Tambahkan manual bila perlu.'])
+  // Pendidikan yang dilewatkan model dibaca ulang oleh parser aturan (dengan peringatan); Pengalaman tetap kosong dan diperingatkan.
+  assert.deepEqual(preview.education.map((e) => [e.institution, e.start_year, e.end_year]), [['Universitas Fiktif Surabaya', 2019, 2023]])
+  assert.deepEqual(preview.warnings, [
+    'AI tidak menemukan riwayat pendidikan, jadi bagian Pendidikan dibaca dengan aturan sederhana. Periksa hasilnya dengan teliti.',
+    'Bagian Pengalaman ada di PDF tetapi isinya tidak berhasil dibaca. Tambahkan manual bila perlu.',
+  ])
 })
 
 test('layanan, jalur aturan: model gagal = parser aturan tetap membaca penghargaan dan publikasi dari PDF (Inggris dan Indonesia)', async () => {
