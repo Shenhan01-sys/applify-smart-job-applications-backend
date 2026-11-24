@@ -1,13 +1,25 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
-import { supabase } from '../index.js'
 import { automationService } from '../../services/automation.service.js'
 import { queueService } from '../../services/queue.service.js'
 import { clientErrorReply } from '../../services/queue-guard.js'
+import {
+  isMissingColumnError,
+  OPTIONAL_SETTINGS_COLUMNS,
+  sanitizeSettingsPatch,
+} from '../../services/automation-settings.js'
+
+export interface AutomationRoutesOptions extends FastifyPluginOptions {
+  /** Hanya tes yang mengisinya. Produksi memakai klien service-role dari api/index.ts (dimuat saat dipakai). */
+  db?: any
+}
 
 export async function automationRoutes(
   app: FastifyInstance,
-  _opts: FastifyPluginOptions
+  opts: AutomationRoutesOptions = {}
 ) {
+  // Dimuat di dalam handler agar meng-import file ini di tes tidak menyalakan server.
+  const getDb = async (): Promise<any> => opts.db ?? (await import('../index.js')).supabase
+
   // Get user's automation settings
   app.get('/settings', async (request, reply) => {
     const userId = (request as any).user?.id
@@ -15,53 +27,77 @@ export async function automationRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
+    const supabase = await getDb()
     const { data, error } = await supabase
       .from('user_automation_settings')
       .select('*')
       .eq('user_id', userId)
-      .single()
+      .maybeSingle()
 
     if (error && error.code !== 'PGRST116') {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ dbCode: error.code, err: String(error.message ?? '') }, 'automation settings read failed')
+      return reply.status(500).send({ error: 'Pengaturan belum bisa dimuat. Coba lagi.', code: 'settings_load_failed' })
     }
 
-    return data || {}
+    // Sebelum migrasi DRAFT_2026-11-24b kolom `extension_auto_use` belum ada: dianggap mati.
+    return data ? { extension_auto_use: false, ...data } : {}
   })
 
-  // Update automation settings
+  // Update automation settings.
+  // Hanya kolom yang boleh diedit pengguna yang ditulis (daftar putih di automation-settings.ts): badan permintaan
+  // tidak pernah disebar ke insert/update, karena penulisan memakai kunci service-role.
   app.put('/settings', async (request, reply) => {
     const userId = (request as any).user?.id
     if (!userId) {
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
-    const body = request.body as Record<string, any>
+    const supabase = await getDb()
+    const patch = sanitizeSettingsPatch(request.body)
 
-    const { data: existing } = await supabase
+    const { data: existing, error: lookupError } = await supabase
       .from('user_automation_settings')
       .select('id')
       .eq('user_id', userId)
-      .single()
+      .maybeSingle()
+    if (lookupError && lookupError.code !== 'PGRST116') {
+      request.log.error({ dbCode: lookupError.code, err: String(lookupError.message ?? '') }, 'automation settings lookup failed')
+      return reply.status(500).send({ error: 'Pengaturan belum bisa disimpan. Coba lagi.', code: 'settings_save_failed' })
+    }
 
-    let result
-    if (existing) {
-      result = await supabase
-        .from('user_automation_settings')
-        .update({ ...body, updated_at: new Date().toISOString() })
-        .eq('user_id', userId)
-        .select()
-    } else {
-      result = await supabase
-        .from('user_automation_settings')
-        .insert({ user_id: userId, ...body })
-        .select()
+    const write = (values: Record<string, unknown>) =>
+      existing
+        ? supabase
+            .from('user_automation_settings')
+            .update({ ...values, updated_at: new Date().toISOString() })
+            .eq('user_id', userId)
+            .select()
+        : supabase
+            .from('user_automation_settings')
+            .insert({ ...values, user_id: userId })
+            .select()
+
+    let result = await write(patch)
+    // Kolom opsional (extension_auto_use) belum ada sebelum migrasi dijalankan: ulangi tanpa kolom itu.
+    if (result.error && isMissingColumnError(result.error)) {
+      const withoutOptional = { ...patch }
+      let dropped = false
+      for (const col of OPTIONAL_SETTINGS_COLUMNS) {
+        if (col in withoutOptional) {
+          delete withoutOptional[col]
+          dropped = true
+        }
+      }
+      if (dropped) result = await write(withoutOptional)
     }
 
     if (result.error) {
-      return reply.status(500).send({ error: result.error.message })
+      request.log.error({ dbCode: result.error.code, err: String(result.error.message ?? '') }, 'automation settings save failed')
+      return reply.status(500).send({ error: 'Pengaturan belum bisa disimpan. Coba lagi.', code: 'settings_save_failed' })
     }
 
-    return result.data?.[0]
+    const row = result.data?.[0]
+    return row ? { extension_auto_use: false, ...row } : {}
   })
 
   // Get application logs
@@ -73,6 +109,7 @@ export async function automationRoutes(
 
     const { limit = 50, offset = 0, action, status } = request.query as any
 
+    const supabase = await getDb()
     let query = supabase
       .from('application_logs')
       .select('*')
@@ -86,7 +123,8 @@ export async function automationRoutes(
     const { data, error } = await query
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ dbCode: error.code, err: String(error.message ?? '') }, 'application logs read failed')
+      return reply.status(500).send({ error: 'Log belum bisa dimuat. Coba lagi.', code: 'logs_load_failed' })
     }
 
     return data
@@ -101,6 +139,7 @@ export async function automationRoutes(
 
     const { status } = request.query as any
 
+    const supabase = await getDb()
     let query = supabase
       .from('automation_queue')
       .select('*')
@@ -112,7 +151,8 @@ export async function automationRoutes(
     const { data, error } = await query
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ dbCode: error.code, err: String(error.message ?? '') }, 'queue read failed')
+      return reply.status(500).send({ error: 'Antrean belum bisa dimuat. Coba lagi.', code: 'queue_load_failed' })
     }
 
     return data
@@ -185,7 +225,8 @@ export async function automationRoutes(
     } catch (error: any) {
       const clientError = clientErrorReply(error)
       if (clientError) return reply.status(clientError.statusCode).send(clientError.body)
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error) }, 'queue add failed')
+      return reply.status(500).send({ error: 'Pekerjaan belum bisa dimasukkan ke antrean. Coba lagi.', code: 'queue_add_failed' })
     }
   })
 }

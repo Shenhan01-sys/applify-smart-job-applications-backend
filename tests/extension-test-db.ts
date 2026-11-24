@@ -34,6 +34,11 @@ export const JOBS_COLUMNS = new Set([
 export interface FakeDbOptions {
   /** Tabel yang menolak semua operasi dengan galat ini (mis. tabel belum dimigrasi: 42P01). */
   failTables?: Record<string, { code: string; message: string }>
+  /**
+   * Kolom yang belum ada di database (migrasi belum dijalankan), per tabel. Menulis atau memilih kolom itu
+   * mengembalikan galat PostgREST (PGRST204 / 42703) seperti database sungguhan; select('*') tidak terpengaruh.
+   */
+  missingColumns?: Record<string, string[]>
   /** Kunci unik tunggal per tabel; sisipan ganda mengembalikan galat 23505. */
   uniqueKeys?: Record<string, string>
   /** Pengguna Supabase Auth tiruan untuk `auth.admin.getUserById` (kunci: id pengguna). */
@@ -90,11 +95,15 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
     private pendingUpdate: Record<string, unknown> | null = null
     private pendingUpsert: { rows: any[]; conflict: string[] } | null = null
     private pendingDelete = false
+    private selectedCols: string | null = null
+    private filterCols: string[] = []
 
     constructor(private readonly table: string) {}
 
     select(cols?: string, opts?: { count?: string; head?: boolean }) {
       if (opts?.head) this.countHead = true
+      // Pada update/insert, select() hanya meminta baris hasil; kolom yang dipilih tetap diperiksa terhadap skema.
+      if (cols && cols !== '*') this.selectedCols = cols
       if (this.table === 'jobs' && cols && cols !== '*') {
         for (const raw of cols.split(',')) {
           const name = raw.trim().split(':').pop()!.trim()
@@ -104,10 +113,12 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
       return this
     }
     eq(col: string, val: unknown) {
+      this.filterCols.push(col)
       this.filters.push((r) => colValue(r, col) === val)
       return this
     }
     in(col: string, vals: unknown[]) {
+      this.filterCols.push(col)
       this.filters.push((r) => vals.includes(colValue(r, col)))
       return this
     }
@@ -120,6 +131,7 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
       return this
     }
     is(col: string, val: null | boolean) {
+      this.filterCols.push(col)
       this.filters.push((r) => (val === null ? r?.[col] == null : r?.[col] === val))
       return this
     }
@@ -160,6 +172,25 @@ export function makeExtensionTestDb(seed?: Partial<Record<string, any[]>>, optio
         op: this.pendingInsert ? 'insert' : this.pendingUpsert ? 'upsert' : this.pendingDelete ? 'delete' : this.pendingUpdate ? 'update' : 'select',
       })
       if (failure) return { data: null, error: { code: failure.code, message: failure.message }, count: null }
+      const missing = options.missingColumns?.[this.table] ?? []
+      if (missing.length > 0) {
+        const written = [
+          ...(this.pendingInsert ?? []).flatMap((r) => Object.keys(r)),
+          ...(this.pendingUpsert?.rows ?? []).flatMap((r) => Object.keys(r)),
+          ...(this.pendingUpdate ? Object.keys(this.pendingUpdate) : []),
+        ]
+        const selected = (this.selectedCols ?? '').split(',').map((c) => c.trim().split(':').pop()!.trim())
+        const hit = missing.find((c) => written.includes(c) || selected.includes(c) || this.filterCols.includes(c))
+        if (hit) {
+          return {
+            data: null,
+            error: written.includes(hit)
+              ? { code: 'PGRST204', message: `Could not find the '${hit}' column of '${this.table}' in the schema cache` }
+              : { code: '42703', message: `column ${this.table}.${hit} does not exist` },
+            count: null,
+          }
+        }
+      }
       const list = tables[this.table] ?? (tables[this.table] = [])
       if (this.pendingUpsert) {
         const { rows, conflict } = this.pendingUpsert
