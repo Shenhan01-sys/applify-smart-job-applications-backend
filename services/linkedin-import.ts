@@ -432,6 +432,7 @@ export function parseYearRange(raw: unknown): ParsedYears | null {
       return ' '
     })
     .replace(/[()·•]/g, ' ')
+    .replace(/\b((?:19|20)\d{2})-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])\b/g, '$1') // 2019-08-01 -> 2019
     .replace(/\b\d{1,2}\s*[/.]\s*((?:19|20)\d{2})\b/g, '$1') // 08/2019 -> 2019
     .replace(/\b((?:19|20)\d{2})\s*[-/]\s*(?:0?[1-9]|1[0-2])\b(?!\d)/g, '$1') // 2019-08 -> 2019
   const m = YEAR_RANGE_RE.exec(s)
@@ -1586,22 +1587,77 @@ function clipText(s: string, max: number): string {
   return (at > max * 0.6 ? cut.slice(0, at) : cut).trim()
 }
 
-/** Teks tahun pendidikan dari bentuk apa pun yang dipakai model: "years", angka, "period", atau start_year/end_year. */
+const keyOf = (k: string): string => k.toLowerCase().replace(/[^a-z0-9]/g, '')
+
+/**
+ * Nilai pertama yang tidak kosong menurut daftar nama bidang, urut menurut daftar. Huruf besar kecil, garis bawah,
+ * dan camelCase diabaikan ("start_date", "startDate", "StartDate" sama). Model yang berbeda memberi nama bidang berbeda.
+ */
+function pickAny(o: Record<string, unknown> | null | undefined, ...names: string[]): unknown {
+  if (!o) return undefined
+  const byKey = new Map<string, unknown>()
+  for (const [k, v] of Object.entries(o)) {
+    const nk = keyOf(k)
+    if (!byKey.has(nk) && v !== null && v !== undefined && v !== '') byKey.set(nk, v)
+  }
+  for (const n of names) {
+    const v = byKey.get(keyOf(n))
+    if (v !== undefined) return v
+  }
+  return undefined
+}
+
+/** Satu tanggal dari jawaban model: teks, angka (tahun), atau objek {year, month}. */
+function dateToken(v: unknown): string {
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+  if (typeof v === 'string') return line(v)
+  const o = asObject(v)
+  if (!o) return ''
+  const year = dateToken(pickAny(o, 'year', 'tahun'))
+  const month = dateToken(pickAny(o, 'month', 'bulan'))
+  if (year && month) return /^\d{1,2}$/.test(month) ? `${month}/${year}` : `${month} ${year}`
+  return year || dateToken(pickAny(o, 'date', 'value', 'text'))
+}
+
+/** Rentang dari satu nilai: teks, larik [awal, akhir], atau objek {start, end}. */
+function rangeToken(v: unknown): string {
+  if (Array.isArray(v)) return v.slice(0, 2).map(dateToken).filter(Boolean).join(' - ')
+  const o = asObject(v)
+  if (o && pickAny(o, 'start', 'from', 'start_date', 'begin') !== undefined) {
+    return [dateToken(pickAny(o, 'start', 'from', 'start_date', 'begin')), dateToken(pickAny(o, 'end', 'to', 'end_date', 'until'))].filter(Boolean).join(' - ')
+  }
+  return dateToken(v)
+}
+
+const isCurrentFlag = (e: Record<string, unknown>): boolean => pickAny(e, 'is_current', 'current', 'present', 'ongoing', 'currently_working', 'currently_studying', 'in_progress') === true
+
+/** Teks rentang tanggal pengalaman dari bentuk apa pun yang dipakai model: "date_range", angka, objek {year, month}, atau start/end terpisah. */
+function experienceRangeText(e: Record<string, unknown>): string {
+  const current = isCurrentFlag(e)
+  const direct = rangeToken(pickAny(e, 'date_range', 'dates', 'period', 'duration', 'tanggal', 'time_period', 'employment_period'))
+  // Satu tanggal mulai dengan penanda is_current ("Jan 2020" + is_current) berarti sampai sekarang.
+  if (direct) return current && parseMonthYear(direct) !== null ? `${direct} - Present` : direct
+  const start = dateToken(pickAny(e, 'start_date', 'start', 'from', 'start_year', 'begin', 'mulai'))
+  const end = dateToken(pickAny(e, 'end_date', 'end', 'to', 'end_year', 'until', 'selesai'))
+  return [start, end || (current ? 'Present' : '')].filter(Boolean).join(' - ')
+}
+
+/** Teks tahun pendidikan dari bentuk apa pun yang dipakai model: "years", angka, larik, "period", atau start_year/end_year. */
 function educationYearsText(e: Record<string, unknown>): string {
-  const pick = (v: unknown): string => (typeof v === 'number' && Number.isFinite(v) ? String(v) : line(v))
   // Model kadang menandai tahun akhir sebagai perkiraan lewat bendera ("expected": true) atau bidang bernilai
   // ("expected_graduation": "Mar 2027"). Penandanya diteruskan ke parseYearRange sebagai kata "(expected)".
   const expectedKeys = Object.entries(e).filter(([k]) => EXPECTED_KEY_RE.test(k))
   const flagged = expectedKeys.some(([, v]) => v === true)
-  const expectedEnd = expectedKeys.map(([, v]) => pick(v)).find(Boolean) ?? ''
-  const direct = pick(e.years) || pick(e.dates) || pick(e.period) || pick(e.date_range)
+  const expectedEnd = expectedKeys.map(([, v]) => rangeToken(v)).find(Boolean) ?? ''
+  const current = isCurrentFlag(e)
+  const direct = rangeToken(pickAny(e, 'years', 'dates', 'period', 'date_range', 'duration', 'tahun'))
   let text: string
   if (direct) {
     // Model yang hanya menulis tahun masuk ("2022") tetapi menandai is_current tidak boleh dibaca sebagai tahun lulus.
-    text = expectedEnd && isSingleYear(direct) ? `${direct} - ${expectedEnd}` : e.is_current === true && isSingleYear(direct) ? `${direct} - Present` : direct
+    text = expectedEnd && isSingleYear(direct) ? `${direct} - ${expectedEnd}` : current && isSingleYear(direct) ? `${direct} - Present` : direct
   } else {
-    const start = pick(e.start_year ?? e.start)
-    const end = pick(e.end_year ?? e.end ?? e.graduation_year ?? e.year) || expectedEnd || (e.is_current === true ? 'Present' : '')
+    const start = dateToken(pickAny(e, 'start_year', 'start', 'start_date', 'from', 'enrolled'))
+    const end = dateToken(pickAny(e, 'end_year', 'end', 'end_date', 'to', 'graduation_year', 'graduation_date', 'graduated', 'year', 'grad_year')) || expectedEnd || (current ? 'Present' : '')
     text = [start, end].filter(Boolean).join(' - ')
   }
   return text && (flagged || expectedEnd) && !EXPECTED_RE.test(text) ? `${text} (expected)` : text
@@ -1713,12 +1769,26 @@ export interface NormalizeContext {
   now: Date
 }
 
+/** Nama bidang tingkat atas yang menandai satu jawaban model yang utuh. */
+const EXTRACTION_KEYS = ['experiences', 'experience', 'workexperience', 'workexperiences', 'employment', 'workhistory', 'education', 'educations', 'educationhistory', 'skills', 'certifications', 'fullname']
+
+/** Model kadang membungkus jawabannya ({"profile": {...}}, {"data": {...}}, {"result": {...}}). Bungkus satu tingkat dibuka. */
+function unwrapExtraction(raw: Record<string, unknown>): Record<string, unknown> {
+  const has = (o: Record<string, unknown>) => Object.keys(o).some((k) => EXTRACTION_KEYS.includes(keyOf(k)))
+  if (has(raw)) return raw
+  for (const v of Object.values(raw)) {
+    const inner = asObject(v)
+    if (inner && has(inner)) return inner
+  }
+  return raw
+}
+
 /**
  * Validasi dan normalisasi hasil mentah, baik dari model maupun dari parser aturan. Item yang tidak sah dibuang
  * dan dihitung. Hanya fakta yang ada di teks sumber yang lolos (grounding).
  */
 export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): NormalizedExtraction {
-  const raw = asObject(rawIn) ?? {}
+  const raw = unwrapExtraction(asObject(rawIn) ?? {})
   const padded = ` ${fold(ctx.sourceText)} `
   const grounded = (v: string): boolean => {
     const f = fold(v)
@@ -1745,19 +1815,18 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     const s = line(v)
     return s && s.length <= max && grounded(s) ? s : null
   }
-  const fullName = textField(raw.full_name, LIMITS.name)
-  const headline = textField(raw.headline, 300)
-  const location = textField(raw.location, LIMITS.name)
+  const fullName = textField(pickAny(raw, 'full_name', 'name'), LIMITS.name)
+  const headline = textField(pickAny(raw, 'headline', 'current_title', 'tagline'), 300)
+  const location = textField(pickAny(raw, 'location', 'city'), LIMITS.name)
 
   // --- pengalaman
   const experiences: ImportExperience[] = []
   const seenExp = new Set<string>()
-  for (const item of asArray(raw.experiences, 60)) {
+  for (const item of asArray(pickAny(raw, 'experiences', 'experience', 'work_experience', 'work_experiences', 'employment', 'employment_history', 'work_history', 'jobs', 'positions'), 60)) {
     const e = asObject(item)
-    const company = line(e?.company ?? e?.company_name)
-    const title = line(e?.title ?? e?.role_title)
-    const rangeText = line(e?.date_range ?? e?.dates) || [line(e?.start), line(e?.end) || (e?.is_current === true ? 'Present' : '')].filter(Boolean).join(' - ')
-    const range = e ? parseDateRange(rangeText, ctx.now) : null
+    const company = line(pickAny(e, 'company', 'company_name', 'employer', 'organization', 'organisation', 'workplace', 'perusahaan'))
+    const title = line(pickAny(e, 'title', 'role_title', 'position', 'role', 'job_title', 'jabatan', 'posisi'))
+    const range = e ? parseDateRange(experienceRangeText(e), ctx.now) : null
     // Jabatan yang sama di perusahaan yang sama pada dua periode (kembali bekerja di sana) adalah dua pengalaman; kuncinya memuat tanggal mulai.
     const key = `${fold(company)}|${fold(title)}|${range?.start ?? ''}`
     if (!e || !company || !title || company.length > LIMITS.name || title.length > LIMITS.name || !grounded(company) || !grounded(title) || !range || seenExp.has(key)) {
@@ -1766,7 +1835,8 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     }
     seenExp.add(key)
     const notes = [...range.notes]
-    let description: string | null = block(e.description)
+    const descRaw = pickAny(e, 'description', 'summary', 'details', 'responsibilities', 'highlights', 'deskripsi')
+    let description: string | null = Array.isArray(descRaw) ? block(descRaw.map((x) => line(x)).filter(Boolean).join('\n')) : block(descRaw)
     if (description && !descriptionGrounded(description)) {
       description = null
       notes.push('Deskripsi tidak dimasukkan karena isinya tidak cocok dengan teks PDF.')
@@ -1779,7 +1849,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
       company_name: company,
       role_title: title,
       employment_type: employmentType(title),
-      location_type: locationType(line(e.location)),
+      location_type: locationType(line(pickAny(e, 'location', 'city', 'work_location', 'lokasi'))),
       start_date: range.start,
       end_date: range.end,
       is_current: range.is_current,
@@ -1798,11 +1868,11 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
   const seenEdu = new Set<string>()
   const nowYear = ctx.now.getUTCFullYear()
   const sourceNumbers = decimalTokens(ctx.sourceText)
-  for (const item of asArray(raw.education ?? raw.educations ?? raw.education_history, 40)) {
+  for (const item of asArray(pickAny(raw, 'education', 'educations', 'education_history', 'academic_background', 'qualifications'), 40)) {
     const e = asObject(item)
-    const school = line(e?.school ?? e?.institution ?? e?.university ?? e?.school_name)
-    let degree = line(e?.degree ?? e?.degree_level ?? e?.level)
-    let field = line(e?.field ?? e?.field_of_study ?? e?.major)
+    const school = line(pickAny(e, 'school', 'institution', 'university', 'school_name', 'institution_name', 'university_name', 'college', 'organization', 'sekolah', 'universitas'))
+    let degree = line(pickAny(e, 'degree', 'degree_level', 'level', 'qualification', 'degree_name', 'degree_type', 'gelar', 'jenjang'))
+    let field = line(pickAny(e, 'field', 'field_of_study', 'major', 'study_program', 'program', 'jurusan', 'program_studi', 'concentration', 'specialization', 'area_of_study'))
     if (degree && !degreeGrounded(degree)) degree = ''
     if (field && !grounded(field)) field = ''
     if (!degree && field) [degree, field] = [field, '']
@@ -1839,7 +1909,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
       continue
     }
     seenEdu.add(key)
-    const gpa = readGpa(e?.gpa ?? e?.ipk, e?.max_gpa ?? e?.gpa_scale, sourceNumbers)
+    const gpa = readGpa(pickAny(e, 'gpa', 'ipk', 'cgpa', 'grade_point_average'), pickAny(e, 'max_gpa', 'gpa_scale', 'scale', 'gpa_max', 'max_ipk', 'skala'), sourceNumbers)
     if (gpa.note) notes.push(gpa.note)
     education.push({ institution: school, degree, field_of_study: field || null, start_year: years.start, end_year: endYear, is_current: isCurrent, gpa: gpa.gpa, max_gpa: gpa.max, notes })
   }
@@ -1852,7 +1922,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
   // --- sertifikasi
   const certifications: ImportCertification[] = []
   const seenCert = new Set<string>()
-  for (const item of asArray(raw.certifications, 60)) {
+  for (const item of asArray(pickAny(raw, 'certifications', 'certificates', 'licenses'), 60)) {
     const c = typeof item === 'string' ? { name: item } : asObject(item)
     const name = line(c?.name)
     let issuer = line(c?.issuer)
@@ -1879,7 +1949,7 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
   const achBlocks = splitSections(ctx.sourceText).filter((b) => b.key === 'honors' || b.key === 'publications')
   const achPadded = achBlocks.length > 0 ? ` ${fold(achBlocks.flatMap((b) => b.lines).join('\n'))} ` : padded
   const textOrNumber = (v: unknown): string => (typeof v === 'number' && Number.isFinite(v) ? String(v) : line(v))
-  for (const item of asArray(raw.achievements, 80)) {
+  for (const item of asArray(pickAny(raw, 'achievements', 'awards', 'honors', 'honors_awards'), 80)) {
     const a = asObject(item)
     const title = line(a?.title ?? a?.name)
     const category = achievementCategory(a?.kind ?? a?.category ?? a?.type)
@@ -1947,11 +2017,11 @@ export function normalizeExtraction(rawIn: unknown, ctx: NormalizeContext): Norm
     skills.push({ name, category, proficiency_level: level })
   }
   // Model kadang mengembalikan satu string berisi daftar ("Python, SQL, Excel"): dipecah seperti seksi skill CV.
-  for (const item of asArray(raw.skills, 80)) {
+  for (const item of asArray(pickAny(raw, 'skills', 'skill_list', 'technical_skills'), 80)) {
     const nameRaw = typeof item === 'string' ? item : asObject(item)?.name
     for (const name of typeof nameRaw === 'string' ? splitSkillItems([nameRaw]) : [nameRaw]) addSkill(name, 'technical', 3)
   }
-  for (const item of asArray(raw.languages, 30)) {
+  for (const item of asArray(pickAny(raw, 'languages', 'spoken_languages'), 30)) {
     const l = typeof item === 'string' ? { name: item, level: null } : asObject(item)
     addSkill(l?.name, 'language', languageLevel(l?.level))
   }
