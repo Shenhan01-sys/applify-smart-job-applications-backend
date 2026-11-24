@@ -152,3 +152,25 @@ test('report-run: pertanyaan opsional dan kontrol rahasia dari plan-form dipisah
   ])
   assert.deepEqual(d.remaining_required, ['Why us?', 'Account password'])
 })
+
+test('report-run: pertanyaan berkas (kind file) tersimpan di details.questions tanpa opsi, kuncinya dihitung ulang, dan ikut sisa wajib', async () => {
+  const { store, report } = await setup()
+  const res = await report({
+    outcome: 'incomplete',
+    filledCount: 1,
+    remainingRequired: 1,
+    questions: [
+      { key: 'FORGED', label: 'Unggah CV secara manual', kind: 'file', required: true, options: ['Resume.pdf'] },
+      { key: 'why us', label: 'Why us?', kind: 'textarea', required: false },
+    ],
+  })
+  assert.equal(res.statusCode, 200)
+  const d = store.tables.application_logs[0].details
+  assert.deepEqual(d.questions, [
+    { key: 'unggah cv secara manual', label: 'Unggah CV secara manual', kind: 'file', required: true },
+    { key: 'why us', label: 'Why us?', kind: 'textarea', required: false },
+  ])
+  assert.equal(d.questions_pending, 2)
+  assert.ok(d.remaining_required.includes('Unggah CV secara manual'))
+  assert.equal('secret_skipped' in d, false)
+})

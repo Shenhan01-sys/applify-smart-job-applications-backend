@@ -93,8 +93,12 @@ export interface ExtFillAction {
 export interface ExtPendingQuestion {
   key: string
   label: string
-  /** `secret_skip`: kontrol rahasia (kata sandi, PIN, OTP, nomor kartu, dan sejenisnya). Tidak diisi dan tidak ditanyakan, pengguna mengisinya sendiri. */
-  kind: 'text' | 'textarea' | 'select' | 'check' | 'radio' | 'secret_skip'
+  /**
+   * `secret_skip`: kontrol rahasia (kata sandi, PIN, OTP, nomor kartu, dan sejenisnya). Tidak diisi dan tidak ditanyakan, pengguna mengisinya sendiri.
+   * `file`: berkas yang tidak terpasang atau tidak terbukti masuk (dilaporkan ekstensi, mis. "Unggah CV secara manual").
+   * Tanpa isian dan tanpa pilihan: pengguna mengunggahnya sendiri di tab lowongan.
+   */
+  kind: 'text' | 'textarea' | 'select' | 'check' | 'radio' | 'file' | 'secret_skip'
   /** `true` bila kolom di formulir wajib; `false` untuk kolom opsional yang belum terisi. */
   required: boolean
   options?: string[]
@@ -763,7 +767,10 @@ function directFactMatch(control: SanitizedExtControl, tokens: Record<string, st
   return null
 }
 
-type AnswerableKind = Exclude<ExtPendingQuestion['kind'], 'secret_skip'>
+/** Jenis yang tidak pernah dirahasiakan: bisa dijawab (teks, pilihan, centang) atau berkas yang diunggah sendiri. */
+type ReportedKind = Exclude<ExtPendingQuestion['kind'], 'secret_skip'>
+/** Jenis yang jawabannya bisa diketik di Applify. `file` dan `secret_skip` tidak punya isian. */
+type AnswerableKind = Exclude<ReportedKind, 'file'>
 
 function toPendingKind(kind: SanitizedExtControl['kind']): AnswerableKind {
   if (kind === 'checkbox') return 'check'
@@ -783,7 +790,7 @@ function questionReason(c: SanitizedExtControl): ExtQuestionReason | undefined {
 }
 
 export const EXT_MAX_PENDING_QUESTIONS = 20
-const PENDING_KINDS = new Set<AnswerableKind>(['text', 'textarea', 'select', 'check', 'radio'])
+const PENDING_KINDS = new Set<ReportedKind>(['text', 'textarea', 'select', 'check', 'radio', 'file'])
 
 /** `required` kiriman klien; tanpa nilai boolean dianggap wajib (klien lama hanya melaporkan kolom wajib). */
 const requiredOf = (rec: Record<string, unknown>): boolean => (typeof rec.required === 'boolean' ? rec.required : true)
@@ -792,8 +799,9 @@ const requiredOf = (rec: Record<string, unknown>): boolean => (typeof rec.requir
  * Pertanyaan yang dilaporkan ekstensi (`details.questions`) divalidasi seketat keluaran perencana:
  * kunci selalu dihitung ulang dari label dengan `questionKey` (kunci kiriman klien tidak dipercaya),
  * jenis tak dikenal menjadi teks, opsi hanya untuk select/radio, `required` selalu boolean, paling banyak 20.
+ * Jenis `file` (unggah manual) dipertahankan tanpa opsi: kartu pertanyaan menampilkannya sebagai petunjuk, bukan kolom isian.
  *
- * Hanya pertanyaan yang BISA DIJAWAB lewat Applify. Kontrol rahasia (`kind: 'secret_skip'` atau label rahasia)
+ * Hanya pertanyaan yang BISA DIJAWAB lewat Applify atau berkas yang diunggah sendiri. Kontrol rahasia (`kind: 'secret_skip'` atau label rahasia)
  * dibuang dari sini dan ditangani `sanitizeSecretSkips`, supaya kartu pertanyaan tidak pernah meminta kata sandi.
  */
 export function sanitizePendingQuestions(raw: unknown): ExtPendingQuestion[] {
@@ -809,8 +817,8 @@ export function sanitizePendingQuestions(raw: unknown): ExtPendingQuestion[] {
     const key = questionKey(label)
     if (!key || key === '__proto__' || seen.has(key)) continue
     const rawKind = rec.kind === 'checkbox' ? 'check' : rec.kind
-    const kind: AnswerableKind =
-      typeof rawKind === 'string' && PENDING_KINDS.has(rawKind as AnswerableKind) ? (rawKind as AnswerableKind) : 'text'
+    const kind: ReportedKind =
+      typeof rawKind === 'string' && PENDING_KINDS.has(rawKind as ReportedKind) ? (rawKind as ReportedKind) : 'text'
     const options: string[] = []
     if (kind === 'select' || kind === 'radio') {
       for (const opt of Array.isArray(rec.options) ? rec.options : []) {

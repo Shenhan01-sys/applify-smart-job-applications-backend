@@ -86,6 +86,21 @@ test('sanitizePendingQuestions: kunci dihitung ulang, rahasia dan bentuk rusak d
   ])
 })
 
+test('sanitizePendingQuestions: jenis file (unggah manual) dipertahankan tanpa opsi, bukan menjadi teks', () => {
+  assert.deepEqual(
+    sanitizePendingQuestions([
+      { key: 'FORGED', label: 'Unggah CV secara manual', kind: 'file', required: true, options: ['cv.pdf'] },
+      { label: 'Unggah surat lamaran secara manual', kind: 'file', required: false },
+      { label: 'Unggah CV secara manual', kind: 'file' },
+      { label: 'Unggah kata sandi berkas', kind: 'file' },
+    ]),
+    [
+      { key: 'unggah cv secara manual', label: 'Unggah CV secara manual', kind: 'file', required: true },
+      { key: 'unggah surat lamaran secara manual', label: 'Unggah surat lamaran secara manual', kind: 'file', required: false },
+    ]
+  )
+})
+
 test('workAuthorizationFromUsCitizenship: nilai persis saja; "Non-citizen" dan sejenisnya tidak pernah menjadi Yes', () => {
   const us = 'San Francisco, CA, United States'
   for (const v of ['US Citizen', 'u.s. citizen', 'Citizen', 'Permanent Resident', 'green-card holder', 'Green Card', 'yes', 'Ya']) {

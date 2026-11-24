@@ -133,6 +133,22 @@ test('answers: jawaban kosong dilewati tanpa galat; semuanya kosong -> {saved: 0
   assert.equal(store.tables.user_form_answers.length, 1)
 })
 
+test('answers: butir bertanda kind file (unggah manual) dilewati tanpa galat dan tidak pernah disimpan', async () => {
+  const { post, store } = await setup()
+  const only = await post({ approvalId: APPROVAL, answers: [{ key: 'f1', label: 'Unggah CV secara manual', kind: 'file' }] })
+  assert.equal(only.statusCode, 200)
+  assert.deepEqual(only.json(), { saved: 0 })
+  const mixed = await post({
+    approvalId: APPROVAL,
+    answers: [
+      { key: 'f1', label: 'Unggah CV secara manual', kind: 'file', value: 'cv.pdf' },
+      { key: 'b', label: 'Answered question', value: 'Ya' },
+    ],
+  })
+  assert.deepEqual(mixed.json(), { saved: 1 })
+  assert.deepEqual(store.tables.user_form_answers.map((r) => r.question_key), ['answered question'])
+})
+
 test('answers: jawaban untuk pertanyaan rahasia ditolak (400 secret_question) dan tidak pernah disimpan', async () => {
   const { post, store } = await setup()
   for (const label of ['Password', 'Enter your PIN', 'One-time passcode', 'CVV', 'Kata sandi']) {

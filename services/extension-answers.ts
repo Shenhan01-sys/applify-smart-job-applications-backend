@@ -10,6 +10,7 @@ import type { GuardDb } from './queue-guard.js'
  * perencana (harus sama persis dengan worker dan frontend); kunci kiriman klien tidak dipercaya, kunci selalu dihitung
  * ulang dari label. Jawaban untuk pertanyaan rahasia (kata sandi, PIN, OTP, kartu) ditolak: bank jawaban tidak boleh
  * menyimpannya.
+ * Butir bertanda `kind: 'file'` (pertanyaan unggah manual) dilewati: tidak ada yang bisa diketik dan tidak disimpan.
  */
 
 export const EXT_MAX_ANSWERS = 30
@@ -42,6 +43,8 @@ export function parseExtensionAnswers(raw: unknown, userId: string, now: Date, a
   const byKey = new Map<string, ExtensionAnswerRow>()
   for (const item of raw) {
     if (!isRecord(item)) throw new ExtensionRunnerError(400, 'invalid_answers', 'Setiap jawaban harus berupa objek {key, label, value}')
+    // Pertanyaan berkas ("Unggah CV secara manual") tidak punya isian: pengguna mengunggahnya sendiri di tab lowongan.
+    if (item.kind === 'file') continue
     if (typeof item.value !== 'string') throw new ExtensionRunnerError(400, 'invalid_answers', 'value jawaban harus berupa teks')
     const answer = cleanAnswer(item.value)
     if (answer.length > EXT_MAX_ANSWER_CHARS) {
