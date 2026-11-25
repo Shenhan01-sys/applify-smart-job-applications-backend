@@ -30,6 +30,8 @@ import { aggregateJobs } from '../services/job-aggregation.service.js'
  *   - Mengikat di luar loopback wajib menyertakan APPLIFY_JOBS_MCP_TOKEN (Bearer / x-mcp-token).
  *   - Pemeriksaan header Host & Origin (tolak browser cross-origin / DNS rebinding).
  *   - Batas ukuran body 256 KB (413), batas waktu baca (408), dan rate limit per pemanggil (429).
+ *     Default 300/menit untuk pemanggil loopback (worker) dan 30/menit untuk lainnya;
+ *     APPLIFY_JOBS_MCP_RATE_PER_MIN menimpa keduanya.
  *   - Batas fan-out tool: maksimal 10 platform dan limitPerSource maksimal 25.
  *
  * Server ini stateless dan TIDAK menyentuh database; penyimpanan dilakukan pemanggil
@@ -43,11 +45,40 @@ export const MAX_MCP_PLATFORMS = 10
 export const MAX_MCP_LIMIT_PER_SOURCE = 25
 export const MAX_MCP_SINGLE_LIMIT = 50
 export const DEFAULT_MCP_RATE_LIMIT = { maxRequests: 30, windowMs: 60_000 } as const
+/** Pemanggil loopback (worker Applify di mesin yang sama) memakai batas lebih longgar: satu pencarian = ~3 POST. */
+export const DEFAULT_MCP_LOOPBACK_RATE_LIMIT = { maxRequests: 300, windowMs: 60_000 } as const
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
 export function isLoopbackHost(host: string): boolean {
   return LOOPBACK_HOSTS.has(host.trim().toLowerCase())
+}
+
+/** Alamat socket pemanggil ada di loopback (IPv4 127.x.x.x, IPv6 ::1, atau IPv4-mapped). */
+export function isLoopbackAddress(addr: string | undefined | null): boolean {
+  if (!addr) return false
+  const a = addr.trim().toLowerCase().replace(/^::ffff:/, '')
+  return a === '::1' || /^127(?:\.\d{1,3}){3}$/.test(a)
+}
+
+/**
+ * Batas request per menit per pemanggil. APPLIFY_JOBS_MCP_RATE_PER_MIN (bilangan bulat positif) mengatur
+ * batas untuk semua pemanggil; tanpa env, pemanggil loopback 300/menit dan pemanggil lain 30/menit.
+ * Nilai env yang tidak valid diabaikan.
+ */
+export function resolveMcpRateLimits(
+  envValue: string | undefined = process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN,
+): { loopback: { maxRequests: number; windowMs: number }; remote: { maxRequests: number; windowMs: number } } {
+  const raw = envValue?.trim()
+  const parsed = raw && /^\d+$/.test(raw) ? Number(raw) : NaN
+  if (Number.isSafeInteger(parsed) && parsed > 0) {
+    const limit = { maxRequests: parsed, windowMs: DEFAULT_MCP_RATE_LIMIT.windowMs }
+    return { loopback: limit, remote: limit }
+  }
+  return {
+    loopback: { ...DEFAULT_MCP_LOOPBACK_RATE_LIMIT },
+    remote: { ...DEFAULT_MCP_RATE_LIMIT },
+  }
 }
 
 function parseHostname(rawHostHeader: string | undefined): string {
@@ -317,10 +348,10 @@ export function createMcpHttpServer(opts: McpHttpOptions = {}): Server {
     allowedHosts.add(normalizedBoundHost)
   }
   const allowedOrigins = opts.allowedOrigins ?? parseCsvSet(process.env.APPLIFY_JOBS_MCP_ALLOWED_ORIGINS)
-  const checkRateLimit = createMcpRateLimiter(
-    opts.rateLimit?.maxRequests ?? DEFAULT_MCP_RATE_LIMIT.maxRequests,
-    opts.rateLimit?.windowMs ?? DEFAULT_MCP_RATE_LIMIT.windowMs,
-  )
+  // opts.rateLimit (eksplisit, dipakai tes) berlaku untuk semua pemanggil; selain itu batas dipilih menurut env dan asal pemanggil.
+  const rateLimits = opts.rateLimit ? { loopback: opts.rateLimit, remote: opts.rateLimit } : resolveMcpRateLimits()
+  const checkLoopbackRate = createMcpRateLimiter(rateLimits.loopback.maxRequests, rateLimits.loopback.windowMs)
+  const checkRemoteRate = createMcpRateLimiter(rateLimits.remote.maxRequests, rateLimits.remote.windowMs)
 
   return createServer(async (req: IncomingMessage, res: ServerResponse) => {
     let url: URL
@@ -373,7 +404,7 @@ export function createMcpHttpServer(opts: McpHttpOptions = {}): Server {
     const callerKey = providedToken
       ? `tok:${crypto.createHash('sha256').update(providedToken).digest('hex').slice(0, 16)}`
       : `ip:${req.socket.remoteAddress ?? 'unknown'}`
-    const rate = checkRateLimit(callerKey)
+    const rate = (isLoopbackAddress(req.socket.remoteAddress) ? checkLoopbackRate : checkRemoteRate)(callerKey)
     if ('retryAfterSec' in rate) {
       res.writeHead(429, {
         'content-type': 'application/json',

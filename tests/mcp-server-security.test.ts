@@ -6,6 +6,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import {
   DEFAULT_MCP_HOST,
+  DEFAULT_MCP_LOOPBACK_RATE_LIMIT,
+  DEFAULT_MCP_RATE_LIMIT,
   MAX_MCP_BODY_BYTES,
   MAX_MCP_LIMIT_PER_SOURCE,
   MAX_MCP_PLATFORMS,
@@ -13,7 +15,9 @@ import {
   createMcpHttpServer,
   isAllowedHostHeader,
   isAllowedOriginHeader,
+  isLoopbackAddress,
   isLoopbackHost,
+  resolveMcpRateLimits,
 } from '../mcp/server.js'
 
 /**
@@ -187,6 +191,82 @@ test('BS-P1-03: rate limit mengembalikan 429 dengan header Retry-After saat bata
     assert.ok(Number(r3.headers['retry-after']) >= 1)
   } finally {
     await closeServer(srv)
+  }
+})
+
+test('MCP rate limit: default 300/menit untuk loopback dan 30/menit untuk pemanggil lain', () => {
+  const d = resolveMcpRateLimits(undefined)
+  assert.equal(d.loopback.maxRequests, 300)
+  assert.equal(d.remote.maxRequests, 30)
+  assert.deepEqual(d.loopback, { ...DEFAULT_MCP_LOOPBACK_RATE_LIMIT })
+  assert.deepEqual(d.remote, { ...DEFAULT_MCP_RATE_LIMIT })
+  assert.ok(d.loopback.maxRequests > d.remote.maxRequests)
+})
+
+test('MCP rate limit: APPLIFY_JOBS_MCP_RATE_PER_MIN menimpa batas semua pemanggil, nilai tidak valid diabaikan', () => {
+  const o = resolveMcpRateLimits(' 120 ')
+  assert.equal(o.loopback.maxRequests, 120)
+  assert.equal(o.remote.maxRequests, 120)
+  for (const bad of ['', '0', '-5', 'abc', '1.5', '10req', 'Infinity']) {
+    const r = resolveMcpRateLimits(bad)
+    assert.equal(r.loopback.maxRequests, 300, `env ${JSON.stringify(bad)}`)
+    assert.equal(r.remote.maxRequests, 30, `env ${JSON.stringify(bad)}`)
+  }
+})
+
+test('MCP rate limit: isLoopbackAddress mengenali IPv4, IPv6, dan IPv4-mapped loopback saja', () => {
+  for (const ok of ['127.0.0.1', '127.1.2.3', '::1', '::ffff:127.0.0.1']) assert.equal(isLoopbackAddress(ok), true, ok)
+  for (const bad of ['10.0.0.5', '192.168.1.2', '8.8.8.8', '::ffff:10.0.0.5', '1270.0.0.1', '', undefined, null]) {
+    assert.equal(isLoopbackAddress(bad as string | undefined), false, String(bad))
+  }
+})
+
+test('MCP rate limit: pemanggil loopback tanpa env tidak kena 429 pada 40 request beruntun (default 300)', async () => {
+  const prev = process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN
+  delete process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN
+  const srv = createMcpHttpServer({ host: '127.0.0.1' })
+  const port = await listenLocal(srv)
+  try {
+    const initPayload = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } },
+    })
+    for (let i = 0; i < 40; i++) {
+      const r = await sendRawRequest(port, { body: initPayload })
+      assert.notEqual(r.status, 429, `request ke-${i + 1}`)
+    }
+  } finally {
+    await closeServer(srv)
+    if (prev === undefined) delete process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN
+    else process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN = prev
+  }
+})
+
+test('MCP rate limit: env APPLIFY_JOBS_MCP_RATE_PER_MIN=2 dibaca saat server dibuat dan menghasilkan 429 pada request ke-3', async () => {
+  const prev = process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN
+  process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN = '2'
+  const srv = createMcpHttpServer({ host: '127.0.0.1' })
+  const port = await listenLocal(srv)
+  try {
+    const initPayload = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } },
+    })
+    const r1 = await sendRawRequest(port, { body: initPayload })
+    const r2 = await sendRawRequest(port, { body: initPayload })
+    const r3 = await sendRawRequest(port, { body: initPayload })
+    assert.notEqual(r1.status, 429)
+    assert.notEqual(r2.status, 429)
+    assert.equal(r3.status, 429)
+    assert.ok(Number(r3.headers['retry-after']) >= 1)
+  } finally {
+    await closeServer(srv)
+    if (prev === undefined) delete process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN
+    else process.env.APPLIFY_JOBS_MCP_RATE_PER_MIN = prev
   }
 })
 
