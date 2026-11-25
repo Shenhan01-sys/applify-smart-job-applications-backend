@@ -84,8 +84,29 @@ const LOCATION_ALIASES: Record<string, string[]> = {
     'bali', 'denpasar', 'tangerang', 'bekasi', 'depok', 'bogor', 'makassar', 'malang', 'batam', 'balikpapan'],
   jakarta: ['jakarta', 'dki jakarta', 'south jakarta', 'jakarta selatan', 'central jakarta', 'jakarta pusat',
     'jakarta barat', 'jakarta timur', 'jakarta utara', 'west jakarta', 'north jakarta', 'east jakarta'],
-  yogyakarta: ['yogyakarta', 'jogja', 'jogjakarta', 'sleman', 'bantul'],
+  yogyakarta: ['yogyakarta', 'jogja', 'jogjakarta', 'diy', 'daerah istimewa yogyakarta', 'sleman', 'bantul'],
 }
+
+// Singkatan kota yang lazim diketik pengguna, selaras dengan LOCATION_ALIAS_GROUPS di frontend (jobFilters.ts).
+// Tiap anggota grup dipakai sebagai kunci: mencari salah satunya mencocokkan semua anggota lain (dua arah).
+const LOCATION_ALIAS_GROUPS: string[][] = [
+  ['jaksel', 'jakarta selatan', 'south jakarta'],
+  ['jakpus', 'jakarta pusat', 'central jakarta'],
+  ['jakbar', 'jakarta barat', 'west jakarta'],
+  ['jaktim', 'jakarta timur', 'east jakarta'],
+  ['jakut', 'jakarta utara', 'north jakarta'],
+  ['sby', 'surabaya'],
+  ['bdg', 'bandung'],
+  ['smg', 'semarang'],
+  ['solo', 'surakarta'],
+]
+for (const group of LOCATION_ALIAS_GROUPS) for (const key of group) LOCATION_ALIASES[key] = group
+// Penulisan lain untuk Yogyakarta dan payung satu arah: "jabodetabek" mencakup kelima kotanya,
+// tetapi mencari "bogor" tidak ikut mencocokkan lowongan Jakarta.
+for (const key of ['jogja', 'jogjakarta', 'diy', 'daerah istimewa yogyakarta']) LOCATION_ALIASES[key] = LOCATION_ALIASES.yogyakarta
+LOCATION_ALIASES.jabodetabek = ['jabodetabek', 'jakarta', 'bogor', 'depok', 'tangerang', 'bekasi']
+// Lowongan yang menulis lokasi dengan singkatan juga ikut cocok saat mencari "jakarta".
+LOCATION_ALIASES.jakarta.push('jaksel', 'jakpus', 'jakbar', 'jaktim', 'jakut')
 
 /**
  * Filter lokasi: lolos bila lokasi lowongan memuat lokasi yang diminta (atau aliasnya).
@@ -95,7 +116,8 @@ export function matchesLocation(jobLocation: string | undefined, wanted?: string
   const w = normalizeText(wanted)
   if (!w) return true
   const loc = normalizeText(jobLocation)
-  const candidates = LOCATION_ALIASES[w] ?? [w]
+  // hasOwn: kueri seperti "constructor" atau "toString" tidak boleh membaca properti bawaan Object.
+  const candidates = Object.hasOwn(LOCATION_ALIASES, w) ? LOCATION_ALIASES[w] : [w]
   return candidates.some((c) => hasTerm(loc, c))
 }
 
