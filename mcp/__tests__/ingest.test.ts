@@ -152,3 +152,14 @@ test('ingestJobs: skema live tanpa kolom match_score -> lowongan tetap tersimpan
   assert.equal(updates.length, 0)
   assert.ok(!('match_score' in rows[0]))
 })
+
+test('baris lama dengan url halaman perusahaan: tidak diinsert ganda, external_url dipindah ke formulir Greenhouse', async () => {
+  const oldUrl = 'https://careers.datadoghq.com/detail/7131726/?gh_jid=7131726'
+  const { client, rows, updates } = fakeSupabase({ existingUrls: [oldUrl] })
+  const s = await ingestJobs(client, [rj({ id: 'gh1', platform: 'greenhouse', url: oldUrl, apply_url: 'https://job-boards.greenhouse.io/datadog/jobs/7131726' })])
+  assert.equal(rows.length, 0)
+  assert.equal(s.duplicates, 1)
+  assert.equal(updates.length, 1)
+  assert.equal(updates[0].id, `id:${oldUrl}`)
+  assert.equal(updates[0].patch.external_url, 'https://job-boards.greenhouse.io/datadog/jobs/7131726')
+})

@@ -202,3 +202,15 @@ test('Greenhouse: tipe pekerjaan dari judul, bukan dari kata international/partn
   assert.equal(normalizeGreenhouseJob({ ...base, id: 3, title: 'Part-time Tutor', content }, 'reddit')!.job_type, 'part-time')
   assert.equal(normalizeGreenhouseJob({ ...base, id: 4, title: 'Contract Designer', content }, 'reddit')!.job_type, 'contract')
 })
+
+test('Greenhouse: apply_url selalu formulir job-boards.greenhouse.io, walau absolute_url halaman perusahaan', () => {
+  const j = normalizeGreenhouseJob({
+    id: 7131726, title: 'Strategic Account Executive', location: { name: 'Jakarta, Indonesia' },
+    absolute_url: 'https://careers.datadoghq.com/detail/7131726/?gh_jid=7131726', updated_at: '2026-11-20T00:00:00Z', content: '',
+  }, 'datadog', 'Datadog')!
+  assert.equal(j.apply_url, 'https://job-boards.greenhouse.io/datadog/jobs/7131726')
+  assert.equal(j.url, 'https://careers.datadoghq.com/detail/7131726/?gh_jid=7131726')
+  // Papan atau id yang aneh tidak dipakai menyusun URL: jatuh ke absolute_url.
+  const bad = normalizeGreenhouseJob({ id: 'x/../1', title: 'T', absolute_url: 'https://job-boards.greenhouse.io/a/jobs/1' }, 'a b')!
+  assert.equal(bad.apply_url, 'https://job-boards.greenhouse.io/a/jobs/1')
+})

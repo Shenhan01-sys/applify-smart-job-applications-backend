@@ -148,7 +148,14 @@ export async function ingestJobs(supabase: SupabaseClient, jobs: RankedJob[]): P
     const bucket = (summary.byPlatform[job.platform] ??= { inserted: 0, duplicates: 0, failed: 0 })
     const url = job.apply_url || job.url
     if (url) {
-      const found = await lookup(url)
+      let found = await lookup(url)
+      // Baris lama disimpan dengan url halaman perusahaan (Greenhouse sebelum 25 November 2026): cari juga lewat
+      // job.url, lalu pindahkan external_url ke formulir yang bisa dikirim, supaya tidak muncul baris ganda.
+      let legacy = false
+      if (found.length === 0 && job.url && job.url !== url) {
+        found = await lookup(job.url)
+        legacy = found.length > 0
+      }
       if (found.length > 0) {
         summary.duplicates++
         bucket.duplicates++
@@ -160,6 +167,7 @@ export async function ingestJobs(supabase: SupabaseClient, jobs: RankedJob[]): P
         const detail = flags.detail ? detailPatch(row, job) : {}
         const hasDetail = Object.keys(detail).length > 0
         if (hasDetail) Object.assign(patch, detail, { updated_at: new Date().toISOString() })
+        if (legacy) patch.external_url = url
         if (Object.keys(patch).length > 0) {
           let { error: upErr } = await supabase.from('jobs').update(patch).eq('id', row.id)
           if (upErr && hasDetail && COLUMN_ERROR.test(upErr.message ?? '')) {
