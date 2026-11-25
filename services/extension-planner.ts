@@ -988,11 +988,16 @@ export class ExtensionPlanner {
       achievementRows: achievementRows.data,
       resumeUrl,
     }
-    perDb.set(key, { value, expiresAt: this.now() + EXT_CONTEXT_CACHE_TTL_MS })
-    while (perDb.size > EXT_CONTEXT_CACHE_MAX) {
-      const oldest = perDb.keys().next().value
-      if (oldest === undefined) break
-      perDb.delete(oldest)
+    // Supabase mengembalikan {data: null, error} (tidak melempar). Hasil gagal atau tanpa lowongan/profil tidak boleh
+    // di-cache: kalau tidak, satu gangguan sesaat membuat konteks kosong dipakai ulang sampai TTL habis.
+    const queryFailed = [job, profile, settings, skillRows, workRows, achievementRows].some((r) => Boolean(r?.error))
+    if (!queryFailed && job?.data != null && profile?.data != null) {
+      perDb.set(key, { value, expiresAt: this.now() + EXT_CONTEXT_CACHE_TTL_MS })
+      while (perDb.size > EXT_CONTEXT_CACHE_MAX) {
+        const oldest = perDb.keys().next().value
+        if (oldest === undefined) break
+        perDb.delete(oldest)
+      }
     }
     return value
   }

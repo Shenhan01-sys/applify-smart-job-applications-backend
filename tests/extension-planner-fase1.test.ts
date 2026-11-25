@@ -179,3 +179,68 @@ test('fase 1 butir 3: payload lama tanpa field baru tetap diterima tanpa galat',
   assert.equal(result.blocked, null)
   assert.ok(Array.isArray(result.actions))
 })
+
+/** Bungkus db tiruan: `from(table)` pertama untuk `table` mengembalikan `result` (mis. {data:null, error}); selebihnya diteruskan. */
+function failOnceDb(inner: any, table: string, result: { data: any; error: any }) {
+  let failed = false
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop !== 'from') return Reflect.get(target, prop, receiver)
+      return (name: string) => {
+        if (name === table && !failed) {
+          failed = true
+          const q: any = {
+            select: () => q,
+            eq: () => q,
+            limit: () => q,
+            maybeSingle: async () => result,
+            then: (ok: any, ko: any) => Promise.resolve(result).then(ok, ko),
+          }
+          return q
+        }
+        return target.from(name)
+      }
+    },
+  })
+}
+
+const CACHE_ERROR_CASES: Array<{ name: string; table: string; result: { data: any; error: any } }> = [
+  { name: 'jobs mengembalikan galat', table: 'jobs', result: { data: null, error: { message: 'timeout' } } },
+  { name: 'jobs kosong (data null tanpa galat)', table: 'jobs', result: { data: null, error: null } },
+  { name: 'profiles kosong (data null tanpa galat)', table: 'profiles', result: { data: null, error: null } },
+  { name: 'user_skills mengembalikan galat', table: 'user_skills', result: { data: null, error: { message: 'connection reset' } } },
+  { name: 'achievements mengembalikan galat', table: 'achievements', result: { data: null, error: { message: 'timeout' } } },
+]
+
+for (const c of CACHE_ERROR_CASES) {
+  test(`fase 1 review: konteks gagal dibaca (${c.name}) tidak di-cache; planForm berikutnya membaca ulang dan mendapat data`, async () => {
+    invalidatePlannerContextCache()
+    const jobId = `job-err-${c.table}-${c.result.error ? 'e' : 'n'}`
+    const store = makeExtensionTestDb(baseSeed(jobId))
+    const db = failOnceDb(store.db, c.table, c.result)
+    const prompts: string[] = []
+    const planner = new ExtensionPlanner(async (req) => {
+      prompts.push(req.user)
+      return { model: 'm', text: '{"actions":[]}' }
+    })
+    const args = {
+      db,
+      userId: USER_ID,
+      jobId,
+      pageUrl: 'https://boards.greenhouse.io/acme/jobs/err',
+      rawControls: [{ controlId: 'c1', kind: 'textarea', label: 'Ceritakan motivasimu', required: true }],
+    }
+    const staticCalls = () => store.calls.filter((x) => STATIC_TABLES.has(x.table)).length
+
+    await planner.planForm(args)
+    const afterFirst = staticCalls()
+    assert.equal(afterFirst, 5, 'kueri yang digagalkan tidak sampai ke db asli; lima lainnya jalan')
+
+    await planner.planForm(args)
+    assert.equal(staticCalls(), afterFirst + 6, 'hasil gagal tidak di-cache: panggilan kedua membaca ulang keenam kueri')
+    assert.match(prompts[1], /Backend Engineer/, 'panggilan kedua memakai data lowongan sungguhan')
+
+    await planner.planForm(args)
+    assert.equal(staticCalls(), afterFirst + 6, 'hasil sehat di-cache: panggilan ketiga tidak membaca ulang')
+  })
+}
