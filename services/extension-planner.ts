@@ -727,7 +727,7 @@ function buildFactTokens(args: {
     tokens.years_of_experience ? `Lama pengalaman kerja (tahun): ${tokens.years_of_experience} -> token {{years_of_experience}}` : '',
     tokens.work_authorization ? `Izin kerja: ${tokens.work_authorization} -> token {{work_authorization}}` : '',
     tokens.require_visa ? `Butuh sponsor visa: ${tokens.require_visa} -> token {{require_visa}}` : '',
-    tokens.expected_salary ? `Ekspektasi gaji: ${tokens.expected_salary} -> token {{expected_salary}}` : '',
+    tokens.expected_salary ? `Ekspektasi gaji: tersedia, gunakan token {{expected_salary}} (angkanya tidak ditulis di sini)` : '',
     tokens.linkedin_url ? `LinkedIn URL: token {{linkedin_url}}` : '',
     tokens.portfolio_url ? `Portfolio URL: token {{portfolio_url}}` : '',
     tokens.github_url ? `GitHub URL: token {{github_url}}` : '',

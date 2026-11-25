@@ -29,6 +29,7 @@ export type WarningKind =
   | 'unsupported_certification'
   | 'unsupported_employer'
   | 'unsupported_institution'
+  | 'unsupported_entity'
   | 'language_mismatch'
 
 /** Peringatan lunak: keluaran tetap bisa dipakai, tetapi pengguna harus memeriksanya sebelum mengirim. */
@@ -231,10 +232,24 @@ const normalizeLanguageName = (v: unknown): OutputLanguage | 'auto' => {
  * Inggris hanya bila teks lowongan jelas berbahasa Inggris (rasio kata henti Inggris minimal 0,10 dan minimal
  * 1,5 kali rasio Indonesia, dengan sedikitnya 8 kata).
  */
+/**
+ * Hanya bagian awal deskripsi yang dipakai memilih bahasa, agar boilerplate panjang tidak membalik hasil.
+ * Bagian itu juga dibersihkan dari baris instruksi dan tag JSON, yang sering dipakai teks iklan untuk meniru
+ * bahasa Inggris tanpa makna lowongan.
+ */
+const LANGUAGE_SAMPLE_CHARS = 1200
+
+const languageSample = (text: string) => text
+  .replace(/<[^>]*>/g, ' ')
+  .split('\n')
+  .filter((l) => !/^\s*(?:ignore|abaikan|instruction|instruksi|system|prompt|you are|write|jangan|jawab|ubah)\b/i.test(l.trim()))
+  .join(' ')
+  .slice(0, LANGUAGE_SAMPLE_CHARS)
+
 export function selectLanguage(opts: { requested?: unknown; jobText?: string } = {}): OutputLanguage {
   const asked = normalizeLanguageName(opts.requested)
   if (asked !== 'auto') return asked
-  const d = detectLanguage(opts.jobText ?? '')
+  const d = detectLanguage(languageSample(opts.jobText ?? ''))
   if (d.tokens >= 8 && d.enRatio >= 0.1 && d.enRatio >= 1.5 * d.idRatio) return 'en'
   return 'id'
 }
@@ -509,6 +524,50 @@ const containsPhrase = (haystackNorm: string, phrase: string) => {
   return p.length > 0 && ` ${haystackNorm} `.includes(` ${p} `)
 }
 
+// ───────────────────────────────────────────────────── pendeteksi entitas fiktif pada surat lamaran
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** Nama yang sering dipakai model sebagai pengalaman rekaan. Tidak dipakai sebagai daftar hitam mutlak. */
+const KNOWN_EMPLOYERS = [
+  'Google', 'Meta', 'Facebook', 'Instagram', 'Gojek', 'Tokopedia', 'Shopee', 'Grab', 'Uber',
+  'Microsoft', 'Amazon', 'Apple', 'Netflix', 'Salesforce', 'IBM', 'Oracle', 'Adobe', 'Cisco',
+  'Samsung', 'Intel', 'Nvidia', 'Spotify', 'Zoom', 'GitHub', 'Stripe', 'PayPal', 'Airbnb',
+  'ByteDance', 'TikTok', 'LinkedIn', 'OpenAI', 'Anthropic', 'BCA', 'Mandiri', 'BRI', 'BNI', 'Telkom',
+]
+
+const ENTITY_STOP = new Set([
+  'indonesia', 'jakarta', 'bandung', 'surabaya', 'yogyakarta', 'remote', 'office', 'team',
+  'yang', 'dan', 'dengan', 'untuk', 'dari', 'pada', 'saya', 'kami', 'ini', 'itu',
+])
+
+/**
+ * Calon nama entitas dari pola klaim pengalaman, proyek, dan sertifikasi. Teks yang tidak dikenal tidak
+ * langsung dianggap karangan: pemanggil memeriksa terhadap sumber fakta dan konteks lowongan tujuan.
+ */
+function entityCandidates(text: string): string[] {
+  const out = new Set<string>()
+  const add = (raw: string) => {
+    const v = raw.replace(/[.,;:!?)\]}'"]+$/u, '').replace(/^(?:di|at|pada|dari)\s+/i, '').trim()
+    if (v.length > 0 && v.length <= 60) out.add(v)
+  }
+  for (const m of text.matchAll(/\b(?:PT|CV)\s+([A-Z][\p{L}0-9&.'’\- ]{1,55})/gu)) add(m[1])
+  for (const m of text.matchAll(/\b(?:bekerja di|worked at|work at|bergabung di|bergabung dengan|joined)\s+([A-Z][\p{L}0-9&.'’\- ]{1,40})/giu)) add(m[1])
+  for (const m of text.matchAll(/\b(?:memimpin proyek|led (?:a )?project|mengelola proyek|worked on project)\s+([A-Z][\p{L}0-9&.'’\- ]{1,55})/giu)) add(m[1])
+  for (const m of text.matchAll(/\b(?:sertifikasi|sertifikat|certified in|certification in)\s+([A-Z][\p{L}0-9&.'’\- ]{1,55})/giu)) {
+    const v = m[1]
+    // Standar dan sertifikasi berangka (ISO 27001, SOC 2, NIST 800-53) adalah nama sertifikasi, bukan klaim entitas.
+    if (!/\b(?:ISO|IEC|SOC|PCI|NIST|ITIL|COBIT|TOGAF|PMI|PRINCE2)\b/i.test(v)) add(v)
+  }
+  for (const name of KNOWN_EMPLOYERS) {
+    if (new RegExp(`\\b${escapeRegExp(name)}\\b`, 'i').test(text)) add(name)
+  }
+  return [...out].filter((v) => {
+    const n = normalizeForMatch(v)
+    return n.length >= 3 && !ENTITY_STOP.has(n)
+  })
+}
+
 interface NumberToken { raw: string; value: number; percent: boolean }
 
 const PERCENT_AFTER = /^\s*(?:%|％|persen\b|percent\b|per cent\b)/i
@@ -610,7 +669,7 @@ function itemName(item: string): string {
  * di profil, serta pada CV juga proyek, sertifikasi, perusahaan, dan institusi yang tidak ada di profil.
  * `sections: false` dipakai untuk surat lamaran (hanya angka dan persen).
  */
-export function checkGrounding(output: string, source: GroundingSource | string, opts: { sections?: boolean } = {}): OutputWarning[] {
+export function checkGrounding(output: string, source: GroundingSource | string, opts: { sections?: boolean; checkEntities?: boolean; allowedContext?: string } = {}): OutputWarning[] {
   const src: GroundingSource = typeof source === 'string' ? { text: source } : source
   const warnings: OutputWarning[] = []
   const push = (w: OutputWarning | null) => { if (w) warnings.push(w) }
@@ -622,6 +681,18 @@ export function checkGrounding(output: string, source: GroundingSource | string,
     (l) => `Angka persen ini tidak ada di profilmu: ${l}. Hapus atau ganti dengan angka yang benar sebelum mengirim.`))
   push(makeWarning('unsupported_number', tokens.filter((t) => !t.percent && !plain.has(t.value)).map((t) => t.raw),
     (l) => `Angka ini tidak ditemukan di profilmu: ${l}. Periksa kebenarannya sebelum mengirim.`))
+
+  if (opts.checkEntities) {
+    const allowNorm = normalizeForMatch([
+      src.text,
+      ...(src.employers ?? []),
+      ...(src.institutions ?? []),
+      opts.allowedContext ?? '',
+    ].join(' '))
+    const unsupported = entityCandidates(output).filter((name) => !containsPhrase(allowNorm, name))
+    push(makeWarning('unsupported_entity', unsupported,
+      (l) => `Perusahaan, proyek, atau sertifikasi ini tidak ada di profilmu: ${l}. Hapus bila bukan milikmu.`))
+  }
 
   if (opts.sections) {
     const srcNorm = normalizeForMatch(src.text)

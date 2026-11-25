@@ -143,3 +143,29 @@ test('planForm: izin kerja dari us_citizenship hanya masuk fakta kandidat untuk 
   assert.doesNotMatch(await run('Non-citizen', 'New York, United States'), /Izin kerja/)
   assert.doesNotMatch(await run('US Citizen', 'Jakarta, Indonesia'), /Izin kerja/)
 })
+
+test('planForm (temuan #5): angka gaji mentah tidak pernah masuk prompt model; hanya token {{expected_salary}}', async () => {
+  for (const key of ['desired_salary', 'expected_salary'] as const) {
+    let userPrompt = ''
+    let systemPrompt = ''
+    const planner = new ExtensionPlanner(async (req) => {
+      userPrompt = req.user
+      systemPrompt = String((req as any).system ?? '')
+      return { model: 'm', text: '{"actions":[]}' }
+    })
+    const store = makeExtensionTestDb({
+      jobs: [{ id: 'job-1', title: 'Engineer', company: 'Acme', description: '', location: 'Jakarta' }],
+      user_automation_settings: [{ user_id: USER_ID, [key]: 13579246 }],
+    })
+    await planner.planForm({
+      db: store.db,
+      userId: USER_ID,
+      jobId: 'job-1',
+      pageUrl: 'https://boards.greenhouse.io/acme/jobs/1',
+      rawControls: [{ controlId: 'c1', kind: 'text', label: 'Expected salary', required: true }],
+    })
+    assert.doesNotMatch(userPrompt, /13579246|13\.579\.246|13,579,246/, key)
+    assert.doesNotMatch(systemPrompt, /13579246/, key)
+    assert.match(userPrompt, /\{\{expected_salary\}\}/, key)
+  }
+})

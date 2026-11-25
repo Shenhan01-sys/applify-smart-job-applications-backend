@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import Fastify from 'fastify'
-import { hashOAuthNonce, signState, timingSafeStringEqual, verifyState } from '../services/token-crypto.js'
+import { decrypt as decryptForTest, encrypt as encryptForTest, hashOAuthNonce, signState, timingSafeStringEqual, verifyState } from '../services/token-crypto.js'
 import { OAUTH_NONCE_COOKIE, oauthRoutes } from '../api/routes/oauth.js'
 import { makeExtensionTestDb } from './extension-test-db.js'
 
@@ -313,4 +313,101 @@ test('OAuth status: token yang refresh-nya ditolak (invalid_grant) melapor conne
   const none = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
   assert.deepEqual(none.json(), { gmail: false, connected: false, needs_reconnect: false })
   await app.close()
+})
+
+// ---- Temuan #7: status Gmail jujur untuk is_active=false dan refresh_token kosong ------------------------------------
+
+function blobOf(fields: Record<string, unknown>): string {
+  return encryptForTest(JSON.stringify(fields))
+}
+
+test('OAuth status (#7): is_active=false TIDAK dilaporkan tersambung; needs_reconnect:true', async () => {
+  const future = new Date(Date.now() + 3600_000).toISOString()
+  const store = makeExtensionTestDb({
+    platform_sessions: [{ id: 's1', user_id: 'user-1', platform: 'gmail', is_active: false, expires_at: future, session_data: { encrypted: 'BLOB' } }],
+  })
+  const app = await buildOAuthApp({ db: store.db })
+  const res = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
+  assert.deepEqual(res.json(), { gmail: false, connected: false, needs_reconnect: true })
+  await app.close()
+})
+
+test('OAuth status (#7): access token kedaluwarsa tanpa refresh_token -> needs_reconnect; dengan refresh_token -> tersambung', async () => {
+  await withEncryptionKey(async () => {
+    const past = new Date(Date.now() - 3600_000).toISOString()
+    const store = makeExtensionTestDb({
+      platform_sessions: [{ id: 's1', user_id: 'user-1', platform: 'gmail', is_active: true, expires_at: past, session_data: { encrypted: blobOf({ access_token: 'at' }) } }],
+    })
+    const app = await buildOAuthApp({ db: store.db })
+    const get = () => app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
+    assert.deepEqual((await get()).json(), { gmail: false, connected: false, needs_reconnect: true })
+    store.tables.platform_sessions[0].session_data = { encrypted: blobOf({ access_token: 'at', refresh_token: 'rt' }) }
+    assert.deepEqual((await get()).json(), { gmail: true, connected: true, needs_reconnect: false })
+    // invalid_grant tetap needs_reconnect
+    store.tables.platform_sessions[0].session_data = { encrypted: blobOf({ refresh_token: 'rt' }), refresh_failed: 'invalid_grant' }
+    assert.deepEqual((await get()).json(), { gmail: false, connected: false, needs_reconnect: true })
+    await app.close()
+  })
+})
+
+async function runCallback(opts: { tokenBody: Record<string, unknown>; existing?: Record<string, unknown> }) {
+  const store = makeExtensionTestDb({ platform_sessions: [] })
+  if (opts.existing) {
+    store.tables.platform_sessions.push({ id: 's0', user_id: 'user-1', platform: 'gmail', is_active: true, expires_at: new Date(Date.now() + 1000).toISOString(), session_data: { encrypted: blobOf(opts.existing) } })
+  }
+  const db = {
+    ...store.db,
+    from(table: string) {
+      if (table !== 'platform_sessions') return store.db.from(table)
+      const q = store.db.from(table)
+      return Object.assign(Object.create(q), {
+        async upsert(row: Record<string, any>) {
+          const list = store.tables.platform_sessions
+          const idx = list.findIndex((r) => r.user_id === row.user_id && r.platform === row.platform)
+          if (idx >= 0) list[idx] = { ...list[idx], ...row }
+          else list.push({ id: `s${list.length}`, ...row })
+          return { error: null }
+        },
+      })
+    },
+  }
+  const app = await buildOAuthApp({
+    db,
+    fetchImpl: (async () => new Response(JSON.stringify({ access_token: 'at-new', expires_in: 3600, ...opts.tokenBody }), { status: 200 })) as typeof fetch,
+  })
+  const start = await app.inject({ method: 'GET', url: '/api/oauth/google', headers: { authorization: 'Bearer valid' } })
+  const state = new URL(String(start.headers.location)).searchParams.get('state')!
+  const cookie = cookiePairFromSetCookie(start.headers['set-cookie'])
+  const res = await app.inject({ method: 'GET', url: `/api/oauth/google/callback?code=abc&state=${encodeURIComponent(state)}`, headers: { cookie } })
+  await app.close()
+  return { res, row: store.tables.platform_sessions[0] }
+}
+
+test('OAuth callback (#7): tanpa refresh_token dari Google dan tanpa yang lama -> tidak aktif, redirect no_refresh_token', async () => {
+  await withEncryptionKey(async () => {
+    const { res, row } = await runCallback({ tokenBody: {} })
+    assert.match(String(res.headers.location), /gmail=error&reason=no_refresh_token/)
+    assert.equal(row.is_active, false)
+    assert.equal(row.session_data.refresh_failed, 'missing_refresh_token')
+  })
+})
+
+test('OAuth callback (#7): tanpa refresh_token baru tetapi ada yang lama -> refresh_token lama dipertahankan, tetap aktif', async () => {
+  await withEncryptionKey(async () => {
+    const { res, row } = await runCallback({ tokenBody: {}, existing: { access_token: 'old', refresh_token: 'rt-old' } })
+    assert.match(String(res.headers.location), /gmail=connected/)
+    assert.equal(row.is_active, true)
+    assert.equal(row.session_data.refresh_failed, undefined)
+    const parsed = JSON.parse(decryptForTest(row.session_data.encrypted))
+    assert.equal(parsed.refresh_token, 'rt-old')
+    assert.equal(parsed.access_token, 'at-new')
+  })
+})
+
+test('OAuth callback (#7): refresh_token baru dari Google dipakai', async () => {
+  await withEncryptionKey(async () => {
+    const { res, row } = await runCallback({ tokenBody: { refresh_token: 'rt-new' }, existing: { refresh_token: 'rt-old' } })
+    assert.match(String(res.headers.location), /gmail=connected/)
+    assert.equal(JSON.parse(decryptForTest(row.session_data.encrypted)).refresh_token, 'rt-new')
+  })
 })

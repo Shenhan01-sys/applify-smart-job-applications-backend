@@ -83,7 +83,7 @@ afterEach(async () => {
   await app.close()
 })
 
-const AUTH = { authorization: 'Bearer test-token' }
+const AUTH = { authorization: 'Bearer test-token', 'x-ai-consent': 'true' }
 const upload = (payload: Buffer | string, headers: Record<string, string> = {}) =>
   app.inject({ method: 'POST', url: '/api/profile/import/linkedin-pdf', payload, headers: { 'content-type': 'application/pdf', ...AUTH, ...headers } })
 const importRows = (userId = 'u1') => db.rows('application_logs').filter((r) => r.user_id === userId && r.action === PROFILE_IMPORT_ACTION)
@@ -313,4 +313,50 @@ test('pengaitan: batas laju impor tidak memeriksa atau memakai kuota draf', () =
   const body = src.slice(start, end)
   assert.ok(start > 0 && end > start)
   assert.doesNotMatch(body.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ''), /get_quota_status|rpc\(|recordDraft|AI_DRAFT_ACTION|AI_REQUEST_ACTION/)
+})
+
+test('tanpa x-ai-consent: 400 ai_consent_required, importer, model, dan batas laju tidak disentuh', async () => {
+  let importerCalls = 0
+  importerError = null
+  const spy = Fastify()
+  spy.addHook('preHandler', async (req) => {
+    ;(req as any).user = { id: 'u1' }
+  })
+  await spy.register(profileImportRoutes, {
+    prefix: '/api/profile',
+    guard: new AiGuardService(db as any, LIMITS, () => NOW),
+    importer: { importFromPdf: async () => { importerCalls++; throw new Error('tidak boleh dipanggil') } },
+  })
+  for (const consent of [undefined, 'false', '', 'yes', '1']) {
+    const headers: Record<string, string> = { 'content-type': 'application/pdf', authorization: 'Bearer test-token' }
+    if (consent !== undefined) headers['x-ai-consent'] = consent
+    const res = await spy.inject({ method: 'POST', url: '/api/profile/import/linkedin-pdf', payload: fixturePdf(), headers })
+    assert.equal(res.statusCode, 400, `consent=${String(consent)}`)
+    const body = res.json()
+    assert.equal(body.success, false)
+    assert.equal(body.code, 'ai_consent_required')
+    assert.equal(body.error, 'Centang persetujuan pemrosesan CV oleh AI terlebih dahulu sebelum mengimpor profil.')
+  }
+  assert.equal(importerCalls, 0)
+  assert.equal(llmCalls, 0)
+  assert.equal(importRows().length, 0)
+  await spy.close()
+})
+
+test('x-ai-consent: " TRUE " (huruf besar, spasi) diterima', async () => {
+  const res = await upload(fixturePdf(), { 'x-ai-consent': ' TRUE ' })
+  assert.equal(res.statusCode, 200)
+})
+
+test('CORS preflight mengizinkan header x-ai-consent', async () => {
+  const withCors = Fastify()
+  const { buildCorsOptions } = await import('../services/cors-options.ts')
+  await withCors.register(cors, buildCorsOptions(['https://app.example.com'], {}))
+  await withCors.register(profileImportRoutes, { prefix: '/api/profile', guard: new AiGuardService(db as any, LIMITS, () => NOW), importer: { importFromPdf: async () => ({}) as any } })
+  const pre = await withCors.inject({
+    method: 'OPTIONS', url: '/api/profile/import/linkedin-pdf',
+    headers: { origin: 'https://app.example.com', 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization,content-type,x-ai-consent' },
+  })
+  assert.match(String(pre.headers['access-control-allow-headers']), /x-ai-consent/i)
+  await withCors.close()
 })

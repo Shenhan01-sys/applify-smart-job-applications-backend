@@ -2,9 +2,16 @@ import {
   ApprovalChannelConflictError,
   guardQueuePayload,
   InvalidPayloadError,
+  PlatformLimitReachedError,
   requireApprovedRow,
   type GuardDb,
 } from './queue-guard.js'
+import { rateLimitService } from './rate-limit.service.js'
+
+/** Bagian RateLimitService yang dipakai antrean apply (diganti di tes). */
+export interface PlatformLimiter {
+  checkPlatformLimit(platform: string, userId: string): Promise<{ allowed: boolean; remaining: number; resetAt: Date }>
+}
 
 /**
  * Queue Service — DATABASE-AS-QUEUE (tanpa Redis / BullMQ).
@@ -71,7 +78,11 @@ export class QueueService {
    * `client` hanya diisi di tes. Tanpa itu, klien Supabase milik server dimuat saat pertama dipakai
    * (bukan saat modul di-import, supaya modul ini bisa di-import tanpa menyalakan server).
    */
-  constructor(private readonly client?: GuardDb) {}
+  constructor(
+    private readonly client?: GuardDb,
+    /** Tanpa `client` (produksi) dipakai rateLimitService. Dengan `client` tiruan tanpa limiter, batas platform dilewati. */
+    private readonly limiter: PlatformLimiter | null = client ? null : rateLimitService
+  ) {}
 
   private async db(): Promise<GuardDb> {
     return this.client ?? ((await import('../api/index.js')).supabase as unknown as GuardDb)
@@ -164,6 +175,25 @@ export class QueueService {
     }
   }
 
+  /**
+   * Batas per jam per pengguna per platform (rateLimitService.checkPlatformLimit) sebelum lamaran yang sudah disetujui
+   * masuk antrean. Platform tanpa batas terdaftar, atau platform yang tidak tercatat di persetujuan, tidak dibatasi.
+   * Jalur non-apply (search, analisis) tidak lewat sini.
+   */
+  private async assertPlatformLimit(supabase: GuardDb, userId: string, approvalId: string): Promise<void> {
+    if (!this.limiter) return
+    const { data } = await supabase
+      .from('approval_requests')
+      .select('platform')
+      .eq('id', approvalId)
+      .eq('user_id', userId)
+      .maybeSingle()
+    const platform = typeof data?.platform === 'string' ? data.platform.trim().toLowerCase() : ''
+    if (!platform) return
+    const limit = await this.limiter.checkPlatformLimit(platform, userId)
+    if (!limit.allowed) throw new PlatformLimitReachedError(platform, limit.resetAt ?? null)
+  }
+
   private async addApprovedChannelJob(
     userId: string,
     approvalId: string,
@@ -173,6 +203,7 @@ export class QueueService {
     const row = await requireApprovedRow(supabase, userId, approvalId)
     const targetChannel = jobType === JOB.extensionApply ? 'extension' : 'worker'
     await this.ensureMutualExclusion(supabase, userId, row.id, targetChannel, row.apply_channel ?? null)
+    await this.assertPlatformLimit(supabase, userId, row.id)
 
     const { data, error } = await supabase
       .from('automation_queue')
