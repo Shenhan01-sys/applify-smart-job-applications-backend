@@ -155,34 +155,51 @@ test('POST /api/sessions/:platform tanpa kunci, dengan kunci pendek, atau nilai 
   assert.equal(db.rows('platform_sessions').length, 0)
 })
 
-test('POST lalu GET /data dengan kunci sah: tersimpan terenkripsi (v2), terbaca kembali, cookie tidak ada di database', async () => {
+test('POST dengan kunci sah: tersimpan terenkripsi (v2), respons tidak memantulkan session_data, dan GET /:platform/data sudah dihapus (404)', async () => {
   setKey(GOOD)
   await build()
-  assert.equal((await postSession()).statusCode, 200)
+  const saved = await postSession()
+  assert.equal(saved.statusCode, 200)
+  assert.equal('session_data' in saved.json(), false, 'ciphertext tidak boleh dipantulkan di respons HTTP')
 
   const stored = db.rows('platform_sessions')[0]
   assert.ok(stored.session_data.encrypted.startsWith('v2:'))
   assert.ok(!JSON.stringify(stored).includes('AQED'))
+  assert.deepEqual(decryptSession(stored.session_data.encrypted, env(GOOD)), SESSION)
 
-  const res = await app.inject({ method: 'GET', url: '/api/sessions/linkedin/data' })
-  assert.equal(res.statusCode, 200)
-  assert.deepEqual(res.json().session_data, SESSION)
+  // F-01: endpoint mati GET /:platform/data tidak lagi ada sehingga cookie plaintext tidak pernah bocor lewat HTTP.
+  const leaked = await app.inject({ method: 'GET', url: '/api/sessions/linkedin/data' })
+  assert.equal(leaked.statusCode, 404)
 })
 
-test('GET /data tanpa kunci sah: 503 (tidak dibaca); sesi yang dienkripsi dengan kunci lain: 422 session_undecryptable', async () => {
-  db = new FakeDb({ platform_sessions: [{ user_id: 'u1', platform: 'linkedin', session_data: { encrypted: encryptSession(SESSION, env(OTHER)) } }] })
+test('BS-08: POST dan DELETE /api/sessions/:platform menolak gmail dan platform di luar allowlist (400 invalid_platform)', async () => {
+  db = new FakeDb({
+    platform_sessions: [
+      { id: 'g1', user_id: 'u1', platform: 'gmail', is_active: true, session_data: { encrypted: 'oauth-token-blob' } },
+    ],
+  })
   ;(sessionManagerService as any).client = db
+  setKey(GOOD)
   await build()
 
-  setKey(undefined)
-  const none = await app.inject({ method: 'GET', url: '/api/sessions/linkedin/data' })
-  assert.equal(none.statusCode, 503)
-  assert.equal(none.json().code, 'session_encryption_not_configured')
+  for (const bad of ['gmail', 'GMAIL', 'unknown', 'admin', 'google']) {
+    const postRes = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${bad}`,
+      payload: { session_data: SESSION, expires_at: '2999-01-01T00:00:00.000Z' },
+    })
+    assert.equal(postRes.statusCode, 400, `POST /api/sessions/${bad}`)
+    assert.equal(postRes.json().code, 'invalid_platform')
 
-  setKey(GOOD)
-  const wrong = await app.inject({ method: 'GET', url: '/api/sessions/linkedin/data' })
-  assert.equal(wrong.statusCode, 422)
-  assert.equal(wrong.json().code, 'session_undecryptable')
+    const delRes = await app.inject({ method: 'DELETE', url: `/api/sessions/${bad}` })
+    assert.equal(delRes.statusCode, 400, `DELETE /api/sessions/${bad}`)
+    assert.equal(delRes.json().code, 'invalid_platform')
+  }
+
+  // Baris sesi Gmail milik OAuth tetap utuh dan aktif.
+  const gmailRow = db.rows('platform_sessions').find((r) => r.platform === 'gmail')!
+  assert.equal(gmailRow.is_active, true)
+  assert.equal(gmailRow.session_data.encrypted, 'oauth-token-blob')
 })
 
 test('POST tanpa session_data: 400, daftar sesi (tanpa data) tetap jalan tanpa kunci', async () => {
