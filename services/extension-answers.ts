@@ -1,4 +1,11 @@
-import { cleanLine, consentAnswerKey, isConsentAnswerLabel, isSecretLabel, questionKey } from './extension-planner.js'
+import {
+  cleanLine,
+  consentAnswerKey,
+  invalidatePlannerContextCache,
+  isConsentAnswerLabel,
+  isSecretLabel,
+  questionKey,
+} from './extension-planner.js'
 import { ExtensionRunnerError, isUuid, verifyExtensionApproval } from './extension-runner.js'
 import type { GuardDb } from './queue-guard.js'
 
@@ -97,5 +104,8 @@ export async function saveExtensionAnswers(
     }
     throw new ExtensionRunnerError(500, 'answers_save_failed', 'Jawaban belum bisa disimpan. Coba lagi.')
   }
+  // Jawaban baru mengubah fakta yang dipakai planner. Batalkan cache konteks pengguna ini agar planForm berikutnya
+  // membaca user_form_answers lagi (dan tidak memakai salinan lama dari cache).
+  invalidatePlannerContextCache(userId)
   return { saved: rows.length }
 }
