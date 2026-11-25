@@ -24,7 +24,9 @@ module.exports = {
       min_uptime: '10s',
       // Health monitoring
       listen_timeout: 8000,
-      kill_timeout: 5000,
+      // Lebih besar daripada batas penutupan rapi (services/graceful-shutdown.ts, 25 detik): PM2 menunggu permintaan
+      // AI yang sedang jalan selesai sebelum SIGKILL.
+      kill_timeout: 30000,
       // Auto restart on failure
       autorestart: true,
       // wait_ready sengaja tidak dipakai: api/ tidak memanggil process.send('ready'), jadi PM2 akan menunggu listen_timeout lalu menganggapnya gagal.

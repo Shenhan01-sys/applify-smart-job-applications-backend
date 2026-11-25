@@ -28,6 +28,7 @@ import { deployConfigWarnings, parseAllowedOrigins } from '../services/deploy-co
 import { buildCorsOptions } from '../services/cors-options.js'
 import { installEmptyJsonBodyGuard } from '../services/empty-json-body.js'
 import { requestLogSerializers } from '../services/log-redact.js'
+import { installGracefulShutdown } from '../services/graceful-shutdown.js'
 
 // Produksi (Railway, Docker): log JSON polos ke stdout supaya mudah dibaca penampung log.
 // Lokal: pino-pretty berwarna.
@@ -114,6 +115,9 @@ await app.register(extensionRoutes, { prefix: '/api/extension' })
 await app.register(whatsappWebhookRoutes, { prefix: '/api/notifications' })
 // Endpoint internal Worker -> Backend untuk dispatch notifikasi email/WhatsApp perubahan status.
 await app.register(internalNotificationRoutes, { prefix: '/api/internal/notifications' })
+
+// SIGTERM/SIGINT (redeploy, pm2 reload, docker stop): tunggu permintaan yang sedang jalan, lalu keluar (BS-08).
+installGracefulShutdown(app)
 
 const start = async () => {
   try {
