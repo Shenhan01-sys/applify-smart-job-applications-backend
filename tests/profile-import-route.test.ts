@@ -34,6 +34,8 @@ class GuardDb extends FakeDb {
     return q
   }
   async rpc(fn: string, args: any) {
+    // Jalur lama (baca-lalu-catat): RPC atomik batas laju dianggap belum ada. Bukan RPC kuota, jadi tidak dicatat.
+    if (fn === 'consume_ai_rate_slot') return { data: null, error: { code: 'PGRST202', message: 'Could not find the function' } }
     this.rpcCalls.push({ fn, args })
     return { data: [{ allowed: false, used: 10, limit_qty: 10, remaining: 0, period: 'monthly' }], error: null }
   }

@@ -16,14 +16,20 @@ import { KeyedMutex, type KeyedLock } from './keyed-mutex.js'
  *
  * Balapan periksa-lalu-catat: membaca hitungan dan menulis baris catatan adalah dua panggilan database terpisah.
  * Tanpa pengaman, N permintaan paralel dari satu pengguna sama-sama membaca hitungan lama, lalu semuanya lolos
- * sebelum satu pun baris tertulis, sehingga batas bisa dilampaui jauh. Pengaman: periksa dan catat dijalankan di
- * bawah mutex per (pengguna, action) di dalam proses ini (services/keyed-mutex.ts), jadi permintaan kedua baru
- * membaca setelah baris permintaan pertama tertulis.
- * ASUMSI: backend berjalan sebagai SATU proses/instance (Railway: Dockerfile menjalankan `node dist/api/index.js`,
- * satu replika). Mutex ini tidak terlihat oleh proses lain. Di bawah PM2 mode cluster (ecosystem.config.cjs, jalur
- * AWS) atau lebih dari satu replika, permintaan yang jatuh ke proses berbeda masih bisa berpapasan. Penutup
- * lintas proses: database/migrations/DRAFT_2026-11-26_ai_rate_limit_atomic.sql (consume_ai_rate_slot, kunci
- * advisory per pengguna). Belum diterapkan, dan kode ini belum memanggilnya.
+ * sebelum satu pun baris tertulis, sehingga batas bisa dilampaui jauh. Ada dua lapis pengaman:
+ * (1) jalur utama: RPC `consume_ai_rate_slot` (database/migrations/DRAFT_2026-11-26_ai_rate_limit_atomic.sql, sudah
+ *     diterapkan di production). Satu panggilan memeriksa kedua jendela dan menulis baris catatan di bawah kunci
+ *     advisory per (pengguna, action), jadi atomik lintas proses (PM2 mode cluster, lebih dari satu replika).
+ *     Jawabannya `{allowed: true}` atau `{allowed: false, retry_after_sec}`.
+ * (2) mutex per (pengguna, action) di dalam proses ini (services/keyed-mutex.ts), tetap dipasang sebagai lapis
+ *     tambahan. Mutex ini hanya terlihat oleh SATU proses.
+ * Bila fungsi RPC belum ada di database (PGRST202 / 42883), penjaga kembali ke jalur lama: baca hitungan lalu
+ * insert, di bawah mutex (hanya aman untuk satu proses), dan mencatat satu peringatan per proses tanpa data
+ * pengguna. Galat RPC lain, atau jawaban yang bukan bentuk di atas, ditolak 503 rate_limit_check_failed (gagal
+ * tertutup, sama dengan galat membaca di jalur lama); permintaan tidak diloloskan.
+ * Catatan urutan: di jalur RPC permintaan sudah tercatat sebelum kuota bulanan diperiksa (RPC memeriksa dan
+ * mencatat dalam satu langkah), jadi permintaan yang lalu ditolak karena kuota bulanan tetap memakai satu slot
+ * batas laju. Di jalur lama permintaan seperti itu tidak dicatat.
  * Kuota bulanan lewat get_quota_status dibaca di sini tetapi baru berkurang saat recordDraft (setelah pipeline
  * selesai), jadi jendela balapan kuota bulanan lebih lebar dan TIDAK ditutup oleh mutex ini.
  *
@@ -55,7 +61,37 @@ export interface AiLimits {
 /** Minimal shape of the Supabase client used here (a fake is passed in tests). */
 export interface AiGuardDb {
   from(table: string): any
-  rpc(fn: string, args: Record<string, unknown>): PromiseLike<{ data: any; error: { message: string } | null }>
+  rpc(fn: string, args: Record<string, unknown>): PromiseLike<{ data: any; error: { message: string; code?: string } | null }>
+}
+
+/** RPC atomik batas laju (database/migrations/DRAFT_2026-11-26_ai_rate_limit_atomic.sql), hanya untuk service_role. */
+export const RATE_SLOT_RPC = 'consume_ai_rate_slot'
+
+const RATE_CHECK_FAILED_AI = 'Batas permintaan AI tidak dapat diperiksa sekarang. Coba lagi nanti.'
+const RATE_CHECK_FAILED = 'Batas permintaan tidak dapat diperiksa sekarang. Coba lagi nanti.'
+
+type RateSlot = { status: 'allowed' } | { status: 'denied'; wait: number } | { status: 'missing' }
+
+/** Galat "fungsi tidak ada": kode PostgREST PGRST202 atau Postgres 42883, atau teks pesannya. */
+function isRpcMissing(err: { message?: string; code?: string }): boolean {
+  if (err.code === 'PGRST202' || err.code === '42883') return true
+  return /could not find the function|function .* does not exist/i.test(err.message ?? '')
+}
+
+let missingRpcLogged = false
+function logMissingRpcOnce(): void {
+  if (missingRpcLogged) return
+  missingRpcLogged = true
+  console.warn(`[ai-guard] fungsi ${RATE_SLOT_RPC} belum ada di database; memakai jalur baca-lalu-catat di bawah mutex proses (tidak atomik lintas proses).`)
+}
+
+/** Hanya untuk tes: izinkan peringatan "fungsi tidak ada" tercatat lagi. */
+export function resetRateSlotRpcWarningForTests(): void {
+  missingRpcLogged = false
+}
+
+function rateLimitedError(messagePrefix: string, wait: number, limits: AiLimits): AiAccessError {
+  return new AiAccessError(429, 'rate_limited', `${messagePrefix}. Coba lagi dalam ${wait} detik.`, { retryAfterSec: wait, limits })
 }
 
 export type AiAccessCode = 'rate_limited' | 'quota_exhausted' | 'quota_check_failed' | 'rate_limit_check_failed'
@@ -123,19 +159,12 @@ export class AiGuardService {
     const limits = this.limits ?? aiLimitsFromEnv()
     const now = this.clock()
 
-    // 1) Batas laju.
-    const waits = await Promise.all([
-      this.retryAfterSec(db, userId, 60_000, limits.perMinute, now),
-      this.retryAfterSec(db, userId, 3_600_000, limits.perHour, now),
-    ])
-    const wait = Math.max(0, ...waits.map((w) => w ?? 0))
-    if (wait > 0) {
-      throw new AiAccessError(
-        429,
-        'rate_limited',
-        `Terlalu banyak permintaan AI. Coba lagi dalam ${wait} detik.`,
-        { retryAfterSec: wait, limits },
-      )
+    // 1) Batas laju. Jalur utama: RPC atomik (periksa dan catat sekaligus). RPC belum ada: baca dulu, catat di langkah 3.
+    const slot = await this.consumeRateSlot(db, userId, AI_REQUEST_ACTION, route, limits, RATE_CHECK_FAILED_AI)
+    if (slot.status === 'denied') throw rateLimitedError('Terlalu banyak permintaan AI', slot.wait, limits)
+    if (slot.status === 'missing') {
+      const wait = await this.legacyWait(db, userId, AI_REQUEST_ACTION, limits, now)
+      if (wait > 0) throw rateLimitedError('Terlalu banyak permintaan AI', wait, limits)
     }
 
     // 2) Kuota bulanan: RPC dan parser yang sama dengan Edge Function generate-application.
@@ -154,17 +183,19 @@ export class AiGuardService {
       )
     }
 
-    // 3) Catat permintaan yang lolos supaya batas laju bisa menghitungnya.
-    const { error: logErr } = await db.from('application_logs').insert({
-      user_id: userId,
-      action: AI_REQUEST_ACTION,
-      platform: 'ai',
-      status: 'success',
-      details: { route },
-    })
-    if (logErr) {
-      console.error(`[ai-guard] pencatatan permintaan gagal: ${logErr.message}`)
-      throw new AiAccessError(503, 'rate_limit_check_failed', 'Batas permintaan AI tidak dapat diperiksa sekarang. Coba lagi nanti.')
+    // 3) Jalur lama saja: catat permintaan yang lolos supaya batas laju bisa menghitungnya (RPC sudah mencatat).
+    if (slot.status === 'missing') {
+      const { error: logErr } = await db.from('application_logs').insert({
+        user_id: userId,
+        action: AI_REQUEST_ACTION,
+        platform: 'ai',
+        status: 'success',
+        details: { route },
+      })
+      if (logErr) {
+        console.error(`[ai-guard] pencatatan permintaan gagal: ${logErr.message}`)
+        throw new AiAccessError(503, 'rate_limit_check_failed', RATE_CHECK_FAILED_AI)
+      }
     }
     return { quota }
   }
@@ -203,19 +234,12 @@ export class AiGuardService {
     const db = await this.db()
     const limits = customLimits ?? this.limits ?? aiLimitsFromEnv()
     const now = this.clock()
-    const waits = await Promise.all([
-      this.retryAfterSec(db, userId, 60_000, limits.perMinute, now, action),
-      this.retryAfterSec(db, userId, 3_600_000, limits.perHour, now, action),
-    ])
-    const wait = Math.max(0, ...waits.map((w) => w ?? 0))
-    if (wait > 0) {
-      throw new AiAccessError(
-        429,
-        'rate_limited',
-        `${messagePrefix}. Coba lagi dalam ${wait} detik.`,
-        { retryAfterSec: wait, limits },
-      )
-    }
+    // Jalur utama: RPC atomik (periksa dan catat sekaligus). RPC belum ada: jalur lama di bawah mutex proses.
+    const slot = await this.consumeRateSlot(db, userId, action, route, limits, RATE_CHECK_FAILED)
+    if (slot.status === 'denied') throw rateLimitedError(messagePrefix, slot.wait, limits)
+    if (slot.status === 'allowed') return
+    const wait = await this.legacyWait(db, userId, action, limits, now)
+    if (wait > 0) throw rateLimitedError(messagePrefix, wait, limits)
     const { error: logErr } = await db.from('application_logs').insert({
       user_id: userId,
       action,
@@ -225,7 +249,7 @@ export class AiGuardService {
     })
     if (logErr) {
       console.error(`[ai-guard] pencatatan batas laju ${action} gagal: ${logErr.message}`)
-      throw new AiAccessError(503, 'rate_limit_check_failed', 'Batas permintaan tidak dapat diperiksa sekarang. Coba lagi nanti.')
+      throw new AiAccessError(503, 'rate_limit_check_failed', RATE_CHECK_FAILED)
     }
   }
 
@@ -247,6 +271,45 @@ export class AiGuardService {
     } catch (e: any) {
       console.error(`[ai-guard] pencatatan draf gagal: ${e?.message ?? e}`)
     }
+  }
+
+  /**
+   * Jalur utama batas laju: satu RPC atomik yang memeriksa jendela 1 menit dan 1 jam lalu menulis baris catatan
+   * bila lolos. 'missing' = fungsi belum ada di database (pemanggil memakai jalur lama). Galat lain atau jawaban
+   * yang tidak dikenal: 503 rate_limit_check_failed (gagal tertutup, sama dengan galat membaca di jalur lama).
+   */
+  private async consumeRateSlot(db: AiGuardDb, userId: string, action: string, route: string, limits: AiLimits, failMessage: string): Promise<RateSlot> {
+    const { data, error } = await db.rpc(RATE_SLOT_RPC, {
+      p_user_id: userId,
+      p_action: action,
+      p_per_minute: limits.perMinute,
+      p_per_hour: limits.perHour,
+      p_route: route,
+    })
+    if (error) {
+      if (isRpcMissing(error)) {
+        logMissingRpcOnce()
+        return { status: 'missing' }
+      }
+      console.error(`[ai-guard] ${RATE_SLOT_RPC} gagal untuk ${action}: ${error.message}`)
+      throw new AiAccessError(503, 'rate_limit_check_failed', failMessage)
+    }
+    if (data && data.allowed === true) return { status: 'allowed' }
+    if (data && data.allowed === false) {
+      const sec = Math.ceil(Number(data.retry_after_sec))
+      return { status: 'denied', wait: Number.isFinite(sec) ? Math.max(1, sec) : 60 }
+    }
+    console.error(`[ai-guard] ${RATE_SLOT_RPC} menjawab bentuk yang tidak dikenal untuk ${action}`)
+    throw new AiAccessError(503, 'rate_limit_check_failed', failMessage)
+  }
+
+  /** Jalur lama: detik tunggu terpanjang dari jendela 1 menit dan 1 jam (0 bila keduanya masih di bawah batas). */
+  private async legacyWait(db: AiGuardDb, userId: string, action: string, limits: AiLimits, now: Date): Promise<number> {
+    const waits = await Promise.all([
+      this.retryAfterSec(db, userId, 60_000, limits.perMinute, now, action),
+      this.retryAfterSec(db, userId, 3_600_000, limits.perHour, now, action),
+    ])
+    return Math.max(0, ...waits.map((w) => w ?? 0))
   }
 
   /**

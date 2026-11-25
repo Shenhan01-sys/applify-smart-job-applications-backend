@@ -34,7 +34,14 @@ class GuardDb extends FakeDb {
     q.insert = (payload: any) => insert(Array.isArray(payload) ? payload.map(stamp) : stamp(payload))
     return q
   }
+  /** Panggilan consume_ai_rate_slot dipisah dari rpcCalls (yang hanya melacak RPC kuota). */
+  rateRpcCalls = 0
   async rpc(fn: string, args: any): Promise<RpcResult> {
+    // Tes di file ini menjalankan jalur lama (baca-lalu-catat); jalur RPC atomik diuji di ai-guard-rpc.test.ts.
+    if (fn === 'consume_ai_rate_slot') {
+      this.rateRpcCalls++
+      return { data: null, error: { code: 'PGRST202', message: 'Could not find the function public.consume_ai_rate_slot in the schema cache' } }
+    }
     this.rpcCalls.push({ fn, args })
     if (this.rpcError) return { data: null, error: { message: this.rpcError } }
     return { data: [this.quotaRow], error: null }

@@ -27,7 +27,9 @@ class RaceDb extends FakeDb {
     q.insert = (payload: any) => insert(Array.isArray(payload) ? payload.map(stamp) : stamp(payload))
     return q
   }
-  async rpc(_fn: string, args: any) {
+  async rpc(fn: string, args: any) {
+    // Berkas ini menguji mutex proses pada jalur lama; jalur RPC atomik ada di ai-guard-rpc.test.ts.
+    if (fn === 'consume_ai_rate_slot') return { data: null, error: { code: 'PGRST202', message: 'Could not find the function' } }
     if (this.hold && args.p_user_id === this.holdUser) await this.hold
     await new Promise((r) => setImmediate(r)) // seperti jaringan: giliran dilepas
     if (this.rpcFailOnce) {
