@@ -1,4 +1,5 @@
 import { parseQuotaStatus, type QuotaSummary } from './quota-status.js'
+import { KeyedMutex, type KeyedLock } from './keyed-mutex.js'
 
 /**
  * Penjaga rute /api/ai/*: batas laju per pengguna dan kuota draf AI bulanan, diperiksa SEBELUM pipeline AI
@@ -12,6 +13,19 @@ import { parseQuotaStatus, type QuotaSummary } from './quota-status.js'
  * Batas laju disimpan di application_logs (action 'ai_request'), bukan di memori proses, karena PM2 menjalankan
  * backend dalam mode cluster (ecosystem.config.cjs) dan memori tiap proses berbeda. Bawaan 10 permintaan per
  * menit dan 60 per jam per pengguna; ubah lewat AI_RATE_LIMIT_PER_MINUTE dan AI_RATE_LIMIT_PER_HOUR.
+ *
+ * Balapan periksa-lalu-catat: membaca hitungan dan menulis baris catatan adalah dua panggilan database terpisah.
+ * Tanpa pengaman, N permintaan paralel dari satu pengguna sama-sama membaca hitungan lama, lalu semuanya lolos
+ * sebelum satu pun baris tertulis, sehingga batas bisa dilampaui jauh. Pengaman: periksa dan catat dijalankan di
+ * bawah mutex per (pengguna, action) di dalam proses ini (services/keyed-mutex.ts), jadi permintaan kedua baru
+ * membaca setelah baris permintaan pertama tertulis.
+ * ASUMSI: backend berjalan sebagai SATU proses/instance (Railway: Dockerfile menjalankan `node dist/api/index.js`,
+ * satu replika). Mutex ini tidak terlihat oleh proses lain. Di bawah PM2 mode cluster (ecosystem.config.cjs, jalur
+ * AWS) atau lebih dari satu replika, permintaan yang jatuh ke proses berbeda masih bisa berpapasan. Penutup
+ * lintas proses: database/migrations/DRAFT_2026-11-26_ai_rate_limit_atomic.sql (consume_ai_rate_slot, kunci
+ * advisory per pengguna). Belum diterapkan, dan kode ini belum memanggilnya.
+ * Kuota bulanan lewat get_quota_status dibaca di sini tetapi baru berkurang saat recordDraft (setelah pipeline
+ * selesai), jadi jendela balapan kuota bulanan lebih lebar dan TIDAK ditutup oleh mutex ini.
  *
  * Konsumsi kuota: Edge Function menghitung kuota dari baris ai_applications bulan berjalan. Rute backend tidak
  * membuat baris itu, jadi satu surat lamaran yang berhasil dibuat lewat /api/ai/cover-letter dicatat sebagai
@@ -80,12 +94,16 @@ export function importLimitsFromEnv(env: Record<string, string | undefined> = pr
   }
 }
 
+/** Satu mutex per proses, dipakai bersama semua AiGuardService (rute AI, approval, impor profil). */
+const sharedLocks = new KeyedMutex()
+
 export class AiGuardService {
   /** `client`, `limits`, dan `clock` hanya diisi di tes; produksi memuat klien Supabase server saat pertama dipakai. */
   constructor(
     private readonly client?: AiGuardDb,
     private readonly limits?: AiLimits,
     private readonly clock: () => Date = () => new Date(),
+    private readonly locks: KeyedLock = sharedLocks,
   ) {}
 
   private async db(): Promise<AiGuardDb> {
@@ -96,6 +114,11 @@ export class AiGuardService {
    * Izinkan satu permintaan AI atau lempar AiAccessError. Mengembalikan kuota bulanan terkini untuk antarmuka.
    */
   async check(userId: string, route: string): Promise<{ quota: QuotaSummary }> {
+    // Periksa lalu catat harus tak terpisahkan untuk pengguna ini (lihat balapan periksa-lalu-catat di atas).
+    return this.locks.run(`${userId}|${AI_REQUEST_ACTION}`, () => this.checkLocked(userId, route))
+  }
+
+  private async checkLocked(userId: string, route: string): Promise<{ quota: QuotaSummary }> {
     const db = await this.db()
     const limits = this.limits ?? aiLimitsFromEnv()
     const now = this.clock()
@@ -165,6 +188,17 @@ export class AiGuardService {
     route: string,
     customLimits?: AiLimits,
     messagePrefix: string = 'Terlalu banyak permintaan AI'
+  ): Promise<void> {
+    // Kunci per action: hitungan tiap action terpisah, jadi action berbeda tidak perlu saling menunggu.
+    return this.locks.run(`${userId}|${action}`, () => this.checkActionLocked(userId, action, route, customLimits, messagePrefix))
+  }
+
+  private async checkActionLocked(
+    userId: string,
+    action: string,
+    route: string,
+    customLimits: AiLimits | undefined,
+    messagePrefix: string,
   ): Promise<void> {
     const db = await this.db()
     const limits = customLimits ?? this.limits ?? aiLimitsFromEnv()
