@@ -279,7 +279,17 @@ const ymd = (year: number, month: number) => `${year}-${pad2(month)}-01`
 interface YearMonth {
   year: number
   month: number | null
+  /** Hanya ada bila true: tanggal DD/MM/YYYY yang dua angka depannya sama-sama bisa jadi bulan (mis. 03/04/2023), dibaca hari dulu. */
+  dayMonthGuess?: true
 }
+
+const daysInMonth = (year: number, month: number) => new Date(Date.UTC(year, month, 0)).getUTCDate()
+
+/**
+ * Catatan untuk pengguna: bulan hasil tebakan urutan hari/bulan. Penulis CV Indonesia memakai DD/MM/YYYY, jadi itu
+ * yang dipilih, tetapi "03/04/2023" bisa juga 4 Maret (urutan Amerika). Tebakan tidak boleh diam-diam.
+ */
+const DAY_MONTH_NOTE = 'Tanggal berbentuk angka (mis. 03/04/2023) dibaca dengan urutan hari/bulan/tahun, seperti lazimnya di Indonesia. Periksa bulannya.'
 
 function parseMonthYear(raw: string): YearMonth | null {
   const t = line(raw).replace(/,/g, '')
@@ -287,6 +297,23 @@ function parseMonthYear(raw: string): YearMonth | null {
   if (m) {
     const month = Number(m[2])
     return month >= 1 && month <= 12 ? { year: Number(m[1]), month } : null
+  }
+  // DD/MM/YYYY dan D/M/YYYY (hari dulu, urutan Indonesia). Bulan di luar 1-12 atau hari yang tidak ada di bulan itu
+  // ("03/15/2023", "31/02/2023") tidak terbaca: urutan bulan/hari tidak ditukar diam-diam.
+  m = /^(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{4})$/.exec(t)
+  if (m) {
+    const day = Number(m[1])
+    const month = Number(m[2])
+    const year = Number(m[3])
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return null
+    return day <= 12 && day !== month ? { year, month, dayMonthGuess: true } : { year, month }
+  }
+  // "15 Agustus 2023": hari, nama bulan, tahun.
+  m = /^(\d{1,2})\s+(\p{L}+)\.?\s*(\d{4})$/u.exec(t)
+  if (m) {
+    const month = MONTH_LOOKUP.get(fold(m[2]))
+    const day = Number(m[1])
+    return month && day >= 1 && day <= daysInMonth(Number(m[3]), month) ? { year: Number(m[3]), month } : null
   }
   m = /^(\d{1,2})\s*[/.-]\s*(\d{4})$/.exec(t)
   if (m) {
@@ -377,6 +404,7 @@ function readRange(raw: unknown): ReadRange | null {
     start = { year: end.year - (end.month !== null && startMonth > end.month ? 1 : 0), month: startMonth }
     notes.push('Tahun mulai tidak tercantum di PDF, diambil dari tahun selesai.')
   }
+  if (start.dayMonthGuess || (typeof end === 'object' && end.dayMonthGuess)) notes.push(DAY_MONTH_NOTE)
   return { start, end, notes }
 }
 
@@ -470,6 +498,8 @@ export function parseYearRange(raw: unknown): ParsedYears | null {
     })
     .replace(/[()·•]/g, ' ')
     .replace(/\b((?:19|20)\d{2})-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])\b/g, '$1') // 2019-08-01 -> 2019
+    .replace(/\b\d{1,2}\s*[/.]\s*\d{1,2}\s*[/.]\s*((?:19|20)\d{2})\b/g, '$1') // 01/08/2019 -> 2019 (hari/bulan/tahun)
+    .replace(/\b\d{1,2}\s+(?=\p{L}{3,10}\.?\s+(?:19|20)\d{2}\b)/gu, '') // 15 Agustus 2019 -> Agustus 2019
     .replace(/\b\d{1,2}\s*[/.]\s*((?:19|20)\d{2})\b/g, '$1') // 08/2019 -> 2019
     .replace(/\b((?:19|20)\d{2})\s*[-/]\s*(?:0?[1-9]|1[0-2])\b(?!\d)/g, '$1') // 2019-08 -> 2019
   const m = YEAR_RANGE_RE.exec(s)
@@ -967,8 +997,8 @@ function parseLinkedInEducationRules(rawLines: string[]): RawExtraction[] {
 // ───────────────────────────────────────────────────────────── pendidikan di CV biasa
 
 const MONTH_ALT = [...MONTH_LOOKUP.keys()].sort((a, b) => b.length - a.length).join('|')
-/** Tahun 1950 sampai 2099, boleh didahului nama bulan atau nomor bulan ("Agu 2019", "08/2019"). "Agustus 1945" bukan tanggal. */
-const CV_YEAR = `(?:\\b(?:${MONTH_ALT})\\.?\\s+|\\b\\d{1,2}\\s*[/.]\\s*)?\\b(?:19[5-9]\\d|20\\d{2})\\b`
+/** Tahun 1950 sampai 2099, boleh didahului nama bulan atau nomor bulan ("Agu 2019", "08/2019"), dengan hari di depannya ("15 Agustus 2019", "01/08/2019"). "Agustus 1945" bukan tanggal. */
+const CV_YEAR = `(?:\\b(?:\\d{1,2}\\s+)?(?:${MONTH_ALT})\\.?\\s+|\\b(?:\\d{1,2}\\s*[/.]\\s*)?\\d{1,2}\\s*[/.]\\s*)?\\b(?:19[5-9]\\d|20\\d{2})\\b`
 const GRAD_WORDS = '(?:tahun\\s+lulus|lulus(?:\\s+tahun)?|graduated(?:\\s+in)?|graduation(?:\\s+year)?|expected(?:\\s+graduation)?|estimasi\\s+lulus|class\\s+of|angkatan)'
 /** Rentang tahun, atau satu tahun (kata "Lulus" di depannya ikut terbuang dari nama). */
 const CV_DATE_RE = new RegExp(`\\(?\\s*(?:\\b${GRAD_WORDS}\\s*[:\\-]?\\s*)?${CV_YEAR}(?:\\s*${RANGE_SEP}\\s*(?:${EXPECTED_BOUNDED}\\s*)?(?:${CV_YEAR}|\\b(?:${END_WORDS})\\b))?(?:\\s*\\(\\s*(?:${EXPECTED_WORDS})\\s*\\))?\\s*\\)?`, 'iu')
