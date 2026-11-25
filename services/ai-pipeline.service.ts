@@ -24,6 +24,7 @@ import {
 } from './ai-output-guard.js'
 import { ACHIEVEMENT_GROUNDING_RULE, achievementPromptSection, answerCandidateInfo, buildAchievementLines } from './profile-context.js'
 import { letterStructureRules } from './letter-rules.js'
+import { EMAIL_TOKEN, PHONE_TOKEN, contactPromptValue, fillContactTokens, maskContact } from './contact-tokens.js'
 
 const getOpenRouterKey = () => process.env.OPENROUTER_API_KEY
 const getGroqKey = () => process.env.GROQ_API_KEY
@@ -875,8 +876,8 @@ ${jobDescription}
 === CANDIDATE PROFILE (the ONLY source of facts) ===
 Name: ${userProfile.firstName} ${userProfile.lastName}
 Current Title: ${userProfile.currentTitle || '(not provided)'}
-Email: ${userProfile.email || '(not provided)'}
-Phone: ${userProfile.phone || '(not provided)'}
+Email: ${contactPromptValue(userProfile.email, EMAIL_TOKEN)}
+Phone: ${contactPromptValue(userProfile.phone, PHONE_TOKEN)}
 Location: ${userProfile.location || '(not provided)'}
 LinkedIn: ${userProfile.linkedinUrl || '(not provided)'}
 Years of Experience: ${userProfile.yearsOfExperience}
@@ -903,7 +904,7 @@ Use exactly these section headings, in capital letters, each on its own line: ${
 ${GROUNDING_RULES.map((r) => `- ${r}`).join('\n')}
 - Do not add a skill, tool, responsibility or achievement just because the job description asks for it. Use job keywords only where the candidate's profile supports them.
 - The ${H.projects} and ${H.certifications} sections: include them ONLY if the profile above lists projects or certifications. Otherwise leave those two sections out completely.
-- Contact line: include only the contact items that are provided above. Never write placeholder or sample contact data.
+- Contact line: include only the contact items that are provided above. For email and phone, write the tokens {{email}} and {{phone}} exactly as shown; the system replaces them. Never write any other placeholder or sample contact data.
 - If a core section has no data in the profile, keep its heading and write "${notProvided}" under it.
 
 === REQUIREMENTS ===
@@ -952,7 +953,7 @@ Generate the CV now:`
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
       max_tokens: 2800,
-      accept: (raw) => acceptCv(raw, { allowedContext, requireEducation }),
+      accept: (raw) => acceptCv(fillContactTokens(raw, userProfile), { allowedContext, requireEducation }),
     })
 
     await tracingService.traceAIGeneration({
@@ -1015,7 +1016,7 @@ Job Description:
 ${jobDescription}
 
 === CANDIDATE CV ===
-${cvText}
+${maskContact(cvText)}
 
 === EVALUATION CRITERIA ===
 Score each category from 0-100:

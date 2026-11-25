@@ -198,6 +198,29 @@ test('penilai: CV sah dinilai dalam bentuk bersih; jawaban tanpa skor ditolak, m
   assert.ok(!/Berikut CV-nya/.test(calls[0].prompt), 'kalimat pengantar tidak ikut dinilai')
 })
 
+// ───────────────────────────────────────────── Privasi kontak (audit 25 November 2026)
+
+test('CV: email dan telepon tidak dikirim ke model; token di baris kontak diganti nilai asli', async () => {
+  const withContact = { ...profile, email: 'uji.privasi@contoh.test', phone: '081234567890' }
+  script = { m1: () => VALID_CV.replace('\n', '\n{{email}} | {{phone}}\n') }
+  const doc = await aiPipelineService.generateCV({ ...cvParams, userProfile: withContact })
+  const prompt = calls[0].prompt
+  assert.doesNotMatch(prompt, /uji\.privasi@contoh\.test|081234567890/)
+  assert.match(prompt, /Email: \{\{email\}\}/)
+  assert.match(prompt, /Phone: \{\{phone\}\}/)
+  assert.match(doc.text, /uji\.privasi@contoh\.test \| 081234567890/)
+  assert.doesNotMatch(doc.text, /\{\{/)
+})
+
+test('CV: penilaian ulang menyamarkan email dan telepon di teks CV sebelum dikirim ke model', async () => {
+  script = { m1: EVAL_OK }
+  const cvText = VALID_CV.replace('\n', '\nuji.privasi@contoh.test | +62 812-3456-7890\n')
+  await aiPipelineService.evaluateCV({ cvText, jobTitle: 'Backend Engineer', company: 'GoTo Group', jobDescription: 'x' })
+  const prompt = calls[0].prompt
+  assert.doesNotMatch(prompt, /uji\.privasi@contoh\.test|812-3456-7890/)
+  assert.match(prompt, /\[email\] \| \[telepon\]/)
+})
+
 test('penilai: bila tidak ada model yang memberi skor terbaca, galat eksplisit (bukan skor 50 dan "Review needed.")', async () => {
   script = { m1: 'Review needed.', m2: '', m3: 'Maaf, tidak bisa.' }
   await assert.rejects(
