@@ -1,6 +1,6 @@
 import { aiPipelineService } from './ai-pipeline.service.js'
 import { LinkedInImportError, OCR_UNAVAILABLE_MESSAGE, PDF_MIN_TEXT_CHARS, PDF_NO_TEXT_MESSAGE, assertPdfUpload, extractPdfPages, findSparsePages, meaningfulChars } from './linkedin-pdf.js'
-import { ocrPdfPages, ocrPdfSelectedPages } from './pdf-ocr.js'
+import { ocrPdfPages, ocrPdfSelectedPages, type OcrOptions } from './pdf-ocr.js'
 import {
   assemblePreview,
   buildModelPrompt,
@@ -57,9 +57,9 @@ export interface LinkedInImportDeps {
   llm?: JsonLlm
   extractPages?: (buffer: Buffer) => Promise<string[]>
   /** OCR untuk PDF tanpa lapisan teks (CV Canva yang diratakan). Bawaan: ocrPdfPages (Gemini). null = tidak tersedia, [] = tanpa teks. */
-  ocrPages?: (buffer: Buffer) => Promise<string[] | null>
+  ocrPages?: (buffer: Buffer, opts?: OcrOptions) => Promise<string[] | null>
   /** OCR hanya untuk halaman tertentu (PDF hibrida, nomor mulai 1). Bawaan: ocrPdfSelectedPages. null = tidak tersedia; halaman tanpa teks tidak ada di peta. */
-  ocrSelectedPages?: (buffer: Buffer, pageNumbers: number[]) => Promise<Map<number, string> | null>
+  ocrSelectedPages?: (buffer: Buffer, pageNumbers: number[], opts?: OcrOptions) => Promise<Map<number, string> | null>
   now?: () => Date
   /** Pagar keras Promise.race (ms). Bawaan: anggaran + AI_HARD_GRACE_MS. */
   aiTimeoutMs?: number
@@ -70,6 +70,9 @@ export interface LinkedInImportDeps {
   /** Jam monotonik untuk durasi (ms). Hanya tes yang mengisi ini. */
   clock?: () => number
 }
+
+export const OCR_TRUNCATED_WARNING =
+  'Hasil OCR mungkin tidak lengkap karena teks PDF terlalu panjang untuk dibaca sekaligus, jadi bagian akhirnya bisa hilang. Periksa hasilnya dan tambahkan datanya manual bila perlu.'
 
 /** "2", "2 dan 4", "2, 3, dan 5": daftar nomor halaman untuk peringatan di pratinjau. */
 function listPages(nums: number[]): string {
@@ -88,12 +91,15 @@ export class LinkedInImportService {
     const buffer = assertPdfUpload(body)
     let pages: string[]
     let ocrUsed = false
+    // Gemini berhenti karena batas keluaran: teks OCR terpotong dan bagian akhirnya hilang (audit 47.1 P1-4).
+    let ocrTruncated = false
+    const ocrOpts: OcrOptions = { onTruncated: () => { ocrTruncated = true } }
     try {
       pages = await (this.deps.extractPages ?? extractPdfPages)(buffer)
     } catch (e) {
       if (!(e instanceof LinkedInImportError) || e.code !== 'pdf_no_text') throw e
       // PDF berupa gambar (misalnya CV Canva yang diratakan): baca teksnya dengan OCR.
-      const ocr = await (this.deps.ocrPages ?? ocrPdfPages)(buffer)
+      const ocr = await (this.deps.ocrPages ?? ocrPdfPages)(buffer, ocrOpts)
       // null: layanan OCR tidak tersedia atau gagal (kuota, timeout). Jangan suruh pengguna mengunduh ulang CV-nya.
       if (ocr === null) throw new LinkedInImportError(503, 'ocr_unavailable', OCR_UNAVAILABLE_MESSAGE)
       if (ocr.join('').replace(/\s+/g, '').length < PDF_MIN_TEXT_CHARS) {
@@ -112,7 +118,7 @@ export class LinkedInImportService {
       if (sparsePages.length > 0) {
         let found: Map<number, string> | null
         try {
-          found = await (this.deps.ocrSelectedPages ?? ocrPdfSelectedPages)(buffer, sparsePages)
+          found = await (this.deps.ocrSelectedPages ?? ocrPdfSelectedPages)(buffer, sparsePages, ocrOpts)
         } catch {
           found = null
         }
@@ -140,6 +146,7 @@ export class LinkedInImportService {
     const text = cleanPdfText(pages)
     const now = (this.deps.now ?? (() => new Date()))()
     if (ocrUsed) warnings.push('PDF ini berupa gambar, jadi teksnya dibaca dengan OCR. Periksa nama, tanggal, email, dan nomor telepon dengan teliti.')
+    if (ocrTruncated) warnings.push(OCR_TRUNCATED_WARNING)
 
     const prompt = buildModelPrompt(text)
     if (prompt.truncated) warnings.push('PDF sangat panjang, AI hanya membaca bagian awalnya.')

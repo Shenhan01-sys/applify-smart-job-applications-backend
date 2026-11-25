@@ -24,7 +24,14 @@ export interface OcrOptions {
   model?: string
   timeoutMs?: number
   fetchImpl?: typeof fetch
+  /**
+   * Dipanggil bila Gemini berhenti karena batas keluaran (`finishReason: MAX_TOKENS`), artinya teks hasil OCR terpotong
+   * di tengah. Teksnya tetap dikembalikan; pemanggil memakai ini untuk memberi peringatan "mungkin tidak lengkap".
+   */
+  onTruncated?: () => void
 }
+
+export const OCR_MAX_OUTPUT_TOKENS = 8192
 
 /**
  * Satu panggilan Gemini untuk PDF utuh. Mengembalikan teks mentah (sudah di-trim), '' bila tidak ada teks, atau null
@@ -44,7 +51,7 @@ async function callGeminiOcr(buffer: Buffer, prompt: string, opts: OcrOptions): 
       headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'application/pdf', data: buffer.toString('base64') } }, { text: prompt }] }],
-        generationConfig: { temperature: 0, maxOutputTokens: 8192 },
+        generationConfig: { temperature: 0, maxOutputTokens: OCR_MAX_OUTPUT_TOKENS },
       }),
       signal: AbortSignal.timeout(opts.timeoutMs ?? OCR_TIMEOUT_MS),
     })
@@ -53,7 +60,16 @@ async function callGeminiOcr(buffer: Buffer, prompt: string, opts: OcrOptions): 
       return null
     }
     const data = (await resp.json()) as any
-    const parts: any[] = data?.candidates?.[0]?.content?.parts ?? []
+    const candidate = data?.candidates?.[0]
+    if (candidate?.finishReason === 'MAX_TOKENS') {
+      console.warn('[pdf-ocr] keluaran OCR terpotong (MAX_TOKENS)')
+      try {
+        opts.onTruncated?.()
+      } catch {
+        // Pemanggil tidak boleh membuat OCR gagal hanya karena penanda terpotong.
+      }
+    }
+    const parts: any[] = candidate?.content?.parts ?? []
     return parts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('').trim()
   } catch (e) {
     // Nama galat saja; pesan bisa memuat potongan isi.
