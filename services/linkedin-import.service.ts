@@ -1,6 +1,6 @@
 import { aiPipelineService } from './ai-pipeline.service.js'
-import { LinkedInImportError, OCR_UNAVAILABLE_MESSAGE, PDF_MIN_TEXT_CHARS, PDF_NO_TEXT_MESSAGE, assertPdfUpload, extractPdfPages } from './linkedin-pdf.js'
-import { ocrPdfPages } from './pdf-ocr.js'
+import { LinkedInImportError, OCR_UNAVAILABLE_MESSAGE, PDF_MIN_TEXT_CHARS, PDF_NO_TEXT_MESSAGE, assertPdfUpload, extractPdfPages, findSparsePages, meaningfulChars } from './linkedin-pdf.js'
+import { ocrPdfPages, ocrPdfSelectedPages } from './pdf-ocr.js'
 import {
   assemblePreview,
   buildModelPrompt,
@@ -58,6 +58,8 @@ export interface LinkedInImportDeps {
   extractPages?: (buffer: Buffer) => Promise<string[]>
   /** OCR untuk PDF tanpa lapisan teks (CV Canva yang diratakan). Bawaan: ocrPdfPages (Gemini). null = tidak tersedia, [] = tanpa teks. */
   ocrPages?: (buffer: Buffer) => Promise<string[] | null>
+  /** OCR hanya untuk halaman tertentu (PDF hibrida, nomor mulai 1). Bawaan: ocrPdfSelectedPages. null = tidak tersedia; halaman tanpa teks tidak ada di peta. */
+  ocrSelectedPages?: (buffer: Buffer, pageNumbers: number[]) => Promise<Map<number, string> | null>
   now?: () => Date
   /** Pagar keras Promise.race (ms). Bawaan: anggaran + AI_HARD_GRACE_MS. */
   aiTimeoutMs?: number
@@ -67,6 +69,12 @@ export interface LinkedInImportDeps {
   log?: (line: string) => void
   /** Jam monotonik untuk durasi (ms). Hanya tes yang mengisi ini. */
   clock?: () => number
+}
+
+/** "2", "2 dan 4", "2, 3, dan 5": daftar nomor halaman untuk peringatan di pratinjau. */
+function listPages(nums: number[]): string {
+  if (nums.length <= 1) return nums.join('')
+  return `${nums.slice(0, -1).join(', ')}${nums.length > 2 ? ',' : ''} dan ${nums[nums.length - 1]}`
 }
 
 const sumDropped = (n: NormalizedExtraction) => n.dropped.experiences + n.dropped.education + n.dropped.certifications + n.dropped.achievements + n.dropped.skills
@@ -94,9 +102,43 @@ export class LinkedInImportService {
       pages = ocr
       ocrUsed = true
     }
+    // PDF hibrida: sebagian halaman punya teks, sebagian berupa gambar. OCR hanya untuk halaman yang lapisan teksnya
+    // kosong atau terlalu pendek; hasilnya menggantikan halaman itu. Tanpa OCR, teks yang ada dipakai apa adanya.
+    const warnings: string[] = []
+    let sparsePages: number[] = []
+    let ocrPageNumbers: number[] = []
+    if (!ocrUsed) {
+      sparsePages = findSparsePages(pages)
+      if (sparsePages.length > 0) {
+        let found: Map<number, string> | null
+        try {
+          found = await (this.deps.ocrSelectedPages ?? ocrPdfSelectedPages)(buffer, sparsePages)
+        } catch {
+          found = null
+        }
+        if (found === null) {
+          warnings.push(
+            `Halaman ${listPages(sparsePages)} PDF tidak punya teks yang bisa dibaca (kemungkinan berupa gambar) dan OCR sedang tidak tersedia, jadi isinya tidak ikut dibaca. Tambahkan datanya manual, atau coba lagi nanti.`,
+          )
+        } else {
+          pages = pages.map((p, i) => {
+            const ocrText = found!.get(i + 1)
+            if (ocrText === undefined || meaningfulChars(ocrText) <= meaningfulChars(p)) return p
+            ocrPageNumbers.push(i + 1)
+            return ocrText
+          })
+          if (ocrPageNumbers.length > 0) {
+            warnings.push(`Halaman ${listPages(ocrPageNumbers)} PDF berupa gambar, jadi teksnya dibaca dengan OCR. Periksa nama, tanggal, email, dan nomor telepon dengan teliti.`)
+          }
+          const stillEmpty = sparsePages.filter((n) => !ocrPageNumbers.includes(n))
+          if (stillEmpty.length > 0) {
+            warnings.push(`Halaman ${listPages(stillEmpty)} PDF tidak punya teks yang bisa dibaca, bahkan setelah OCR. Tambahkan datanya manual bila perlu.`)
+          }
+        }
+      }
+    }
     const text = cleanPdfText(pages)
     const now = (this.deps.now ?? (() => new Date()))()
-    const warnings: string[] = []
     if (ocrUsed) warnings.push('PDF ini berupa gambar, jadi teksnya dibaca dengan OCR. Periksa nama, tanggal, email, dan nomor telepon dengan teliti.')
 
     const prompt = buildModelPrompt(text)
@@ -204,6 +246,9 @@ export class LinkedInImportService {
       aiMs,
       pages: pages.length,
       chars: text.length,
+      // Nomor halaman saja (tanpa isi): halaman tanpa lapisan teks dan halaman yang berhasil dibaca dengan OCR.
+      sparsePages,
+      ocrPages: ocrPageNumbers,
       counts: {
         experiences: preview.experiences.length,
         education: preview.education.length,

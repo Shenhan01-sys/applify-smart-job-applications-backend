@@ -11,6 +11,11 @@ export const PDF_MAX_BYTES = 5 * 1024 * 1024
 export const PDF_MAX_PAGES = 25
 /** Di bawah ini (tanpa spasi) PDF dianggap hasil pindai atau gambar: tidak ada teks yang bisa dibaca. */
 export const PDF_MIN_TEXT_CHARS = 80
+/**
+ * PDF hibrida: halaman dengan huruf dan angka kurang dari ini dianggap tanpa lapisan teks (gambar atau kosong).
+ * Hanya dipakai bila halaman lain di berkas yang sama punya teks; PDF yang seluruhnya tipis tetap lewat PDF_MIN_TEXT_CHARS.
+ */
+export const PDF_MIN_PAGE_CHARS = 20
 export const OCR_UNAVAILABLE_MESSAGE =
   'PDF ini berupa gambar, dan pembaca teks gambar (OCR) sedang tidak tersedia. Coba lagi beberapa menit lagi. Bila tetap gagal, unduh ulang CV dari Canva sebagai PDF Standar tanpa opsi Ratakan PDF.'
 export const PDF_NO_TEXT_MESSAGE =
@@ -54,6 +59,24 @@ export function assertPdfUpload(body: unknown): Buffer {
     throw new LinkedInImportError(400, 'not_pdf', 'Berkas ini bukan PDF. Unggah PDF yang diunduh dari LinkedIn (Simpan ke PDF).')
   }
   return body
+}
+
+/** Jumlah huruf dan angka (tanpa spasi dan tanda baca) dalam teks satu halaman. */
+export function meaningfulChars(text: string): number {
+  return (text.match(/[\p{L}\p{N}]/gu) ?? []).length
+}
+
+/**
+ * Nomor halaman (mulai 1) yang lapisan teksnya kosong atau terlalu pendek, tetapi hanya untuk PDF hibrida: ada
+ * halaman yang punya teks dan ada yang tidak. Bila semua halaman tipis atau semua halaman cukup, hasilnya
+ * kosong (perilaku lama: OCR hanya lewat PDF_MIN_TEXT_CHARS untuk seluruh berkas).
+ */
+export function findSparsePages(pages: string[]): number[] {
+  const sparse: number[] = []
+  pages.forEach((p, i) => {
+    if (meaningfulChars(p) < PDF_MIN_PAGE_CHARS) sparse.push(i + 1)
+  })
+  return sparse.length > 0 && sparse.length < pages.length ? sparse : []
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
