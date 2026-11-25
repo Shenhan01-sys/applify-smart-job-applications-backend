@@ -513,3 +513,16 @@ test('salinan penjaga untuk Edge Function (supabase/functions/_shared/output-gua
   const original = fs.readFileSync(path.resolve(HERE, '..', 'services', 'ai-output-guard.ts'), 'utf8')
   assert.equal(fs.readFileSync(copy, 'utf8'), original)
 })
+
+test('entitas: perusahaan tujuan, pengalaman di profil, dan sebutan biasa tidak dianggap karangan (25 Nov 2026)', () => {
+  const src = { text: 'Software Engineer di Tokopedia 2022-2024. Skill: GitHub, Excel', employers: ['Tokopedia'] } as any
+  const ent = (out: string) => checkGrounding(out, src, { checkEntities: true, allowedContext: 'Datadog Strategic Account Executive Jakarta' })
+    .filter((w) => w.kind === 'unsupported_entity').flatMap((w) => w.values)
+  assert.deepEqual(ent('Saya pernah bekerja di Tokopedia sebagai Software Engineer selama dua tahun.'), [])
+  assert.deepEqual(ent('Saya ingin bergabung dengan PT Datadog Indonesia sebagai Account Executive.'), [])
+  assert.deepEqual(ent('Saya menemukan lowongan ini di LinkedIn dan mahir Google Sheets.'), [])
+  assert.deepEqual(ent('Saya melampirkan CV ATS-friendly dan sertifikasi ISO 27001.'), [])
+  assert.deepEqual(ent('Bekerja di Shopee sebagai analis adalah pengalaman berharga.'), ['Shopee'])
+  assert.deepEqual(ent('Saya pernah magang di Gojek selama tiga bulan.'), ['Gojek'])
+  assert.deepEqual(ent('Saya pernah bekerja di Google sebagai intern.'), ['Google'])
+})

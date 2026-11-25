@@ -548,19 +548,30 @@ const ENTITY_STOP = new Set([
 function entityCandidates(text: string): string[] {
   const out = new Set<string>()
   const add = (raw: string) => {
-    const v = raw.replace(/[.,;:!?)\]}'"]+$/u, '').replace(/^(?:di|at|pada|dari)\s+/i, '').trim()
+    const v = raw.replace(/[.,;:!?)\]}'"]+$/u, '').replace(/^(?:di|at|pada|dari)\s+/i, '').replace(/^PT\s+/, '').trim()
     if (v.length > 0 && v.length <= 60) out.add(v)
   }
-  for (const m of text.matchAll(/\b(?:PT|CV)\s+([A-Z][\p{L}0-9&.'’\- ]{1,55})/gu)) add(m[1])
-  for (const m of text.matchAll(/\b(?:bekerja di|worked at|work at|bergabung di|bergabung dengan|joined)\s+([A-Z][\p{L}0-9&.'’\- ]{1,40})/giu)) add(m[1])
-  for (const m of text.matchAll(/\b(?:memimpin proyek|led (?:a )?project|mengelola proyek|worked on project)\s+([A-Z][\p{L}0-9&.'’\- ]{1,55})/giu)) add(m[1])
-  for (const m of text.matchAll(/\b(?:sertifikasi|sertifikat|certified in|certification in)\s+([A-Z][\p{L}0-9&.'’\- ]{1,55})/giu)) {
-    const v = m[1]
-    // Standar dan sertifikasi berangka (ISO 27001, SOC 2, NIST 800-53) adalah nama sertifikasi, bukan klaim entitas.
-    if (!/\b(?:ISO|IEC|SOC|PCI|NIST|ITIL|COBIT|TOGAF|PMI|PRINCE2)\b/i.test(v)) add(v)
+  // Nama entitas = deret kata berhuruf kapital saja, supaya "Tokopedia sebagai Software Engineer" terbaca "Tokopedia".
+  // Kata pemicunya dicocokkan tanpa peduli huruf besar; nama sesudahnya wajib berawalan kapital.
+  const NAME = /^\s+([A-Z][\p{L}0-9&.'’\-]*(?:\s+(?:[A-Z0-9][\p{L}0-9&.'’\-]*|&))*)/u
+  const after = (trigger: RegExp, keep: (v: string) => boolean = () => true) => {
+    for (const m of text.matchAll(trigger)) {
+      const n = NAME.exec(text.slice((m.index ?? 0) + m[0].length))
+      if (n && keep(n[1])) add(n[1])
+    }
   }
+  // Hanya PT: "CV" di surat lamaran hampir selalu berarti resume ("CV ATS-friendly"), bukan badan usaha.
+  after(/\bPT\b/g)
+  // "bergabung dengan" juga dipakai untuk perusahaan tujuan; nama itu lolos lewat konteks lowongan (allowedContext).
+  after(/\b(?:bekerja di|worked at|work at|bergabung di|bergabung dengan|joined|magang di|intern(?:ed)? at|pengalaman (?:saya )?di|experience at)/giu)
+  after(/\b(?:memimpin proyek|led (?:a )?project|mengelola proyek|worked on project)/giu)
+  // Standar dan sertifikasi berangka (ISO 27001, SOC 2, NIST 800-53) adalah nama sertifikasi, bukan klaim entitas.
+  after(/\b(?:sertifikasi|sertifikat|certified in|certification in)/giu, (v) => !/\b(?:ISO|IEC|SOC|PCI|NIST|ITIL|COBIT|TOGAF|PMI|PRINCE2)\b/i.test(v))
+  // Perusahaan terkenal hanya dihitung dalam klaim kerja ("pengalaman di Google", "magang Tokopedia"), bukan setiap
+  // sebutan: "lowongan ini saya temukan di LinkedIn" atau "mahir Google Sheets" bukan klaim pengalaman.
   for (const name of KNOWN_EMPLOYERS) {
-    if (new RegExp(`\\b${escapeRegExp(name)}\\b`, 'i').test(text)) add(name)
+    const claim = new RegExp(`(?:\\b(?:bekerja|kerja|magang|intern(?:ship)?|pengalaman|karyawan|engineer|worked|working|employee|role)\\b[^.\\n]{0,30}|(?:^|[.!?]\\s*)di\\s+)\\b${escapeRegExp(name)}\\b(?!\\s+(?:Sheets|Docs|Workspace|Cloud|Ads|Analytics|Drive|Teams|Office|Excel))`, 'i')
+    if (claim.test(text)) add(name)
   }
   return [...out].filter((v) => {
     const n = normalizeForMatch(v)
@@ -689,7 +700,12 @@ export function checkGrounding(output: string, source: GroundingSource | string,
       ...(src.institutions ?? []),
       opts.allowedContext ?? '',
     ].join(' '))
-    const unsupported = entityCandidates(output).filter((name) => !containsPhrase(allowNorm, name))
+    // Cukup kata pertama yang cocok ("Datadog Indonesia" lolos bila "Datadog" ada di profil atau konteks lowongan).
+    const unsupported = entityCandidates(output).filter((name) => {
+      if (containsPhrase(allowNorm, name)) return false
+      const first = name.split(/\s+/)[0] ?? ''
+      return !(normalizeForMatch(first).length >= 3 && containsPhrase(allowNorm, first))
+    })
     push(makeWarning('unsupported_entity', unsupported,
       (l) => `Perusahaan, proyek, atau sertifikasi ini tidak ada di profilmu: ${l}. Hapus bila bukan milikmu.`))
   }
