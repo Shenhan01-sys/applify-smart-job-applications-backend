@@ -10,6 +10,8 @@ export interface ProfileImportRoutesOptions extends FastifyPluginOptions {
   importer?: Pick<LinkedInImportService, 'importFromPdf'>
 }
 
+export const AI_CONSENT_REQUIRED_MESSAGE = 'Centang persetujuan pemrosesan CV oleh AI terlebih dahulu sebelum mengimpor profil.'
+
 /** Fastify menolak badan lebih besar dari ini sebelum sampai ke kode; lebihnya sedikit ditolak assertPdfUpload. */
 const BODY_LIMIT = PDF_MAX_BYTES + 1
 
@@ -19,6 +21,7 @@ const BODY_LIMIT = PDF_MAX_BYTES + 1
  *
  *   POST /api/profile/import/linkedin-pdf
  *     Authorization: Bearer <JWT Supabase>   (dipasang oleh authMiddleware di api/index.ts)
+ *     x-ai-consent: true                     (wajib; tanpa itu 400 ai_consent_required, tanpa memproses PDF)
  *     Content-Type: application/pdf          (isi PDF mentah di badan permintaan, maksimal 5 MB, bukan multipart)
  *   200 { success: true, preview: ImportPreview }
  *   400 not_pdf | empty_file   413 file_too_large   415 not_pdf   422 pdf_unreadable | pdf_too_long | pdf_no_text | nothing_found   503 ocr_unavailable
@@ -38,6 +41,10 @@ export async function profileImportRoutes(app: FastifyInstance, opts: ProfileImp
   app.addHook('onRequest', async (request, reply) => {
     if (!request.headers.authorization?.startsWith('Bearer ')) {
       return reply.status(401).send({ success: false, error: 'Unauthorized' })
+    }
+    // Persetujuan pemrosesan CV oleh AI/OCR: diperiksa sebelum badan PDF dibaca, sebelum batas laju, dan sebelum importer.
+    if (String(request.headers['x-ai-consent'] ?? '').trim().toLowerCase() !== 'true') {
+      return reply.status(400).send({ success: false, code: 'ai_consent_required', error: AI_CONSENT_REQUIRED_MESSAGE })
     }
     return undefined
   })
