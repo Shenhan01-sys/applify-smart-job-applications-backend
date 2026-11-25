@@ -86,12 +86,38 @@ export function normalizeGlintsJob(item: any): JobPosting | null {
   }
 }
 
+/** Batas konkurensi fallback Chromium Glints agar permintaan serentak tidak memicu lonjakan memori (47.3 P1-02). */
+export const MAX_GLINTS_BROWSER_CONCURRENCY = 1
+
+let activeBrowserRuns = 0
+const browserWaiters: Array<() => void> = []
+
+export async function withGlintsBrowserSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeBrowserRuns >= MAX_GLINTS_BROWSER_CONCURRENCY) {
+    await new Promise<void>((resolve) => browserWaiters.push(resolve))
+  }
+  activeBrowserRuns++
+  try {
+    return await fn()
+  } finally {
+    activeBrowserRuns--
+    const next = browserWaiters.shift()
+    if (next) next()
+  }
+}
+
 export class GlintsMCPClient extends BaseMCPClient {
   name = 'glints'
   baseUrl = GLINTS_API
   displayName = 'Glints'
   kind = 'board' as const
   requiresCompany = false
+  private browserRunner?: (params: SearchParams) => Promise<any>
+
+  constructor(opts?: { browserRunner?: (params: SearchParams) => Promise<any> }) {
+    super()
+    this.browserRunner = opts?.browserRunner
+  }
 
   private body(params: SearchParams) {
     return {
@@ -152,7 +178,9 @@ export class GlintsMCPClient extends BaseMCPClient {
         return { success: false, error: `glints: ${err.message}` }
       }
       try {
-        json = await this.viaBrowser(params)
+        json = await withGlintsBrowserSlot(() =>
+          this.browserRunner ? this.browserRunner(params) : this.viaBrowser(params),
+        )
         via = 'browser'
       } catch (err2: any) {
         return { success: false, error: `glints: fetch gagal (${err.message}); fallback browser gagal (${err2.message})` }
