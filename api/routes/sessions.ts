@@ -1,8 +1,6 @@
 import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify'
 import {
-  SessionDecryptError,
   SessionKeyConfigError,
-  decryptSession,
   encryptSession,
   sessionKeyProblem,
 } from '../../services/session-crypto.js'
@@ -10,9 +8,30 @@ import {
 /**
  * Sesi platform (cookie LinkedIn dll.) disimpan terenkripsi di platform_sessions. Kunci hanya dari
  * SESSION_ENCRYPTION_KEY dan tidak ada kunci bawaan (services/session-crypto.ts): tanpa kunci yang sah (kosong,
- * kurang dari 32 karakter, atau nilai contoh .env.example) rute yang menyimpan atau membaca sesi menjawab
+ * kurang dari 32 karakter, atau nilai contoh .env.example) rute yang menyimpan sesi menjawab
  * 503 `session_encryption_not_configured` dan galatnya dicatat di log server. Daftar sesi (tanpa data) tetap jalan.
+ *
+ * Keamanan (F-01, BS-08):
+ *   - Endpoint `GET /:platform/data` dihapus supaya cookie terdekripsi tidak pernah dikembalikan lewat HTTP.
+ *   - Parameter `:platform` dibatasi ke daftar izin eksplisit (menolak `gmail` milik OAuth dan nilai sembarang).
+ *   - Respons POST hanya mengembalikan metadata baris (tanpa ciphertext `session_data`).
  */
+
+export const ALLOWED_SESSION_PLATFORMS = new Set([
+  'linkedin',
+  'jobstreet',
+  'kalibrr',
+  'glints',
+  'dealls',
+])
+
+const SESSION_PUBLIC_COLUMNS = 'id, platform, is_active, expires_at, last_used_at, created_at'
+
+function normalizeAllowedPlatform(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const p = raw.trim().toLowerCase()
+  return ALLOWED_SESSION_PLATFORMS.has(p) ? p : null
+}
 
 /** Hanya tes yang mengisi `db`; produksi memuat klien Supabase server saat pertama dipakai. */
 export interface SessionRoutesOptions extends FastifyPluginOptions {
@@ -41,7 +60,7 @@ export async function sessionRoutes(
     const supabase = await getDb()
     const { data, error } = await supabase
       .from('platform_sessions')
-      .select('id, platform, is_active, expires_at, last_used_at, created_at')
+      .select(SESSION_PUBLIC_COLUMNS)
       .eq('user_id', userId)
 
     if (error) {
@@ -58,7 +77,11 @@ export async function sessionRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
-    const { platform } = request.params as { platform: string }
+    const { platform: rawPlatform } = request.params as { platform: string }
+    const platform = normalizeAllowedPlatform(rawPlatform)
+    if (!platform) {
+      return reply.status(400).send({ error: 'Platform sesi tidak didukung', code: 'invalid_platform' })
+    }
     const { session_data, expires_at } = (request.body ?? {}) as any
 
     // Tanpa kunci yang sah, tidak ada yang disimpan.
@@ -97,7 +120,7 @@ export async function sessionRoutes(
         })
         .eq('user_id', userId)
         .eq('platform', platform)
-        .select()
+        .select(SESSION_PUBLIC_COLUMNS)
     } else {
       result = await supabase
         .from('platform_sessions')
@@ -108,52 +131,19 @@ export async function sessionRoutes(
           is_active: true,
           expires_at,
         })
-        .select()
+        .select(SESSION_PUBLIC_COLUMNS)
     }
 
     if (result.error) {
       return reply.status(500).send({ error: result.error.message })
     }
 
-    return result.data?.[0]
-  })
-
-  // Get decrypted session data (internal use)
-  app.get('/:platform/data', async (request, reply) => {
-    const userId = (request as any).user?.id
-    if (!userId) {
-      return reply.status(401).send({ error: 'Unauthorized' })
+    const row = result.data?.[0]
+    if (row && typeof row === 'object') {
+      const { session_data: _omitted, ...safeRow } = row as Record<string, unknown>
+      return safeRow
     }
-
-    const { platform } = request.params as { platform: string }
-
-    // Tanpa kunci yang sah, tidak ada yang dibaca.
-    const problem = sessionKeyProblem()
-    if (problem) return replyConfigError(request, reply, problem)
-
-    const supabase = await getDb()
-    const { data, error } = await supabase
-      .from('platform_sessions')
-      .select('session_data')
-      .eq('user_id', userId)
-      .eq('platform', platform)
-      .single()
-
-    if (error || !data) {
-      return reply.status(404).send({ error: 'Session not found' })
-    }
-
-    try {
-      const decrypted = decryptSession(data.session_data?.encrypted)
-      return { session_data: decrypted }
-    } catch (err: any) {
-      if (err instanceof SessionKeyConfigError) return replyConfigError(request, reply, err.message)
-      if (err instanceof SessionDecryptError) {
-        request.log.error(`[sessions] ${platform}: ${err.message}`)
-        return reply.status(422).send({ error: err.message, code: err.code })
-      }
-      return reply.status(500).send({ error: 'Failed to decrypt session' })
-    }
+    return row
   })
 
   // Deactivate session
@@ -163,7 +153,11 @@ export async function sessionRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
-    const { platform } = request.params as { platform: string }
+    const { platform: rawPlatform } = request.params as { platform: string }
+    const platform = normalizeAllowedPlatform(rawPlatform)
+    if (!platform) {
+      return reply.status(400).send({ error: 'Platform sesi tidak didukung', code: 'invalid_platform' })
+    }
 
     const supabase = await getDb()
     const { error } = await supabase

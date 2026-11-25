@@ -1,7 +1,103 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
-import { formAutofillService } from '../../services/form-autofill.service.js'
+import { formAutofillService, type FormField } from '../../services/form-autofill.service.js'
 import { AiAccessError, aiGuardService, type AiGuardService } from '../../services/ai-guard.service.js'
+
+/** Batas pengamanan POST /api/ai/fill-form (BS-02): cegah amplifikasi ratusan panggilan LLM per permintaan. */
+export const MAX_FILL_FORM_FIELDS = 40
+export const MAX_FIELD_LABEL_LENGTH = 500
+export const MAX_FIELD_OPTIONS = 100
+export const FILL_FORM_CONCURRENCY = 5
+const ALLOWED_FIELD_TYPES = new Set(['text', 'textarea', 'select', 'radio', 'checkbox', 'file'])
+
+function validateFillFormBody(body: unknown):
+  | { ok: true; fields: FormField[]; context: any }
+  | { ok: false; code: string; error: string } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, code: 'invalid_body', error: 'Body permintaan harus berupa objek JSON.' }
+  }
+  const { fields, context } = body as { fields?: unknown; context?: unknown }
+  if (!Array.isArray(fields)) {
+    return { ok: false, code: 'invalid_fields', error: 'fields harus berupa larik (array).' }
+  }
+  if (fields.length > MAX_FILL_FORM_FIELDS) {
+    return {
+      ok: false,
+      code: 'too_many_fields',
+      error: `Jumlah kolom melebihi batas maksimal ${MAX_FILL_FORM_FIELDS} per permintaan.`,
+    }
+  }
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    return { ok: false, code: 'invalid_context', error: 'context harus berupa objek.' }
+  }
+
+  const sanitized: FormField[] = []
+  for (let i = 0; i < fields.length; i++) {
+    const raw = fields[i]
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, code: 'invalid_field', error: `fields[${i}] harus berupa objek.` }
+    }
+    const f = raw as Record<string, unknown>
+    const rawType = f.type === undefined ? 'text' : f.type
+    const type = typeof rawType === 'string' ? rawType : ''
+    if (!ALLOWED_FIELD_TYPES.has(type)) {
+      return { ok: false, code: 'invalid_field', error: `fields[${i}].type tidak valid.` }
+    }
+    const label = typeof f.label === 'string' ? f.label.trim() : ''
+    if (!label || label.length > MAX_FIELD_LABEL_LENGTH) {
+      return {
+        ok: false,
+        code: 'invalid_field',
+        error: `fields[${i}].label wajib diisi dan maksimal ${MAX_FIELD_LABEL_LENGTH} karakter.`,
+      }
+    }
+    let options: string[] | undefined
+    if (f.options !== undefined) {
+      if (!Array.isArray(f.options) || f.options.length > MAX_FIELD_OPTIONS || !f.options.every((o) => typeof o === 'string')) {
+        return {
+          ok: false,
+          code: 'invalid_field',
+          error: `fields[${i}].options harus berupa larik teks maksimal ${MAX_FIELD_OPTIONS} butir.`,
+        }
+      }
+      options = f.options
+    }
+    sanitized.push({
+      type: type as FormField['type'],
+      label,
+      ...(typeof f.id === 'string' ? { id: f.id } : {}),
+      ...(typeof f.name === 'string' ? { name: f.name } : {}),
+      ...(options ? { options } : {}),
+      ...(typeof f.required === 'boolean' ? { required: f.required } : {}),
+      ...(typeof f.placeholder === 'string' ? { placeholder: f.placeholder } : {}),
+    })
+  }
+
+  const rawCtx = context as Record<string, unknown>
+  const normalizedContext = {
+    ...rawCtx,
+    jobTitle: typeof rawCtx.jobTitle === 'string' ? rawCtx.jobTitle : '',
+    company: typeof rawCtx.company === 'string' ? rawCtx.company : '',
+    jobDescription: typeof rawCtx.jobDescription === 'string' ? rawCtx.jobDescription : '',
+    userSettings: rawCtx.userSettings && typeof rawCtx.userSettings === 'object' ? rawCtx.userSettings : {},
+    userProfile: rawCtx.userProfile && typeof rawCtx.userProfile === 'object' ? rawCtx.userProfile : {},
+  }
+
+  return { ok: true, fields: sanitized, context: normalizedContext }
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const idx = next++
+      results[idx] = await fn(items[idx])
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
 
 /**
  * Pemetaan galat generasi: 422 CV tidak valid (tidak dinilai), 502 semua model menjawab tetapi ditolak penjaga
@@ -104,40 +200,55 @@ export async function aiRoutes(
 
   // Extract skills from job description
   app.post('/extract-skills', async (request, reply) => {
-    const { jobDescription } = request.body as any
+    const { jobDescription } = (request.body ?? {}) as any
+    if (typeof jobDescription !== 'string' || !jobDescription.trim()) {
+      return reply.status(400).send({ success: false, error: 'jobDescription wajib berupa teks tidak kosong.', code: 'invalid_job_description' })
+    }
 
     try {
       const skills = await aiPipelineService.extractSkills(jobDescription, (request as any).user?.id)
       return { success: true, skills }
     } catch (error: any) {
-      return reply.status(500).send({ success: false, error: error.message })
+      return sendAiError(reply, error)
     }
   })
 
   // Analyze job match
   app.post('/analyze-match', async (request, reply) => {
-    const { jobDescription, userSkills } = request.body as any
+    const { jobDescription, userSkills } = (request.body ?? {}) as any
+    if (typeof jobDescription !== 'string' || !jobDescription.trim()) {
+      return reply.status(400).send({ success: false, error: 'jobDescription wajib berupa teks tidak kosong.', code: 'invalid_job_description' })
+    }
+    const skills = Array.isArray(userSkills) ? userSkills.filter((s: unknown): s is string => typeof s === 'string') : []
 
     try {
-      const analysis = await aiPipelineService.analyzeJobMatch(jobDescription, userSkills, (request as any).user?.id)
+      const analysis = await aiPipelineService.analyzeJobMatch(jobDescription, skills, (request as any).user?.id)
       return { success: true, analysis }
     } catch (error: any) {
-      return reply.status(500).send({ success: false, error: error.message })
+      return sendAiError(reply, error)
     }
   })
 
   // Fill form fields
   app.post('/fill-form', async (request, reply) => {
-    const { fields, context } = request.body as any
+    const check = validateFillFormBody(request.body)
+    if ('error' in check) {
+      return reply.status(400).send({ success: false, error: check.error, code: check.code })
+    }
+    if (check.fields.length === 0) {
+      return { success: true, results: [] }
+    }
 
     try {
-      const results = await Promise.all(
-        fields.map((field: any) => formAutofillService.fillField(field, context))
+      const results = await mapWithConcurrency(
+        check.fields,
+        FILL_FORM_CONCURRENCY,
+        (field) => formAutofillService.fillField(field, check.context),
       )
 
       return { success: true, results }
     } catch (error: any) {
-      return reply.status(500).send({ success: false, error: error.message })
+      return sendAiError(reply, error)
     }
   })
 

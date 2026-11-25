@@ -305,11 +305,29 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
 }
 
 /**
- * Lowongan ini harus dikerjakan Ekstensi Browser (antrean `extension_apply`): bukan LinkedIn, bukan ATS publik
- * yang diisi worker, dan hostnya ada di daftar yang bisa dibuka ekstensi. Selain itu jalurnya tetap worker/manual.
+ * Lowongan ini harus dikerjakan Ekstensi Browser (antrean `extension_apply`): bukan LinkedIn (`manualOnly`),
+ * bukan email langsung (`email_direct`), bukan ATS publik yang diisi worker, dan hostnya ada di daftar yang
+ * bisa dibuka ekstensi.
  */
 export function routesToExtension(c: ChannelClassification | null | undefined): boolean {
-  return Boolean(c && !c.manualOnly && !c.autoWorkerSupported && c.extensionSupported)
+  return Boolean(c && c.channel !== 'email_direct' && !c.manualOnly && !c.autoWorkerSupported && c.extensionSupported)
+}
+
+export type ApprovalDispatchTarget = 'worker' | 'extension' | 'email_direct' | 'manual'
+
+/**
+ * Menentukan target eksekusi saat pengguna menekan Setujui (`POST /api/approvals/:id/approve`):
+ *   - `manual`       : LinkedIn / `manualOnly` — persetujuan dicatat tetapi TIDAK mengantrekan worker/ekstensi.
+ *   - `email_direct` : lamaran lewat email rekruter — persetujuan dicatat, pengiriman lewat panel Email Apply.
+ *   - `extension`    : portal login / ATS yang dirutekan ke ekstensi browser (`extension_apply`).
+ *   - `worker`       : ATS publik (atau cadangan bila metadata lowongan tidak terbaca) -> antrean `apply`.
+ */
+export function approvalDispatchTarget(c: ChannelClassification | null | undefined): ApprovalDispatchTarget {
+  if (!c) return 'worker'
+  if (c.manualOnly) return 'manual'
+  if (c.channel === 'email_direct') return 'email_direct'
+  if (routesToExtension(c)) return 'extension'
+  return 'worker'
 }
 
 export async function resolveApplyChannel(
