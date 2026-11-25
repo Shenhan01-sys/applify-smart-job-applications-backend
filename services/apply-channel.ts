@@ -195,6 +195,14 @@ export function isTestPortalUrl(rawUrl: unknown): boolean {
   return u.hostname.toLowerCase() === TEST_PORTAL_HOST && (u.pathname === TEST_PORTAL_PATH || u.pathname.startsWith(`${TEST_PORTAL_PATH}/`))
 }
 
+const WHATSAPP_HOSTS = ['wa.me', 'api.whatsapp.com', 'chat.whatsapp.com'] as const
+
+export function isWhatsAppUrl(rawUrl: unknown): boolean {
+  const safe = sanitizeHttpUrl(rawUrl)
+  if (!safe) return false
+  return hostMatchesDomain(new URL(safe).hostname, WHATSAPP_HOSTS)
+}
+
 export function extractUrlsFromText(text: string): string[] {
   if (!text) return []
   const matches = text.match(/https?:\/\/[^\s<>"'\])}`]+/gi) ?? []
@@ -332,6 +340,21 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
       reason: viaExtension
         ? 'Portal membutuhkan sesi masuk akun pelamar; gunakan Ekstensi Browser Applify langsung di tab Chrome/Edge milikmu.'
         : 'Portal membutuhkan sesi masuk akun pelamar dan belum didukung Ekstensi Browser Applify; lamar manual di situsnya.',
+    }
+  }
+
+  if (isWhatsAppUrl(primaryUrl)) {
+    return {
+      channel: 'external_web',
+      platform: 'whatsapp',
+      applyUrl: primaryUrl,
+      resolvedApplyUrl: null,
+      applyEmail: null,
+      autoWorkerSupported: false,
+      emailApplySupported: false,
+      extensionSupported: false,
+      manualOnly: true,
+      reason: 'Lamaran lewat tautan WhatsApp hanya dikirim manual langsung oleh pelamar (tidak dijalankan oleh agen maupun ekstensi).',
     }
   }
 
