@@ -712,6 +712,27 @@ function matchOption(answer: string, options: string[]): string | null {
   return matchOptionStrict(answer, options)
 }
 
+const MONTH_NAMES_ID = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember']
+
+/** `YYYY-MM[-DD]` -> nama bulan Indonesia dan tahun; selain itu null. */
+export function monthYear(raw: unknown): { month: string; year: string } | null {
+  const m = typeof raw === 'string' ? /^(\d{4})-(\d{2})/.exec(raw) : null
+  if (!m) return null
+  const idx = Number(m[2]) - 1
+  return idx >= 0 && idx < 12 ? { month: MONTH_NAMES_ID[idx], year: m[1] } : null
+}
+
+/** Peran yang sedang dijalani lebih dulu, lalu tanggal mulai terbaru. Baris tanpa posisi dan perusahaan dilewati. */
+export function latestWorkExperience(rows: any[] | null): any | null {
+  if (!Array.isArray(rows)) return null
+  const usable = rows.filter((r) => r && (String(r.role_title ?? '').trim() || String(r.company_name ?? '').trim()))
+  usable.sort((a, b) => {
+    if ((a.is_current === true) !== (b.is_current === true)) return a.is_current === true ? -1 : 1
+    return String(b.start_date ?? '').localeCompare(String(a.start_date ?? ''))
+  })
+  return usable[0] ?? null
+}
+
 function buildFactTokens(args: {
   profile: Record<string, any> | null
   settings: Record<string, any> | null
@@ -778,6 +799,25 @@ function buildFactTokens(args: {
   }
   if (coverLetter.trim()) tokens['cover_letter'] = coverLetter.trim().slice(0, 4000)
 
+  // Peran terakhir untuk formulir riwayat karir (JobStreet: posisi, perusahaan, mulai, berakhir, masih menjabat).
+  // Uji live 26 November 2026: tanpa token ini AI mengisi posisi dari judul profil, perusahaan kosong, tanggal dibiarkan.
+  const latest = latestWorkExperience(workExperiences)
+  if (latest) {
+    put('latest_role_title', cleanLine(latest.role_title ?? '', 120))
+    put('latest_company', cleanLine(latest.company_name ?? '', 120))
+    const start = monthYear(latest.start_date)
+    if (start) {
+      put('latest_start_month', start.month)
+      put('latest_start_year', start.year)
+    }
+    const end = latest.is_current === true ? null : monthYear(latest.end_date)
+    if (end) {
+      put('latest_end_month', end.month)
+      put('latest_end_year', end.year)
+    }
+    if (typeof latest.description === 'string') put('latest_role_description', latest.description.slice(0, 1500))
+  }
+
   const summaryLines = [
     `Nama lengkap: ${tokens.full_name ?? '(kosong)'} -> gunakan token {{full_name}}`,
     tokens.first_name ? `Nama depan: token {{first_name}}` : '',
@@ -788,6 +828,22 @@ function buildFactTokens(args: {
     tokens.city ? `Kota: ${tokens.city} -> token {{city}}` : '',
     tokens.country ? `Negara: ${tokens.country} -> token {{country}}` : '',
     tokens.years_of_experience ? `Lama pengalaman kerja (tahun): ${tokens.years_of_experience} -> token {{years_of_experience}}` : '',
+    latest
+      ? [
+          'Riwayat kerja terakhir (untuk kolom riwayat karir: posisi, perusahaan, tanggal mulai/berakhir):',
+          tokens.latest_role_title ? `  Posisi: ${tokens.latest_role_title} -> token {{latest_role_title}}` : '',
+          tokens.latest_company ? `  Perusahaan: ${tokens.latest_company} -> token {{latest_company}}` : '',
+          tokens.latest_start_month ? `  Mulai: bulan {{latest_start_month}} (${tokens.latest_start_month}), tahun {{latest_start_year}} (${tokens.latest_start_year})` : '',
+          latest.is_current === true
+            ? '  Masih menjabat di peran ini: ya (centang kotak "masih dalam jabatan ini"/"currently work here", kosongkan tanggal berakhir)'
+            : tokens.latest_end_month
+              ? `  Berakhir: bulan {{latest_end_month}} (${tokens.latest_end_month}), tahun {{latest_end_year}} (${tokens.latest_end_year}); masih menjabat: tidak`
+              : '',
+          tokens.latest_role_description ? '  Deskripsi peran: token {{latest_role_description}}' : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : '',
     tokens.work_authorization ? `Izin kerja: ${tokens.work_authorization} -> token {{work_authorization}}` : '',
     tokens.require_visa ? `Butuh sponsor visa: ${tokens.require_visa} -> token {{require_visa}}` : '',
     tokens.expected_salary ? `Ekspektasi gaji: tersedia, gunakan token {{expected_salary}} (angkanya tidak ditulis di sini)` : '',
@@ -994,7 +1050,7 @@ export class ExtensionPlanner {
       db.from('profiles').select('*').eq('id', userId).maybeSingle(),
       db.from('user_automation_settings').select('*').eq('user_id', userId).maybeSingle(),
       db.from('user_skills').select('name').eq('user_id', userId),
-      db.from('work_experiences').select('company_name, is_current, start_date, end_date').eq('user_id', userId).limit(50),
+      db.from('work_experiences').select('company_name, role_title, is_current, start_date, end_date, description').eq('user_id', userId).limit(50),
       db.from('achievements').select('title, category, issuer, achievement_date, is_featured, created_at').eq('user_id', userId).limit(20),
       withResume ? resumeUrlForUser(db as any, userId) : Promise.resolve(null),
     ])

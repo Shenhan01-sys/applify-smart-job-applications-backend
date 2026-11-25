@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ExtensionPlanner, NO_WORK_EXPERIENCE_RE, invalidatePlannerContextCache, noWorkExperienceState } from '../services/extension-planner.js'
+import { ExtensionPlanner, NO_WORK_EXPERIENCE_RE, invalidatePlannerContextCache, latestWorkExperience, monthYear, noWorkExperienceState } from '../services/extension-planner.js'
 import { makeExtensionTestDb, USER_ID } from './extension-test-db.js'
 
 // Uji live JobStreet 26 November 2026: langkah profil meminta "Posisi pekerjaan" dan "Nama perusahaan", dengan sakelar
@@ -83,4 +83,63 @@ test('NO_WORK_EXPERIENCE_RE: label sakelar dikenali, label biasa tidak', () => {
     assert.match(l, NO_WORK_EXPERIENCE_RE, l)
   }
   for (const l of ['Pengalaman kerja (tahun)', 'Posisi pekerjaan', 'Saya setuju dengan syarat']) assert.doesNotMatch(l, NO_WORK_EXPERIENCE_RE, l)
+})
+
+test('riwayat karir: peran terakhir jadi token, bulan mulai cocok dengan pilihan "Agu", dan masuk prompt', async () => {
+  invalidatePlannerContextCache()
+  let prompt = ''
+  const planner = new ExtensionPlanner(async (req: any) => {
+    prompt = JSON.stringify(req)
+    return {
+      model: 'm',
+      text: JSON.stringify({
+        actions: [
+          { controlId: 'company', value: '{{latest_company}}' },
+          { controlId: 'smonth', value: '{{latest_start_month}}' },
+          { controlId: 'syear', value: '{{latest_start_year}}' },
+          { controlId: 'still', value: true },
+        ],
+      }),
+    }
+  })
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des']
+  const res = await planner.planForm({
+    db: makeExtensionTestDb(
+      seed('job-career', {
+        work: [
+          { company_name: 'PT Lama', role_title: 'Intern', is_current: false, start_date: '2022-01-01', end_date: '2022-06-30' },
+          { company_name: 'Kebaya Oma', role_title: 'Freelancer', is_current: true, start_date: '2024-08-01', end_date: null },
+        ],
+      }),
+    ).db,
+    userId: USER_ID,
+    jobId: 'job-career',
+    pageUrl: 'https://id.jobstreet.com/id/job/1/apply/profile',
+    rawControls: [
+      { controlId: 'company', kind: 'text', label: 'Nama perusahaan', required: true },
+      { controlId: 'smonth', kind: 'select', label: 'Mulai', options: months, required: false },
+      { controlId: 'syear', kind: 'select', label: 'Mulai tahun', options: ['2026', '2025', '2024', '2023'], required: false },
+      { controlId: 'still', kind: 'checkbox', label: 'Masih dalam jabatan ini', required: false },
+    ],
+  })
+  const byId = Object.fromEntries(res.actions.map((a: any) => [a.controlId, a.value]))
+  assert.equal(byId.company, 'Kebaya Oma')
+  assert.equal(byId.smonth, 'Agu')
+  assert.equal(byId.syear, '2024')
+  assert.equal(byId.still, true)
+  assert.match(prompt, /latest_company/)
+  assert.match(prompt, /Masih menjabat di peran ini: ya/)
+})
+
+test('monthYear dan latestWorkExperience', () => {
+  assert.deepEqual(monthYear('2024-08-01'), { month: 'Agustus', year: '2024' })
+  assert.equal(monthYear('bukan tanggal'), null)
+  assert.equal(monthYear(null), null)
+  const rows = [
+    { role_title: 'A', start_date: '2023-01-01', is_current: false },
+    { role_title: 'B', start_date: '2020-01-01', is_current: true },
+    { role_title: '', company_name: '', start_date: '2025-01-01', is_current: true },
+  ]
+  assert.equal(latestWorkExperience(rows)?.role_title, 'B')
+  assert.equal(latestWorkExperience(null), null)
 })
