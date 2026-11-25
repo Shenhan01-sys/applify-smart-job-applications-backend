@@ -2,7 +2,8 @@ import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { aiPipelineService, InvalidCvError, OutputRejectedError } from '../services/ai-pipeline.service.ts'
-import { aiRoutes } from '../api/routes/ai.ts'
+import { formAutofillService } from '../services/form-autofill.service.ts'
+import { aiRoutes, FILL_FORM_CONCURRENCY, MAX_FILL_FORM_FIELDS } from '../api/routes/ai.ts'
 
 /**
  * HTTP-level check of /api/ai/cv, /api/ai/cv/evaluate and /api/ai/cover-letter with the pipeline replaced:
@@ -15,7 +16,10 @@ const original = {
   generateCV: aiPipelineService.generateCV,
   generateCoverLetter: aiPipelineService.generateCoverLetter,
   evaluateCV: aiPipelineService.evaluateCV,
+  extractSkills: aiPipelineService.extractSkills,
+  analyzeJobMatch: aiPipelineService.analyzeJobMatch,
 }
+const originalFillField = formAutofillService.fillField
 
 beforeEach(async () => {
   app = Fastify()
@@ -27,6 +31,7 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   Object.assign(aiPipelineService, original)
+  formAutofillService.fillField = originalFillField
   await app.close()
 })
 
@@ -100,4 +105,77 @@ test('galat biasa tetap 500 dengan pesan', async () => {
   const res = await post('/api/ai/cover-letter', { jobTitle: 'Dev', company: 'PT X', jobDescription: 'd', userProfile: {} })
   assert.equal(res.statusCode, 500)
   assert.match(res.json().error, /AI generation failed/)
+})
+
+test('BS-02 POST /fill-form menolak fields bukan array, jumlah kolom > batas, context kosong, dan tipe/label tidak valid (400)', async () => {
+  let called = 0
+  formAutofillService.fillField = (async () => {
+    called++
+    return { field: { type: 'text', label: 'x' }, value: 'v', confidence: 0.9, source: 'rule', needsReview: false }
+  }) as any
+
+  const notArray = await post('/api/ai/fill-form', { fields: 'not-an-array', context: {} })
+  assert.equal(notArray.statusCode, 400)
+  assert.equal(notArray.json().code, 'invalid_fields')
+
+  const tooMany = await post('/api/ai/fill-form', {
+    fields: Array.from({ length: MAX_FILL_FORM_FIELDS + 1 }, (_, i) => ({ type: 'text', label: `Q${i}` })),
+    context: { userSettings: {} },
+  })
+  assert.equal(tooMany.statusCode, 400)
+  assert.equal(tooMany.json().code, 'too_many_fields')
+
+  const noContext = await post('/api/ai/fill-form', { fields: [{ type: 'text', label: 'Nama' }] })
+  assert.equal(noContext.statusCode, 400)
+  assert.equal(noContext.json().code, 'invalid_context')
+
+  const badType = await post('/api/ai/fill-form', {
+    fields: [{ type: 'script', label: 'Nama' }],
+    context: {},
+  })
+  assert.equal(badType.statusCode, 400)
+  assert.equal(badType.json().code, 'invalid_field')
+
+  const emptyLabel = await post('/api/ai/fill-form', {
+    fields: [{ type: 'text', label: '   ' }],
+    context: {},
+  })
+  assert.equal(emptyLabel.statusCode, 400)
+  assert.equal(emptyLabel.json().code, 'invalid_field')
+
+  assert.equal(called, 0, 'tidak satu pun panggilan autofill/LLM boleh dijalankan untuk input tak valid')
+})
+
+test('BS-02 POST /fill-form membatasi konkurensi pemrosesan dan mengembalikan urutan hasil yang konsisten', async () => {
+  let active = 0
+  let maxActive = 0
+  formAutofillService.fillField = (async (field: any) => {
+    active++
+    if (active > maxActive) maxActive = active
+    await new Promise((r) => setTimeout(r, 10))
+    active--
+    return { field, value: `ans:${field.label}`, confidence: 0.9, source: 'rule', needsReview: false }
+  }) as any
+
+  const fields = Array.from({ length: 12 }, (_, i) => ({ type: 'text', label: `Field-${i}` }))
+  const res = await post('/api/ai/fill-form', { fields, context: {} })
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().results.length, 12)
+  assert.deepEqual(
+    res.json().results.map((r: any) => r.value),
+    fields.map((f) => `ans:${f.label}`),
+  )
+  assert.ok(maxActive <= FILL_FORM_CONCURRENCY, `konkurensi ${maxActive} melebihi batas ${FILL_FORM_CONCURRENCY}`)
+})
+
+test('BS-02 POST /extract-skills dan /analyze-match menolak jobDescription kosong (400) dan meneruskan OutputRejectedError sebagai 502', async () => {
+  assert.equal((await post('/api/ai/extract-skills', { jobDescription: '  ' })).statusCode, 400)
+  assert.equal((await post('/api/ai/analyze-match', { jobDescription: '' })).statusCode, 400)
+
+  ;(aiPipelineService as any).analyzeJobMatch = async () => {
+    throw new OutputRejectedError(['missing_match_score'], 2)
+  }
+  const rej = await post('/api/ai/analyze-match', { jobDescription: 'Backend Engineer', userSkills: ['Node.js'] })
+  assert.equal(rej.statusCode, 502)
+  assert.equal(rej.json().code, 'output_rejected')
 })
