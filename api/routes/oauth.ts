@@ -358,22 +358,46 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
     }
     if (!tokens?.access_token) return fail('token_exchange')
 
+    const db = await getDb()
+
+    // Google hanya mengirim refresh_token pada persetujuan pertama (atau prompt=consent). Bila kosong, pertahankan
+    // refresh_token lama dari baris yang ada; bila tidak ada sama sekali, sambungan TIDAK boleh ditandai aktif penuh.
+    let refreshToken: string | undefined = typeof tokens.refresh_token === 'string' && tokens.refresh_token ? tokens.refresh_token : undefined
+    if (!refreshToken) {
+      try {
+        const { data: prev } = await db
+          .from('platform_sessions')
+          .select('session_data')
+          .eq('user_id', uid)
+          .eq('platform', 'gmail')
+          .maybeSingle()
+        if (prev?.session_data?.encrypted) {
+          const old = JSON.parse(decrypt(prev.session_data.encrypted))
+          if (typeof old?.refresh_token === 'string' && old.refresh_token) refreshToken = old.refresh_token
+        }
+      } catch {
+        // Baris lama tidak terbaca: anggap tidak ada refresh_token sebelumnya.
+      }
+    }
+    const missingRefresh = !refreshToken
+
     const blob = JSON.stringify({
       access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token,
+      refresh_token: refreshToken,
       expiry_date: tokens.expiry_date ?? Date.now() + (tokens.expires_in ?? 3600) * 1000,
       scope: tokens.scope ?? SCOPES,
     })
 
-    const db = await getDb()
     const { error: upErr } = await db
       .from('platform_sessions')
       .upsert(
         {
           user_id: uid,
           platform: 'gmail',
-          session_data: { encrypted: encrypt(blob) },
-          is_active: true,
+          session_data: missingRefresh
+            ? { encrypted: encrypt(blob), refresh_failed: 'missing_refresh_token' }
+            : { encrypted: encrypt(blob) },
+          is_active: !missingRefresh,
           expires_at: new Date(
             tokens.expiry_date ?? Date.now() + (tokens.expires_in ?? 3600) * 1000
           ).toISOString(),
@@ -385,6 +409,11 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
     if (upErr) {
       console.error('[oauth] failed to persist gmail token:', upErr.message)
       return fail('storage')
+    }
+
+    if (missingRefresh) {
+      console.warn('[oauth] google tidak mengirim refresh_token dan tidak ada yang lama: sesi ditandai perlu sambung ulang')
+      return fail('no_refresh_token')
     }
 
     try {
@@ -409,11 +438,27 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
       .eq('user_id', userId)
       .eq('platform', 'gmail')
       .maybeSingle()
-    const needsReconnect = Boolean(data) && data?.session_data?.refresh_failed === 'invalid_grant'
-    if (needsReconnect) return { gmail: false, connected: false, needs_reconnect: true }
+    if (!data) return { gmail: false, connected: false, needs_reconnect: false }
     const now = new Date()
-    const connected = Boolean(data?.is_active && (!data?.expires_at || new Date(data.expires_at) > now))
-    return { gmail: connected || Boolean(data), connected: connected || Boolean(data), needs_reconnect: false }
+    const accessExpired = Boolean(data.expires_at) && new Date(data.expires_at) <= now
+    // Tanpa refresh_token, access token yang sudah kedaluwarsa tidak bisa diperbarui. Blob yang tidak terbaca
+    // dianggap tidak diketahui (tidak dituduh rusak).
+    let noRefreshToken = data.session_data?.refresh_failed === 'missing_refresh_token'
+    if (!noRefreshToken && accessExpired && data.session_data?.encrypted) {
+      try {
+        const parsed = JSON.parse(decrypt(data.session_data.encrypted))
+        noRefreshToken = !parsed?.refresh_token
+      } catch {
+        // tidak diketahui
+      }
+    }
+    const needsReconnect =
+      data.session_data?.refresh_failed === 'invalid_grant' ||
+      data.is_active === false ||
+      (accessExpired && noRefreshToken)
+    if (needsReconnect) return { gmail: false, connected: false, needs_reconnect: true }
+    // Baris aktif dengan access token kedaluwarsa tetap tersambung selama refresh_token ada: worker memperbaruinya.
+    return { gmail: true, connected: true, needs_reconnect: false }
   })
 
   // ---- POST /api/oauth/disconnect — revoke & delete Gmail session ----
