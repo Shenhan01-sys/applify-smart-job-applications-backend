@@ -385,7 +385,9 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
     }
     const missingRefresh = !refreshToken
 
-    // Alamat Gmail yang tersambung: best-effort. Gagal/timeout TIDAK boleh menggagalkan penyambungan.
+    // Alamat Gmail yang tersambung: best-effort. Gagal/timeout TIDAK boleh menggagalkan penyambungan,
+    // dan JANGAN mewarisi gmail_email dari baris sesi lama (pengguna bisa menyambungkan akun Gmail lain
+    // tanpa menekan Putuskan lebih dulu; fallback null jujur lebih aman daripada alamat pengirim yang salah).
     let gmailEmail: string | null = null
     try {
       const uiResp = await fetchFn('https://www.googleapis.com/oauth2/v2/userinfo', {
@@ -399,20 +401,6 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
       }
     } catch {
       // abaikan: email tidak tersedia
-    }
-    if (!gmailEmail) {
-      try {
-        const { data: prevRow } = await db
-          .from('platform_sessions')
-          .select('session_data')
-          .eq('user_id', uid)
-          .eq('platform', 'gmail')
-          .maybeSingle()
-        const old = prevRow?.session_data?.gmail_email
-        if (typeof old === 'string' && old.includes('@')) gmailEmail = old
-      } catch {
-        // abaikan
-      }
     }
 
     const blob = JSON.stringify({

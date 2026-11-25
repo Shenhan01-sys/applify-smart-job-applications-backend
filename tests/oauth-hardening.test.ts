@@ -487,14 +487,14 @@ test('OAuth GAP-10: userinfo gagal (HTTP 500 atau jaringan putus) tetap tersambu
   })
 })
 
-test('OAuth GAP-10: gmail_email lama dipertahankan bila callback tidak mendapat email baru', async () => {
+test('OAuth GAP-10: gmail_email lama TIDAK diwarisi bila callback gagal membaca userinfo (cegah alamat pengirim salah saat ganti akun)', async () => {
   await withEncryptionKey(async () => {
     const { row, status } = await runCallbackWithFetch({
       userinfo: () => new Response('{}', { status: 500 }),
       existingSessionData: { encrypted: 'old', gmail_email: 'lama@gmail.com' },
     })
-    assert.equal(row.session_data.gmail_email, 'lama@gmail.com')
-    assert.equal(status.json().email, 'lama@gmail.com')
+    assert.equal(row.session_data.gmail_email, null)
+    assert.equal(status.json().email, null)
   })
 })
 

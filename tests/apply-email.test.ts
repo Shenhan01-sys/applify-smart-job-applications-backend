@@ -26,6 +26,7 @@ import {
 const NOW = new Date('2026-11-18T10:00:00.000Z')
 const approval = () => ({
   id: 'a1', user_id: 'u1', job_id: 'j1', application_id: 'app1', status: 'approved', expires_at: '2026-11-18T11:00:00.000Z',
+  resume_url: 'https://storage.test/cv.pdf',
 })
 
 test('isValidApplyEmail: alamat tunggal yang wajar lolos, termasuk batas 254 karakter dan local part 64', () => {

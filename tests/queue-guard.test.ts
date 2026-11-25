@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { FakeDb } from './helpers/fakeDb.ts'
 import { QueueService } from '../services/queue.service.ts'
-import { ApprovalRequiredError, guardQueuePayload, requireApprovedRow } from '../services/queue-guard.ts'
+import { ApprovalRequiredError, MissingCvUnconfirmedError, clientErrorReply, guardQueuePayload, requireApprovedRow } from '../services/queue-guard.ts'
 
 const NOW = new Date('2026-11-18T10:00:00.000Z')
 const FUTURE = '2026-11-18T11:00:00.000Z'
@@ -15,6 +15,7 @@ const approval = (over: Record<string, any> = {}) => ({
   application_id: 'app1',
   status: 'approved',
   expires_at: FUTURE,
+  resume_url: 'https://storage.test/cv.pdf',
   ...over,
 })
 
@@ -73,6 +74,32 @@ test('guardQueuePayload: email_apply wajib punya persetujuan sah', async () => {
   const ok = await guardQueuePayload(db, 'u1', 'email_apply', { approval_request_id: 'a1', apply_email: 'hr@x.test' }, NOW)
   assert.equal(ok.approved, true)
   assert.equal(ok.apply_email, 'hr@x.test')
+})
+
+test('guardQueuePayload (GAP-10): email_apply tanpa resume_url ditolak 409 missing_cv_unconfirmed kecuali allow_without_cv === true', async () => {
+  const db = new FakeDb({ approval_requests: [approval({ resume_url: null })] })
+  for (const badFlag of [undefined, false, 'true', 1]) {
+    const err = await guardQueuePayload(
+      db,
+      'u1',
+      'email_apply',
+      { approval_request_id: 'a1', apply_email: 'hr@x.test', ...(badFlag !== undefined ? { allow_without_cv: badFlag } : {}) },
+      NOW
+    ).catch((e) => e)
+    assert.ok(err instanceof MissingCvUnconfirmedError, String(badFlag))
+    const reply = clientErrorReply(err)
+    assert.equal(reply?.statusCode, 409)
+    assert.equal(reply?.body.code, 'missing_cv_unconfirmed')
+  }
+  const ok = await guardQueuePayload(
+    db,
+    'u1',
+    'email_apply',
+    { approval_request_id: 'a1', apply_email: 'hr@x.test', allow_without_cv: true },
+    NOW
+  )
+  assert.equal(ok.approved, true)
+  assert.equal(ok.allow_without_cv, true)
 })
 
 test('guardQueuePayload: job type lain kehilangan kunci persetujuan', async () => {
