@@ -182,6 +182,10 @@ export async function extensionRoutes(app: FastifyInstance, opts: ExtensionRoute
         noticeText: typeof body.noticeText === 'string' ? body.noticeText : '',
         hasPasswordInput: Boolean(body.hasPasswordInput),
         hasCaptchaIframe: Boolean(body.hasCaptchaIframe),
+        ...(typeof body.hasOpeningCta === 'boolean' ? { hasOpeningCta: body.hasOpeningCta } : {}),
+        ...(typeof body.formRootFound === 'boolean' ? { formRootFound: body.formRootFound } : {}),
+        sectionHeadings: body.sectionHeadings,
+        validationErrors: body.validationErrors,
         rawControls: body.controls,
         retryHints: body.retryHints,
       })
