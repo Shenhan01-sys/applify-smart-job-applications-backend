@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import Fastify from 'fastify'
 import { decrypt as decryptForTest, encrypt as encryptForTest, hashOAuthNonce, signState, timingSafeStringEqual, verifyState } from '../services/token-crypto.js'
-import { OAUTH_NONCE_COOKIE, oauthRoutes } from '../api/routes/oauth.js'
+import { OAUTH_NONCE_COOKIE, SCOPES, oauthRoutes } from '../api/routes/oauth.js'
 import { makeExtensionTestDb } from './extension-test-db.js'
 
 const ORIG_SESSION_KEY = process.env.SESSION_ENCRYPTION_KEY
@@ -65,8 +65,8 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
       },
     }
     let googleExchangeCalls = 0
-    const fakeFetch: typeof fetch = (async () => {
-      googleExchangeCalls++
+    const fakeFetch: typeof fetch = (async (url: any) => {
+      if (!String(url).includes('/oauth2/v2/userinfo')) googleExchangeCalls++
       return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }), { status: 200 })
     }) as typeof fetch
 
@@ -300,18 +300,18 @@ test('OAuth status: token yang refresh-nya ditolak (invalid_grant) melapor conne
   const app = await buildOAuthApp({ db: store.db })
   const res = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
   assert.equal(res.statusCode, 200)
-  assert.deepEqual(res.json(), { gmail: false, connected: false, needs_reconnect: true })
+  assert.deepEqual(res.json(), { gmail: false, connected: false, needs_reconnect: true, email: null })
   assert.equal(res.body.includes('BLOB-RAHASIA'), false)
 
   // Tersambung normal, tanpa penanda.
   store.tables.platform_sessions[0].session_data = { encrypted: 'BLOB-RAHASIA' }
   const ok = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
-  assert.deepEqual(ok.json(), { gmail: true, connected: true, needs_reconnect: false })
+  assert.deepEqual(ok.json(), { gmail: true, connected: true, needs_reconnect: false, email: null })
 
   // Belum pernah tersambung.
   store.tables.platform_sessions.length = 0
   const none = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
-  assert.deepEqual(none.json(), { gmail: false, connected: false, needs_reconnect: false })
+  assert.deepEqual(none.json(), { gmail: false, connected: false, needs_reconnect: false, email: null })
   await app.close()
 })
 
@@ -328,7 +328,7 @@ test('OAuth status (#7): is_active=false TIDAK dilaporkan tersambung; needs_reco
   })
   const app = await buildOAuthApp({ db: store.db })
   const res = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
-  assert.deepEqual(res.json(), { gmail: false, connected: false, needs_reconnect: true })
+  assert.deepEqual(res.json(), { gmail: false, connected: false, needs_reconnect: true, email: null })
   await app.close()
 })
 
@@ -340,12 +340,12 @@ test('OAuth status (#7): access token kedaluwarsa tanpa refresh_token -> needs_r
     })
     const app = await buildOAuthApp({ db: store.db })
     const get = () => app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
-    assert.deepEqual((await get()).json(), { gmail: false, connected: false, needs_reconnect: true })
+    assert.deepEqual((await get()).json(), { gmail: false, connected: false, needs_reconnect: true, email: null })
     store.tables.platform_sessions[0].session_data = { encrypted: blobOf({ access_token: 'at', refresh_token: 'rt' }) }
-    assert.deepEqual((await get()).json(), { gmail: true, connected: true, needs_reconnect: false })
+    assert.deepEqual((await get()).json(), { gmail: true, connected: true, needs_reconnect: false, email: null })
     // invalid_grant tetap needs_reconnect
     store.tables.platform_sessions[0].session_data = { encrypted: blobOf({ refresh_token: 'rt' }), refresh_failed: 'invalid_grant' }
-    assert.deepEqual((await get()).json(), { gmail: false, connected: false, needs_reconnect: true })
+    assert.deepEqual((await get()).json(), { gmail: false, connected: false, needs_reconnect: true, email: null })
     await app.close()
   })
 })
@@ -410,4 +410,103 @@ test('OAuth callback (#7): refresh_token baru dari Google dipakai', async () => 
     assert.match(String(res.headers.location), /gmail=connected/)
     assert.equal(JSON.parse(decryptForTest(row.session_data.encrypted)).refresh_token, 'rt-new')
   })
+})
+
+// ---- GAP-10: alamat Gmail pengirim (userinfo.email) ------------------------------------------------------------------
+
+async function runCallbackWithFetch(opts: { userinfo: () => Response | Promise<Response>; existingSessionData?: Record<string, unknown> }) {
+  const store = makeExtensionTestDb({ platform_sessions: [] })
+  if (opts.existingSessionData) {
+    store.tables.platform_sessions.push({ id: 's0', user_id: 'user-1', platform: 'gmail', is_active: true, expires_at: new Date(Date.now() + 1000).toISOString(), session_data: opts.existingSessionData })
+  }
+  const db = {
+    ...store.db,
+    from(table: string) {
+      if (table !== 'platform_sessions') return store.db.from(table)
+      const q = store.db.from(table)
+      return Object.assign(Object.create(q), {
+        async upsert(row: Record<string, any>) {
+          const list = store.tables.platform_sessions
+          const idx = list.findIndex((r) => r.user_id === row.user_id && r.platform === row.platform)
+          if (idx >= 0) list[idx] = { ...list[idx], ...row }
+          else list.push({ id: `s${list.length}`, ...row })
+          return { error: null }
+        },
+      })
+    },
+  }
+  const calls: string[] = []
+  const app = await buildOAuthApp({
+    db,
+    fetchImpl: (async (url: any) => {
+      calls.push(String(url))
+      if (String(url).includes('/oauth2/v2/userinfo')) return opts.userinfo()
+      return new Response(JSON.stringify({ access_token: 'at-new', refresh_token: 'rt-new', expires_in: 3600 }), { status: 200 })
+    }) as typeof fetch,
+  })
+  const start = await app.inject({ method: 'GET', url: '/api/oauth/google', headers: { authorization: 'Bearer valid' } })
+  const state = new URL(String(start.headers.location)).searchParams.get('state')!
+  const cookie = cookiePairFromSetCookie(start.headers['set-cookie'])
+  const res = await app.inject({ method: 'GET', url: `/api/oauth/google/callback?code=abc&state=${encodeURIComponent(state)}`, headers: { cookie } })
+  const status = await app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
+  await app.close()
+  return { res, row: store.tables.platform_sessions[0], calls, status }
+}
+
+test('OAuth GAP-10: SCOPES mencakup gmail.send dan userinfo.email', () => {
+  const scopes = SCOPES.split(' ')
+  assert.ok(scopes.includes('https://www.googleapis.com/auth/gmail.send'))
+  assert.ok(scopes.includes('https://www.googleapis.com/auth/userinfo.email'))
+})
+
+test('OAuth GAP-10: callback mengambil userinfo, menyimpan gmail_email (lowercase) dan /status mengembalikannya', async () => {
+  await withEncryptionKey(async () => {
+    const { res, row, calls, status } = await runCallbackWithFetch({
+      userinfo: () => new Response(JSON.stringify({ email: '  Pelamar@Gmail.COM ' }), { status: 200 }),
+    })
+    assert.match(String(res.headers.location), /gmail=connected/)
+    assert.ok(calls.some((u) => u.includes('/oauth2/v2/userinfo')))
+    assert.equal(row.session_data.gmail_email, 'pelamar@gmail.com')
+    assert.deepEqual(status.json(), { gmail: true, connected: true, needs_reconnect: false, email: 'pelamar@gmail.com' })
+    assert.equal(status.body.includes(row.session_data.encrypted), false)
+  })
+})
+
+test('OAuth GAP-10: userinfo gagal (HTTP 500 atau jaringan putus) tetap tersambung, gmail_email null', async () => {
+  await withEncryptionKey(async () => {
+    for (const userinfo of [
+      () => new Response('{}', { status: 500 }),
+      () => { throw new Error('network down') },
+    ]) {
+      const { res, row, status } = await runCallbackWithFetch({ userinfo })
+      assert.match(String(res.headers.location), /gmail=connected/)
+      assert.equal(row.is_active, true)
+      assert.equal(row.session_data.gmail_email, null)
+      assert.deepEqual(status.json(), { gmail: true, connected: true, needs_reconnect: false, email: null })
+    }
+  })
+})
+
+test('OAuth GAP-10: gmail_email lama dipertahankan bila callback tidak mendapat email baru', async () => {
+  await withEncryptionKey(async () => {
+    const { row, status } = await runCallbackWithFetch({
+      userinfo: () => new Response('{}', { status: 500 }),
+      existingSessionData: { encrypted: 'old', gmail_email: 'lama@gmail.com' },
+    })
+    assert.equal(row.session_data.gmail_email, 'lama@gmail.com')
+    assert.equal(status.json().email, 'lama@gmail.com')
+  })
+})
+
+test('OAuth GAP-10: /status email null untuk sesi lama tanpa gmail_email dan saat needs_reconnect', async () => {
+  const future = new Date(Date.now() + 3600_000).toISOString()
+  const store = makeExtensionTestDb({
+    platform_sessions: [{ id: 's1', user_id: 'user-1', platform: 'gmail', is_active: true, expires_at: future, session_data: { encrypted: 'BLOB' } }],
+  })
+  const app = await buildOAuthApp({ db: store.db })
+  const get = () => app.inject({ method: 'GET', url: '/api/oauth/status', headers: { authorization: 'Bearer valid' } })
+  assert.deepEqual((await get()).json(), { gmail: true, connected: true, needs_reconnect: false, email: null })
+  store.tables.platform_sessions[0].session_data = { encrypted: 'BLOB', gmail_email: 'a@gmail.com', refresh_failed: 'invalid_grant' }
+  assert.deepEqual((await get()).json(), { gmail: false, connected: false, needs_reconnect: true, email: null })
+  await app.close()
 })

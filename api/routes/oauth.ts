@@ -19,7 +19,11 @@ export const OAUTH_STATE_TTL_SEC = 600
 /** Umur tiket mulai OAuth (navigasi langsung ke backend). Pendek dan sekali pakai. */
 export const OAUTH_START_TTL_SEC = 120
 
-const SCOPES = ['https://www.googleapis.com/auth/gmail.send'].join(' ')
+export const SCOPES = [
+  'https://www.googleapis.com/auth/gmail.send',
+  // Non-sensitif: hanya untuk membaca alamat email akun Gmail yang tersambung (ditampilkan di UI).
+  'https://www.googleapis.com/auth/userinfo.email',
+].join(' ')
 
 /** Suffix hosting multi-tenant pada Public Suffix List: subdomain berbeda tetap dihitung cross-site. */
 const MULTI_TENANT_SUFFIXES = [
@@ -381,6 +385,36 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
     }
     const missingRefresh = !refreshToken
 
+    // Alamat Gmail yang tersambung: best-effort. Gagal/timeout TIDAK boleh menggagalkan penyambungan.
+    let gmailEmail: string | null = null
+    try {
+      const uiResp = await fetchFn('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+        signal: AbortSignal.timeout(5_000),
+      })
+      if (uiResp.ok) {
+        const ui: any = await uiResp.json()
+        const e = typeof ui?.email === 'string' ? ui.email.trim().toLowerCase() : ''
+        if (e.includes('@')) gmailEmail = e
+      }
+    } catch {
+      // abaikan: email tidak tersedia
+    }
+    if (!gmailEmail) {
+      try {
+        const { data: prevRow } = await db
+          .from('platform_sessions')
+          .select('session_data')
+          .eq('user_id', uid)
+          .eq('platform', 'gmail')
+          .maybeSingle()
+        const old = prevRow?.session_data?.gmail_email
+        if (typeof old === 'string' && old.includes('@')) gmailEmail = old
+      } catch {
+        // abaikan
+      }
+    }
+
     const blob = JSON.stringify({
       access_token: tokens.access_token,
       refresh_token: refreshToken,
@@ -395,8 +429,8 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
           user_id: uid,
           platform: 'gmail',
           session_data: missingRefresh
-            ? { encrypted: encrypt(blob), refresh_failed: 'missing_refresh_token' }
-            : { encrypted: encrypt(blob) },
+            ? { encrypted: encrypt(blob), refresh_failed: 'missing_refresh_token', gmail_email: gmailEmail }
+            : { encrypted: encrypt(blob), gmail_email: gmailEmail },
           is_active: !missingRefresh,
           expires_at: new Date(
             tokens.expiry_date ?? Date.now() + (tokens.expires_in ?? 3600) * 1000
@@ -438,7 +472,7 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
       .eq('user_id', userId)
       .eq('platform', 'gmail')
       .maybeSingle()
-    if (!data) return { gmail: false, connected: false, needs_reconnect: false }
+    if (!data) return { gmail: false, connected: false, needs_reconnect: false, email: null }
     const now = new Date()
     const accessExpired = Boolean(data.expires_at) && new Date(data.expires_at) <= now
     // Tanpa refresh_token, access token yang sudah kedaluwarsa tidak bisa diperbarui. Blob yang tidak terbaca
@@ -456,9 +490,13 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
       data.session_data?.refresh_failed === 'invalid_grant' ||
       data.is_active === false ||
       (accessExpired && noRefreshToken)
-    if (needsReconnect) return { gmail: false, connected: false, needs_reconnect: true }
+    if (needsReconnect) return { gmail: false, connected: false, needs_reconnect: true, email: null }
     // Baris aktif dengan access token kedaluwarsa tetap tersambung selama refresh_token ada: worker memperbaruinya.
-    return { gmail: true, connected: true, needs_reconnect: false }
+    const email =
+      typeof data.session_data?.gmail_email === 'string' && data.session_data.gmail_email.includes('@')
+        ? data.session_data.gmail_email
+        : null
+    return { gmail: true, connected: true, needs_reconnect: false, email }
   })
 
   // ---- POST /api/oauth/disconnect — revoke & delete Gmail session ----
