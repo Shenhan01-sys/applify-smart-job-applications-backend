@@ -75,9 +75,11 @@ export interface RankContext {
 }
 
 export interface RankBreakdown {
-  fit: number
+  /** null bila tidak ada kata kunci, skill, atau teks lowongan yang bisa dibandingkan. */
+  fit: number | null
   freshness: number
-  salary: number
+  /** null bila lowongan tidak mencantumkan kisaran gaji. */
+  salary: number | null
   workType: number
   locationFactor: number
   seniorityPenalty: number
@@ -85,8 +87,8 @@ export interface RankBreakdown {
 }
 
 export interface JobRankResult {
-  /** Skor hybrid deterministik C1 terkalibrasi 0..100. */
-  score: number
+  /** Skor hybrid deterministik C1 0..100, atau null bila tidak ada dasar kecocokan (selaras dengan matchScore frontend). */
+  score: number | null
   reasons: string[]
   matchedKeywords: string[]
   matchedSkills: string[]
@@ -195,14 +197,14 @@ function computeFreshnessScore(postedAt: string | undefined, nowMs: number): { s
   return { score: 10, reason: 'Lowongan lama (>30 hari)' }
 }
 
-function computeSalaryScore(job: JobPosting, desiredSalary?: number | null): { score: number; reason: string | null } {
+function computeSalaryScore(job: JobPosting, desiredSalary?: number | null): { score: number | null; reason: string | null } {
   const maxSal = typeof job.salary_max === 'number' && job.salary_max > 0 ? job.salary_max : null
   const minSal = typeof job.salary_min === 'number' && job.salary_min > 0 ? job.salary_min : null
   const upper = maxSal ?? minSal
   const hasRangeText = typeof job.salary_range === 'string' && job.salary_range.trim().length > 0
 
   if (upper === null && !hasRangeText) {
-    return { score: 25, reason: null }
+    return { score: null, reason: null }
   }
 
   if (typeof desiredSalary === 'number' && desiredSalary > 0 && upper !== null) {
@@ -310,7 +312,9 @@ export function rankJobC1(job: JobPosting, ctx: RankContext): JobRankResult {
     got = Math.min(max, got + 0.5 * phraseGroupsMatched.size)
   }
 
-  const fitScore = max === 0 ? 50 : Math.min(100, Math.max(0, Math.round((got / max) * 100)))
+  // Tanpa kata kunci/skill atau tanpa teks lowongan tidak ada dasar perbandingan. Jangan mengarang skor 50.
+  const jobTextEmpty = !titleNorm && !descNorm
+  const fitScore = max === 0 || jobTextEmpty ? null : Math.min(100, Math.max(0, Math.round((got / max) * 100)))
   const freshness = computeFreshnessScore(job.posted_at, nowMs)
   const salary = computeSalaryScore(job, ctx.desiredSalary)
   const workType = computeWorkTypeScore(job, ctx.workTypes)
@@ -355,19 +359,41 @@ export function rankJobC1(job: JobPosting, ctx: RankContext): JobRankResult {
     }
   }
 
-  const rawWeighted =
-    C1_RANKING_WEIGHTS.fit * fitScore +
-    C1_RANKING_WEIGHTS.freshness * freshness.score +
-    C1_RANKING_WEIGHTS.salary * salary.score +
-    C1_RANKING_WEIGHTS.workType * workType.score
+  // Komponen tanpa data tidak ikut dihitung. Bobot komponen tersedia didistribusikan ulang secara proporsional,
+  // supaya gaji yang tidak dicantumkan tidak menjadi angka sintetis dan tidak menghukum lowongan.
+  const components: Array<{ weight: number; score: number }> = []
+  if (fitScore !== null) components.push({ weight: C1_RANKING_WEIGHTS.fit, score: fitScore })
+  components.push({ weight: C1_RANKING_WEIGHTS.freshness, score: freshness.score })
+  if (salary.score !== null) components.push({ weight: C1_RANKING_WEIGHTS.salary, score: salary.score })
+  components.push({ weight: C1_RANKING_WEIGHTS.workType, score: workType.score })
+  const totalWeight = components.reduce((sum, c) => sum + c.weight, 0)
+  const effectiveWeights = [
+    fitScore !== null ? C1_RANKING_WEIGHTS.fit : 0,
+    C1_RANKING_WEIGHTS.freshness,
+    salary.score !== null ? C1_RANKING_WEIGHTS.salary : 0,
+    C1_RANKING_WEIGHTS.workType,
+  ]
+  const weightsLabel = totalWeight > 0
+    ? effectiveWeights.map((w) => (w / totalWeight).toFixed(2)).join('/')
+    : '0.00/0.00/0.00/0.00'
+  const rawWeighted = totalWeight > 0
+    ? components.reduce((sum, c) => sum + c.weight * c.score, 0) / totalWeight
+    : 0
+  const score = fitScore === null
+    ? null
+    : Math.min(100, Math.max(0, Math.round(rawWeighted * locationFactor - seniorityPenalty)))
 
-  const score = Math.min(100, Math.max(0, Math.round(rawWeighted * locationFactor - seniorityPenalty)))
-
-  const reasons: string[] = [`Kecocokan peran/skill ${fitScore}%`]
+  const reasons: string[] = []
+  if (fitScore === null) {
+    reasons.push('Data skill/kata kunci belum cukup untuk menghitung skor kecocokan')
+  } else {
+    reasons.push(`Kecocokan peran/skill ${fitScore}%`)
+  }
   if (matchedSynonyms.length > 0) {
     reasons.push(`Kecocokan sinonim ID/EN (${[...new Set(matchedSynonyms)].slice(0, 3).join(', ')})`)
   }
   reasons.push(freshness.reason)
+  if (salary.score === null) reasons.push('Kisaran gaji belum tercantum')
   if (salary.reason) reasons.push(salary.reason)
   if (workType.reason) reasons.push(workType.reason)
   if (locationReason) reasons.push(locationReason)
@@ -386,7 +412,7 @@ export function rankJobC1(job: JobPosting, ctx: RankContext): JobRankResult {
       workType: workType.score,
       locationFactor,
       seniorityPenalty,
-      weights: '0.70/0.15/0.10/0.05',
+      weights: weightsLabel,
     },
   }
 }

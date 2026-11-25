@@ -12,7 +12,7 @@ import { ApprovalRequiredError, clientErrorReply, InvalidPayloadError } from '..
  */
 
 const future = '2999-01-01T00:00:00.000Z'
-const approval = { id: 'a1', user_id: 'u1', job_id: 'j1', application_id: 'app1', status: 'approved', expires_at: future }
+const approval = { id: 'a1', user_id: 'u1', job_id: 'j1', application_id: 'app1', status: 'approved', expires_at: future, resume_url: 'https://storage.test/cv.pdf' }
 
 test('addUserJob: job type yang diizinkan diterima dan prioritas 999 dari klien diabaikan (server memakai 0)', async () => {
   const db = new FakeDb()

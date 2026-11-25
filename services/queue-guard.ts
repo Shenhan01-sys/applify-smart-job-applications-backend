@@ -34,6 +34,16 @@ export class ApprovalChannelConflictError extends Error {
   }
 }
 
+/** GAP-10: pengiriman email tanpa CV harus dikonfirmasi eksplisit (`allow_without_cv: true`). */
+export class MissingCvUnconfirmedError extends Error {
+  readonly statusCode = 409
+  readonly code = 'missing_cv_unconfirmed'
+  constructor(message = 'CV belum tersedia pada persetujuan ini dan pengiriman tanpa CV belum dikonfirmasi.') {
+    super(message)
+    this.name = 'MissingCvUnconfirmedError'
+  }
+}
+
 /** Batas per jam untuk satu platform sudah tercapai (HTTP 429): lamaran tidak dimasukkan ke antrean. */
 export class PlatformLimitReachedError extends Error {
   readonly statusCode = 429
@@ -64,7 +74,13 @@ export class InvalidPayloadError extends Error {
  * malformed payload: 400), or null for anything else (the caller then answers 500).
  */
 export function clientErrorReply(error: unknown): { statusCode: number; body: { error: string; code: string } } | null {
-  if (error instanceof ApprovalRequiredError || error instanceof ApprovalChannelConflictError || error instanceof InvalidPayloadError || error instanceof PlatformLimitReachedError) {
+  if (
+    error instanceof ApprovalRequiredError ||
+    error instanceof ApprovalChannelConflictError ||
+    error instanceof MissingCvUnconfirmedError ||
+    error instanceof InvalidPayloadError ||
+    error instanceof PlatformLimitReachedError
+  ) {
     return { statusCode: error.statusCode, body: { error: error.message, code: error.code } }
   }
   return null
@@ -78,6 +94,7 @@ export interface ApprovedRow {
   status: string
   expires_at: string
   apply_channel?: string | null
+  resume_url?: string | null
 }
 
 /** Load an approval row and make sure it is a usable consent. Throws ApprovalRequiredError otherwise. */
@@ -92,17 +109,26 @@ export async function requireApprovedRow(
   }
   let res = await db
     .from('approval_requests')
-    .select('id, user_id, job_id, application_id, status, expires_at, apply_channel')
+    .select('id, user_id, job_id, application_id, status, expires_at, apply_channel, resume_url')
     .eq('id', approvalId)
     .eq('user_id', userId)
     .maybeSingle()
-  if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204' || /apply_channel/i.test(String(res.error.message ?? '')))) {
+  if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204' || /apply_channel|resume_url/i.test(String(res.error.message ?? '')))) {
+    // Pertahankan resume_url pada kueri cadangan pertama bila hanya kolom apply_channel yang hilang di skema lama.
     res = await db
       .from('approval_requests')
-      .select('id, user_id, job_id, application_id, status, expires_at')
+      .select('id, user_id, job_id, application_id, status, expires_at, resume_url')
       .eq('id', approvalId)
       .eq('user_id', userId)
       .maybeSingle()
+    if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204' || /resume_url/i.test(String(res.error.message ?? '')))) {
+      res = await db
+        .from('approval_requests')
+        .select('id, user_id, job_id, application_id, status, expires_at')
+        .eq('id', approvalId)
+        .eq('user_id', userId)
+        .maybeSingle()
+    }
   }
   const { data: row, error } = res
   if (error) throw new Error(`approval lookup failed: ${error.message}`)
@@ -165,6 +191,15 @@ export async function guardQueuePayload(
         'commas, semicolons, angle brackets or display name)',
       'invalid_apply_email'
     )
+  }
+  // GAP-10: tolak cepat email_apply tanpa CV kecuali klien menyertakan allow_without_cv === true secara eksplisit.
+  if (needsApproval) {
+    const hasCv = typeof row.resume_url === 'string' && row.resume_url.trim().length > 0
+    const allowWithoutCv = payload.allow_without_cv === true
+    if (!allowWithoutCv) delete payload.allow_without_cv
+    if (!hasCv && !allowWithoutCv) {
+      throw new MissingCvUnconfirmedError()
+    }
   }
   if (row.job_id) payload.job_id = row.job_id
   if (row.application_id && !payload.application_id) payload.application_id = row.application_id
