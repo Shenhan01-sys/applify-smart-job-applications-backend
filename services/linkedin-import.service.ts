@@ -1,5 +1,6 @@
 import { aiPipelineService } from './ai-pipeline.service.js'
-import { LinkedInImportError, assertPdfUpload, extractPdfPages } from './linkedin-pdf.js'
+import { LinkedInImportError, PDF_MIN_TEXT_CHARS, PDF_NO_TEXT_MESSAGE, assertPdfUpload, extractPdfPages } from './linkedin-pdf.js'
+import { ocrPdfPages } from './pdf-ocr.js'
 import {
   assemblePreview,
   buildModelPrompt,
@@ -55,6 +56,8 @@ export interface LinkedInImportDeps {
   /** Hanya tes yang mengisi ini. Bawaan: aiPipelineService.completeJson (dibaca saat dipanggil). */
   llm?: JsonLlm
   extractPages?: (buffer: Buffer) => Promise<string[]>
+  /** OCR untuk PDF tanpa lapisan teks (CV Canva yang diratakan). Bawaan: ocrPdfPages (Gemini). null = tidak tersedia. */
+  ocrPages?: (buffer: Buffer) => Promise<string[] | null>
   now?: () => Date
   /** Pagar keras Promise.race (ms). Bawaan: anggaran + AI_HARD_GRACE_MS. */
   aiTimeoutMs?: number
@@ -75,10 +78,24 @@ export class LinkedInImportService {
     const clock = this.deps.clock ?? Date.now
     const startedAt = clock()
     const buffer = assertPdfUpload(body)
-    const pages = await (this.deps.extractPages ?? extractPdfPages)(buffer)
+    let pages: string[]
+    let ocrUsed = false
+    try {
+      pages = await (this.deps.extractPages ?? extractPdfPages)(buffer)
+    } catch (e) {
+      if (!(e instanceof LinkedInImportError) || e.code !== 'pdf_no_text') throw e
+      // PDF berupa gambar (misalnya CV Canva yang diratakan): baca teksnya dengan OCR.
+      const ocr = await (this.deps.ocrPages ?? ocrPdfPages)(buffer)
+      if (!ocr || ocr.join('').replace(/\s+/g, '').length < PDF_MIN_TEXT_CHARS) {
+        throw new LinkedInImportError(422, 'pdf_no_text', PDF_NO_TEXT_MESSAGE)
+      }
+      pages = ocr
+      ocrUsed = true
+    }
     const text = cleanPdfText(pages)
     const now = (this.deps.now ?? (() => new Date()))()
     const warnings: string[] = []
+    if (ocrUsed) warnings.push('PDF ini berupa gambar, jadi teksnya dibaca dengan OCR. Periksa nama, tanggal, email, dan nomor telepon dengan teliti.')
 
     const prompt = buildModelPrompt(text)
     if (prompt.truncated) warnings.push('PDF sangat panjang, AI hanya membaca bagian awalnya.')

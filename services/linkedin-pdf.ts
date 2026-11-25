@@ -11,6 +11,8 @@ export const PDF_MAX_BYTES = 5 * 1024 * 1024
 export const PDF_MAX_PAGES = 25
 /** Di bawah ini (tanpa spasi) PDF dianggap hasil pindai atau gambar: tidak ada teks yang bisa dibaca. */
 export const PDF_MIN_TEXT_CHARS = 80
+export const PDF_NO_TEXT_MESSAGE =
+  'Teks di PDF ini tidak bisa dibaca karena isinya berupa gambar (hasil pindai, atau CV Canva yang diunduh dengan opsi Ratakan PDF). Unduh ulang dari Canva sebagai PDF Standar tanpa Ratakan PDF, atau dari LinkedIn: Lainnya, Simpan ke PDF.'
 const PDF_PARSE_TIMEOUT_MS = 20_000
 
 export type ImportErrorCode =
@@ -82,7 +84,7 @@ async function readPages(buffer: Buffer): Promise<string[]> {
     const pages = Array.isArray(text) ? text : [String(text ?? '')]
     const chars = pages.join('').replace(/\s+/g, '').length
     if (chars < PDF_MIN_TEXT_CHARS) {
-      throw new LinkedInImportError(422, 'pdf_no_text', 'PDF ini tidak berisi teks yang bisa dibaca (mungkin hasil pindai atau gambar). Unduh PDF langsung dari LinkedIn: Lainnya, Simpan ke PDF.')
+      throw new LinkedInImportError(422, 'pdf_no_text', PDF_NO_TEXT_MESSAGE)
     }
     return pages
   } finally {
