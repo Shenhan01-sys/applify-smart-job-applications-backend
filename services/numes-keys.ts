@@ -258,7 +258,16 @@ export function classifyTransportError(error: unknown): NumesTransportError {
   const code = String(e?.code ?? '')
   if (UNREACHABLE_CODES.has(code)) return 'unreachable'
   const name = String(e?.name ?? '')
-  if (TIMEOUT_CODES.has(code) || name === 'TimeoutError' || name === 'AbortError' || /timeout|timed out/i.test(String(e?.message ?? ''))) return 'timeout'
+  // ERR_CANCELED/CanceledError: axios dibatalkan AbortSignal.timeout (cadangan batas waktu), jadi juga 'timeout'.
+  if (
+    TIMEOUT_CODES.has(code) ||
+    code === 'ERR_CANCELED' ||
+    name === 'TimeoutError' ||
+    name === 'AbortError' ||
+    name === 'CanceledError' ||
+    /timeout|timed out/i.test(String(e?.message ?? ''))
+  )
+    return 'timeout'
   return 'network'
 }
 

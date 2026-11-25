@@ -459,3 +459,9 @@ test('run: log hanya memuat nomor kunci, tidak pernah nilainya', async () => {
   assert.match(all, /key 2\/3/)
   assert.match(all, /key 3\/3/)
 })
+
+test('classifyTransportError: axios dibatalkan AbortSignal (ERR_CANCELED / CanceledError) dihitung batas waktu', () => {
+  assert.equal(classifyTransportError({ code: 'ERR_CANCELED', name: 'CanceledError', message: 'canceled' }), 'timeout')
+  assert.equal(classifyTransportError({ name: 'CanceledError', message: 'canceled' }), 'timeout')
+  assert.equal(classifyTransportError({ code: 'ECONNRESET', message: 'socket hang up' }), 'network')
+})

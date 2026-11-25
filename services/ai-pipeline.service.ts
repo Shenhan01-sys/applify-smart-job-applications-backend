@@ -30,7 +30,22 @@ const getOpenRouterKey = () => process.env.OPENROUTER_API_KEY
 const getGroqKey = () => process.env.GROQ_API_KEY
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
-const OPENROUTER_CALL_TIMEOUT_MS = Number(process.env.AI_OPENROUTER_TIMEOUT_MS || 40_000)
+const positiveMs = (raw: string | undefined, fallback: number): number => {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+const OPENROUTER_CALL_TIMEOUT_MS = positiveMs(process.env.AI_OPENROUTER_TIMEOUT_MS, 40_000)
+const GROQ_CALL_TIMEOUT_MS = positiveMs(process.env.AI_GROQ_TIMEOUT_MS, 25_000)
+const DEFAULT_AI_CHAIN_BUDGET_MS = positiveMs(process.env.AI_CHAIN_BUDGET_MS, 90_000)
+const defaultChainDeadline = () => Date.now() + DEFAULT_AI_CHAIN_BUDGET_MS
+/** Batas setTimeout/AbortSignal.timeout: nilai di atas 2^31-1 ms atau NaN membuat AbortSignal.timeout melempar RangeError. */
+const MAX_TIMER_MS = 2_147_483_647
+const timeoutConfig = (ms: number) => {
+  const clamped = Number.isFinite(ms) ? Math.min(MAX_TIMER_MS - 1000, Math.max(1, Math.round(ms))) : 1
+  // Sinyal sedikit lebih lambat dari timeout axios: axios yang lebih dulu memutus (ECONNABORTED, terbaca 'timeout' dan
+  // memicu jeda model Numes), sinyal hanya cadangan bila badan jawaban macet sesudah header diterima.
+  return { timeout: clamped, signal: AbortSignal.timeout(clamped + 1000) }
+}
 
 // Free model slugs are retired often: by 2026-10 half of the original chain (gpt-oss-20b:free,
 // nemotron nano, ling tiny, Groq llama-3.3-70b ...) no longer existed. The chains are therefore
@@ -70,7 +85,7 @@ async function liveModels(url: string, apiKey?: string): Promise<Set<string> | n
   try {
     const res = await axios.get(url, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-      timeout: 10000,
+      ...timeoutConfig(10_000),
       validateStatus: () => true,
     })
     if (res.status === 200 && Array.isArray(res.data?.data)) {
@@ -133,10 +148,10 @@ const timeLeft = (p: AIGenerationParams): number => (p.deadlineAt === undefined 
 const MIN_USEFUL_CALL_MS = 2_000
 const budgetSpent = (p: AIGenerationParams): boolean => timeLeft(p) < MIN_USEFUL_CALL_MS
 /** Batas waktu satu panggilan: nilai dasar, tidak pernah melewati sisa waktu rantai. Tanpa deadline = nilai dasar. */
-const callTimeout = (p: AIGenerationParams, base?: number): number | undefined => {
+const callTimeout = (p: AIGenerationParams, base: number): number => {
   const left = timeLeft(p)
   if (left === Infinity) return base
-  return Math.max(MIN_USEFUL_CALL_MS, Math.min(base ?? left, left))
+  return Math.max(MIN_USEFUL_CALL_MS, Math.min(base, left))
 }
 /** Galat jaringan yang berarti servernya tidak terjangkau: model lain di penyedia yang sama tidak akan menjawab juga. */
 const UNREACHABLE_CODES = new Set(['ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'])
@@ -194,6 +209,8 @@ interface CoverLetterParams {
   tone?: 'professional' | 'casual' | 'enthusiastic'
   /** 'id' | 'en' | 'auto'. Bawaan: Bahasa Indonesia, kecuali deskripsi lowongan jelas berbahasa Inggris. */
   language?: string
+  /** Batas waktu mutlak (epoch ms) rantai AI. Bila kosong, memakai anggaran bawaan rantai. */
+  deadlineAt?: number
 }
 
 interface AnswerQuestionParams {
@@ -205,6 +222,8 @@ interface AnswerQuestionParams {
   jobDescription: string
   userProfile: any
   userId?: string
+  /** Batas waktu mutlak (epoch ms) rantai AI. Bila kosong, memakai anggaran bawaan rantai. */
+  deadlineAt?: number
 }
 
 type CvProfile = ProfileLike & {
@@ -313,7 +332,11 @@ export class AIPipelineService {
           max_tokens: target.provider === 'anthropic' ? Math.max(params.max_tokens ?? 2000, 1600) : params.max_tokens ?? 2000,
         }
         const post = (headers: Record<string, string>, timeoutMs?: number) =>
-          axios.post(target.url, body, { headers, timeout: timeoutMs ?? callTimeout(params, PREMIUM_CALL_TIMEOUT_MS), validateStatus: () => true })
+          axios.post(target.url, body, {
+            headers,
+            ...timeoutConfig(timeoutMs ?? callTimeout(params, PREMIUM_CALL_TIMEOUT_MS)),
+            validateStatus: () => true,
+          })
         let response: { status: number; data: any }
         if (target.provider === 'numes' && target.pool) {
           // Kolam kunci: kunci berikutnya hanya dicoba untuk 401/402/403/429. Batas waktu (12 detik, NUMES_TIMEOUT_MS) melepas
@@ -400,7 +423,7 @@ export class AIPipelineService {
             // Validate so that 4xx/5xx throw and we can catch + retry.
             validateStatus: () => true,
             // Tanpa batas waktu satu model gratis yang menggantung menahan seluruh permintaan.
-            timeout: callTimeout(params, OPENROUTER_CALL_TIMEOUT_MS),
+            ...timeoutConfig(callTimeout(params, OPENROUTER_CALL_TIMEOUT_MS)),
           }
         )
 
@@ -523,8 +546,8 @@ export class AIPipelineService {
               'Content-Type': 'application/json',
             },
             validateStatus: () => true,
-            // Hanya berlaku bila rantai punya deadline; tanpa itu Groq tetap tanpa batas waktu (perilaku lama).
-            timeout: callTimeout(params),
+            // Selalu memakai batas waktu bawaan + AbortSignal.timeout yang aman walau rantai tidak diberi deadline.
+            ...timeoutConfig(callTimeout(params, GROQ_CALL_TIMEOUT_MS)),
           }
         )
 
@@ -615,6 +638,7 @@ Write the cover letter now (just the body, no header/footer):`
       temperature: 0.8,
       max_tokens: 1500,
       accept: (raw) => acceptCoverLetter(raw, { language, allowedContext }),
+      deadlineAt: params.deadlineAt ?? defaultChainDeadline(),
     })
 
     // Trace the generation
@@ -647,6 +671,7 @@ Write the cover letter now (just the body, no header/footer):`
     company: string
     jobDescription: string
     userId?: string
+    deadlineAt?: number
   }): Promise<string> {
     const { original, instructions, jobTitle, company, jobDescription, userId } = params
     const startTime = Date.now()
@@ -681,6 +706,7 @@ ${original}`
       temperature: 0.7,
       max_tokens: 1500,
       accept: (raw) => acceptCoverLetter(raw, { language, allowedContext }),
+      deadlineAt: params.deadlineAt ?? defaultChainDeadline(),
     })
 
     await tracingService.traceAIGeneration({
@@ -754,6 +780,7 @@ Candidate Info: ${JSON.stringify(candidateInfo, null, 2)}
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.6,
       max_tokens: 800,
+      deadlineAt: params.deadlineAt ?? defaultChainDeadline(),
     })
   }
 
@@ -778,7 +805,7 @@ Candidate Info: ${JSON.stringify(candidateInfo, null, 2)}
     })
   }
 
-  async extractSkills(jobDescription: string, userId?: string): Promise<string[]> {
+  async extractSkills(jobDescription: string, userId?: string, deadlineAt?: number): Promise<string[]> {
     const prompt = `Extract the top 10 most important skills from this job description. Return ONLY a comma-separated list of skills.
 
 Job Description:
@@ -792,12 +819,13 @@ ${jobDescription}`
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.3,
       max_tokens: 300,
+      deadlineAt: deadlineAt ?? defaultChainDeadline(),
     })
 
     return response.split(',').map((s: string) => s.trim()).filter(Boolean)
   }
 
-  async analyzeJobMatch(jobDescription: string, userSkills: string[], userId?: string): Promise<{
+  async analyzeJobMatch(jobDescription: string, userSkills: string[], userId?: string, deadlineAt?: number): Promise<{
     matchScore: number
     skillGaps: string[]
     missingSkills: string[]
@@ -824,6 +852,7 @@ RECOMMENDATION: [1-2 sentence recommendation]`
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
       max_tokens: 500,
+      deadlineAt: deadlineAt ?? defaultChainDeadline(),
     })
 
     const matchScore = parseInt(response.match(/MATCH_SCORE:\s*(\d+)/)?.[1] || '50')
@@ -844,6 +873,7 @@ RECOMMENDATION: [1-2 sentence recommendation]`
     /** 'id' | 'en' | 'auto'. Bawaan: Bahasa Indonesia, kecuali deskripsi lowongan jelas berbahasa Inggris. */
     language?: string
     userId?: string
+    deadlineAt?: number
   }): Promise<GeneratedDocument> {
     const { userProfile, jobTitle, company, jobDescription, userId } = params
     const startTime = Date.now()
@@ -954,6 +984,7 @@ Generate the CV now:`
       temperature: 0.7,
       max_tokens: 2800,
       accept: (raw) => acceptCv(fillContactTokens(raw, userProfile), { allowedContext, requireEducation }),
+      deadlineAt: params.deadlineAt ?? defaultChainDeadline(),
     })
 
     await tracingService.traceAIGeneration({
@@ -981,6 +1012,7 @@ Generate the CV now:`
     /** false untuk CV tanpa seksi Pendidikan yang memang sah (profil tanpa data pendidikan). Bawaan true. */
     requireEducation?: boolean
     userId?: string
+    deadlineAt?: number
   }): Promise<{
     overallScore: number
     atsCompatibilityScore: number
@@ -1071,6 +1103,7 @@ Output ONLY the evaluation in the format above. Do not output your reasoning or 
       temperature: 0.4,
       max_tokens: 1500,
       accept: acceptEvaluation,
+      deadlineAt: params.deadlineAt ?? defaultChainDeadline(),
     })
 
     await tracingService.traceAIGeneration({
