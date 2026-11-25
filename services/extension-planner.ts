@@ -572,7 +572,13 @@ export function noWorkExperienceState(workRows: unknown, profile: any): 'none' |
 
 const controlQuestionLabel = (c: SanitizedExtControl): string => {
   if (c.kind === 'radio' && c.groupLabel) return c.groupLabel
-  return c.label || c.placeholder || c.name
+  const own = c.label || c.placeholder || c.name
+  // Label pendek di bawah judul kelompok (JobStreet: "Bulan"/"Tahun" di bawah "Mulai" dan "Berakhir"): judulnya ikut,
+  // supaya pertanyaan dan kuncinya tidak tertukar antara tanggal mulai dan tanggal berakhir.
+  if (c.kind !== 'checkbox' && c.groupLabel && own.length <= 24 && !own.toLowerCase().includes(c.groupLabel.toLowerCase())) {
+    return `${c.groupLabel} ${own}`.trim()
+  }
+  return own
 }
 
 /**

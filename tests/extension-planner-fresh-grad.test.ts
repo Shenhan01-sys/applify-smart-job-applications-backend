@@ -143,3 +143,27 @@ test('monthYear dan latestWorkExperience', () => {
   assert.equal(latestWorkExperience(rows)?.role_title, 'B')
   assert.equal(latestWorkExperience(null), null)
 })
+
+test('judul kelompok (legend Mulai/Berakhir) ikut di label pertanyaan Bulan dan Tahun', async () => {
+  invalidatePlannerContextCache()
+  let prompt = ''
+  const planner = new ExtensionPlanner(async (req: any) => {
+    prompt = JSON.stringify(req)
+    return { model: 'm', text: '{"actions":[]}' }
+  })
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des']
+  const res = await planner.planForm({
+    db: makeExtensionTestDb(seed('job-group')).db,
+    userId: USER_ID,
+    jobId: 'job-group',
+    pageUrl: 'https://id.jobstreet.com/id/job/1/apply/profile',
+    rawControls: [
+      { controlId: 'sm', kind: 'select', label: 'Bulan', groupLabel: 'Mulai', options: months, required: true },
+      { controlId: 'em', kind: 'select', label: 'Bulan', groupLabel: 'Berakhir', options: months, required: true },
+    ],
+  })
+  assert.match(prompt, /Mulai Bulan/)
+  assert.match(prompt, /Berakhir Bulan/)
+  const labels = res.pendingQuestions.map((q: any) => q.label)
+  assert.ok(labels.includes('Mulai Bulan') && labels.includes('Berakhir Bulan'), JSON.stringify(labels))
+})
