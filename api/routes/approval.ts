@@ -534,7 +534,10 @@ export async function approvalRoutes(
       .select('*')
       .eq('user_id', userId)
       .neq('status', 'pending')
-      .order('reviewed_at', { ascending: false })
+      // Postgres menaruh NULL paling atas pada DESC. Persetujuan kedaluwarsa tidak punya reviewed_at, jadi tanpa
+      // nullsFirst:false 50 baris kedaluwarsa menutup semua persetujuan baru dari halaman pertama (E2E-02).
+      .order('reviewed_at', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1)
 
     if (error) {
