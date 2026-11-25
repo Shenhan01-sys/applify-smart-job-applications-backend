@@ -34,6 +34,20 @@ export class ApprovalChannelConflictError extends Error {
   }
 }
 
+/** Batas per jam untuk satu platform sudah tercapai (HTTP 429): lamaran tidak dimasukkan ke antrean. */
+export class PlatformLimitReachedError extends Error {
+  readonly statusCode = 429
+  readonly code = 'platform_limit_reached'
+  readonly platform: string
+  readonly resetAt: Date | null
+  constructor(platform: string, resetAt: Date | null = null) {
+    super(`Batas lamaran ke ${platform} sudah tercapai untuk saat ini. Coba lagi nanti atau lamar ke platform lain.`)
+    this.name = 'PlatformLimitReachedError'
+    this.platform = platform
+    this.resetAt = resetAt
+  }
+}
+
 /** The client sent a payload the queue will not accept (HTTP 400), as opposed to a missing consent (403). */
 export class InvalidPayloadError extends Error {
   readonly statusCode = 400
@@ -50,7 +64,7 @@ export class InvalidPayloadError extends Error {
  * malformed payload: 400), or null for anything else (the caller then answers 500).
  */
 export function clientErrorReply(error: unknown): { statusCode: number; body: { error: string; code: string } } | null {
-  if (error instanceof ApprovalRequiredError || error instanceof ApprovalChannelConflictError || error instanceof InvalidPayloadError) {
+  if (error instanceof ApprovalRequiredError || error instanceof ApprovalChannelConflictError || error instanceof InvalidPayloadError || error instanceof PlatformLimitReachedError) {
     return { statusCode: error.statusCode, body: { error: error.message, code: error.code } }
   }
   return null

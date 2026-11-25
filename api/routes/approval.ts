@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify'
 import { QueueService, queueService } from '../../services/queue.service.js'
-import { ApprovalChannelConflictError } from '../../services/queue-guard.js'
+import { ApprovalChannelConflictError, PlatformLimitReachedError } from '../../services/queue-guard.js'
 import { resolveApplyChannel, routesToExtension } from '../../services/apply-channel.js'
 import { grantExtensionConsent, readExtensionAutoUse } from '../../services/extension-consent.js'
 import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
@@ -336,10 +336,15 @@ export async function approvalRoutes(
       if (err instanceof ApprovalChannelConflictError) {
         return reply.status(409).send({ error: err.message, code: err.code })
       }
+      const limitReached = err instanceof PlatformLimitReachedError
       await db
         .from('approval_requests')
         .update({ status: 'pending', reviewed_at: null })
         .eq('id', id)
+      if (limitReached) {
+        if (err.resetAt) reply.header('Retry-After', String(Math.max(1, Math.ceil((err.resetAt.getTime() - Date.now()) / 1000))))
+        return reply.status(429).send({ error: err.message, code: err.code })
+      }
       request.log.error({ err: String(err?.message ?? err) }, 'approval queueing failed, approval reverted to pending')
       return reply.status(500).send({ error: 'Failed to queue submission (approval reverted to pending)', code: 'queue_failed' })
     }
