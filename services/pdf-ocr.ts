@@ -26,10 +26,16 @@ export interface OcrOptions {
   fetchImpl?: typeof fetch
 }
 
-/** Teks per halaman hasil OCR, atau null bila OCR tidak tersedia atau gagal. Tidak pernah melempar. */
+/**
+ * Teks per halaman hasil OCR. null = OCR tidak tersedia atau gagal (tanpa kunci, HTTP gagal, timeout, galat jaringan);
+ * [] = OCR berjalan tetapi tidak menemukan teks. Tidak pernah melempar.
+ */
 export async function ocrPdfPages(buffer: Buffer, opts: OcrOptions = {}): Promise<string[] | null> {
   const apiKey = opts.apiKey === undefined ? process.env.GEMINI_API_KEY : opts.apiKey
-  if (!apiKey) return null
+  if (!apiKey) {
+    console.warn('[pdf-ocr] GEMINI_API_KEY tidak ada; OCR dilewati')
+    return null
+  }
   const model = opts.model ?? (process.env.GEMINI_OCR_MODEL || DEFAULT_OCR_MODEL)
   const fetchImpl = opts.fetchImpl ?? fetch
   try {
@@ -49,7 +55,7 @@ export async function ocrPdfPages(buffer: Buffer, opts: OcrOptions = {}): Promis
     const data = (await resp.json()) as any
     const parts: any[] = data?.candidates?.[0]?.content?.parts ?? []
     const text = parts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('').trim()
-    if (!text) return null
+    if (!text) return []
     return text.split(/^\s*---PAGE---\s*$/m).map((p) => p.trim()).filter(Boolean)
   } catch (e) {
     // Nama galat saja; pesan bisa memuat potongan isi.

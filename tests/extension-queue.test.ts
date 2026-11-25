@@ -10,7 +10,8 @@ import { claimNextExtensionJob, EXTENSION_LEASE_STALE_MS, heartbeatExtensionJob,
 import { buildApp, makeExtensionTestDb, OTHER_USER_ID, USER_ID } from './extension-test-db.js'
 
 const NOW = new Date('2026-11-24T12:00:00Z')
-const FUTURE = '2026-11-25T12:00:00Z'
+// Relatif terhadap waktu tes: tanggal tetap (25 November 2026 12:00 UTC) membuat tes gagal begitu tanggal itu lewat.
+const FUTURE = new Date(Date.now() + 7 * 24 * 3600_000).toISOString()
 const JOB_ID = '22222222-2222-4222-8222-222222222201'
 const APPROVAL_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
 const QUEUE_ID_1 = 'qqqqqqqq-1111-4111-8111-111111111111'.replace(/q/g, 'a')

@@ -49,8 +49,17 @@ test('impor: PDF tanpa teks dibaca lewat OCR, dengan peringatan untuk diperiksa'
   assert.ok(preview.warnings.some((w) => /OCR/.test(w)), preview.warnings.join(' | '))
 })
 
-test('impor: OCR tidak tersedia atau hasilnya terlalu pendek -> 422 pdf_no_text dengan pesan Canva', async () => {
-  for (const ocr of [async () => null, async () => ['ab']]) {
+test('impor: OCR tidak tersedia -> 503 ocr_unavailable, bukan saran unduh ulang', async () => {
+  await assert.rejects(svc(async () => null).importFromPdf(Buffer.from('%PDF-tiruan'), { userId: 'u1' }), (e: any) => {
+    assert.equal(e.code, 'ocr_unavailable')
+    assert.equal(e.statusCode, 503)
+    assert.match(e.message, /Coba lagi/)
+    return true
+  })
+})
+
+test('impor: OCR berjalan tetapi teksnya kosong atau terlalu pendek -> 422 pdf_no_text dengan pesan Canva', async () => {
+  for (const ocr of [async () => [], async () => ['ab']]) {
     await assert.rejects(svc(ocr).importFromPdf(Buffer.from('%PDF-tiruan'), { userId: 'u1' }), (e: any) => {
       assert.equal(e.code, 'pdf_no_text')
       assert.equal(e.message, PDF_NO_TEXT_MESSAGE)
@@ -120,9 +129,9 @@ test('ocrPdfPages: mengirim PDF sebagai inline_data dan memecah halaman pada ---
   assert.equal(sent.generationConfig.temperature, 0)
 })
 
-test('ocrPdfPages: HTTP gagal, respons kosong, atau galat jaringan -> null', async () => {
+test('ocrPdfPages: HTTP gagal atau galat jaringan -> null; respons tanpa teks -> []', async () => {
   const mk = (fn: () => Promise<Response>) => fn as unknown as typeof fetch
   assert.equal(await ocrPdfPages(Buffer.from('%PDF'), { apiKey: 'k', fetchImpl: mk(async () => new Response('x', { status: 429 })) }), null)
-  assert.equal(await ocrPdfPages(Buffer.from('%PDF'), { apiKey: 'k', fetchImpl: mk(async () => new Response(JSON.stringify({ candidates: [] }))) }), null)
+  assert.deepEqual(await ocrPdfPages(Buffer.from('%PDF'), { apiKey: 'k', fetchImpl: mk(async () => new Response(JSON.stringify({ candidates: [] }))) }), [])
   assert.equal(await ocrPdfPages(Buffer.from('%PDF'), { apiKey: 'k', fetchImpl: mk(async () => { throw new TypeError('fetch failed') }) }), null)
 })

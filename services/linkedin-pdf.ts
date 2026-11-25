@@ -11,6 +11,8 @@ export const PDF_MAX_BYTES = 5 * 1024 * 1024
 export const PDF_MAX_PAGES = 25
 /** Di bawah ini (tanpa spasi) PDF dianggap hasil pindai atau gambar: tidak ada teks yang bisa dibaca. */
 export const PDF_MIN_TEXT_CHARS = 80
+export const OCR_UNAVAILABLE_MESSAGE =
+  'PDF ini berupa gambar, dan pembaca teks gambar (OCR) sedang tidak tersedia. Coba lagi beberapa menit lagi. Bila tetap gagal, unduh ulang CV dari Canva sebagai PDF Standar tanpa opsi Ratakan PDF.'
 export const PDF_NO_TEXT_MESSAGE =
   'Teks di PDF ini tidak bisa dibaca karena isinya berupa gambar (hasil pindai, atau CV Canva yang diunduh dengan opsi Ratakan PDF). Unduh ulang dari Canva sebagai PDF Standar tanpa Ratakan PDF, atau dari LinkedIn: Lainnya, Simpan ke PDF.'
 const PDF_PARSE_TIMEOUT_MS = 20_000
@@ -22,12 +24,13 @@ export type ImportErrorCode =
   | 'pdf_unreadable'
   | 'pdf_too_long'
   | 'pdf_no_text'
+  | 'ocr_unavailable'
   | 'nothing_found'
 
 /** Galat impor dengan status HTTP dan kode yang dibaca antarmuka. `message` siap tampil (Bahasa Indonesia). */
 export class LinkedInImportError extends Error {
   constructor(
-    readonly statusCode: 400 | 413 | 415 | 422,
+    readonly statusCode: 400 | 413 | 415 | 422 | 503,
     readonly code: ImportErrorCode,
     message: string,
   ) {

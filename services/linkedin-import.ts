@@ -269,9 +269,9 @@ const MONTH_NAMES: Record<number, string[]> = {
 const MONTH_LOOKUP = new Map<string, number>()
 for (const [m, names] of Object.entries(MONTH_NAMES)) for (const n of names) MONTH_LOOKUP.set(n, Number(m))
 
-/** Penanda "masih berjalan" pada tanggal akhir: Present, Now, Current(ly), Sekarang, Saat ini, Hingga/Sampai (sekarang|kini), To date, Ongoing. */
+/** Penanda "masih berjalan" pada tanggal akhir: Present, Now, Current(ly), Sekarang (juga singkatan Skrg), Saat ini, Hingga/Sampai (sekarang|kini), To date, Ongoing. */
 const PRESENT_RE =
-  /^(?:present|sekarang|saat ini|kini|now|current|currently|ongoing|berlangsung|to date|till date|up to date|date|sampai sekarang|hingga sekarang|sampai kini|hingga kini|s\/?d sekarang|s\/?d kini|sampai saat ini|hingga saat ini)$/i
+  /^(?:present|sekarang|skrg\.?|sekrg|saat ini|kini|now|current|currently|ongoing|berlangsung|to date|till date|up to date|date|sampai sekarang|hingga sekarang|sampai skrg|hingga skrg|s\/?d skrg|sampai kini|hingga kini|s\/?d sekarang|s\/?d kini|sampai saat ini|hingga saat ini)$/i
 
 const pad2 = (n: number) => String(n).padStart(2, '0')
 const ymd = (year: number, month: number) => `${year}-${pad2(month)}-01`
@@ -442,7 +442,7 @@ const DASH = '[-\\u2010-\\u2015\\u2212]'
 /** Pemisah rentang di CV: strip, "to", "until", "sampai (dengan)", "hingga", "s/d", "s.d.", "sd". */
 const RANGE_SEP = `(?:${DASH}|to|until|till|through|thru|sampai(?:\\s+dengan)?|hingga|s\\s*[/.]\\s*d\\.?|sd\\.?)`
 /** Penanda "masih berjalan" untuk tahun akhir. */
-const END_WORDS = 'sampai\\s+sekarang|hingga\\s+sekarang|sampai\\s+kini|hingga\\s+kini|sampai\\s+saat\\s+ini|hingga\\s+saat\\s+ini|saat\\s+ini|sekarang|present|currently|current|to\\s+date|till\\s+date|up\\s+to\\s+date|date|now|kini|ongoing|berlangsung|sedang\\s+(?:berjalan|menempuh|studi|kuliah)|masih\\s+(?:kuliah|studi|menempuh|aktif)'
+const END_WORDS = 'sampai\\s+sekarang|hingga\\s+sekarang|sampai\\s+skrg|hingga\\s+skrg|sampai\\s+kini|hingga\\s+kini|sampai\\s+saat\\s+ini|hingga\\s+saat\\s+ini|saat\\s+ini|sekarang|skrg|sekrg|present|currently|current|to\\s+date|till\\s+date|up\\s+to\\s+date|date|now|kini|ongoing|berlangsung|sedang\\s+(?:berjalan|menempuh|studi|kuliah)|masih\\s+(?:kuliah|studi|menempuh|aktif)'
 /** Kata "perkiraan lulus" di depan tahun akhir: "Expected (graduation)", "Exp.", "Anticipated", "Est.", "Perkiraan", "Rencana lulus". */
 const EXPECTED_WORDS =
   'expected(?:\\s+graduation)?|exp\\.?|anticipated(?:\\s+graduation)?|estimated(?:\\s+graduation)?|est\\.?|perkiraan(?:\\s+lulus)?|diperkirakan(?:\\s+lulus)?|estimasi(?:\\s+lulus)?|rencana\\s+lulus|target\\s+lulus|akan\\s+lulus'

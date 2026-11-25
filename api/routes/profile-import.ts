@@ -21,7 +21,7 @@ const BODY_LIMIT = PDF_MAX_BYTES + 1
  *     Authorization: Bearer <JWT Supabase>   (dipasang oleh authMiddleware di api/index.ts)
  *     Content-Type: application/pdf          (isi PDF mentah di badan permintaan, maksimal 5 MB, bukan multipart)
  *   200 { success: true, preview: ImportPreview }
- *   400 not_pdf | empty_file   413 file_too_large   415 not_pdf   422 pdf_unreadable | pdf_too_long | pdf_no_text | nothing_found
+ *   400 not_pdf | empty_file   413 file_too_large   415 not_pdf   422 pdf_unreadable | pdf_too_long | pdf_no_text | nothing_found   503 ocr_unavailable
  *   429 rate_limited (+ Retry-After)   503 rate_limit_check_failed
  *
  * Batas laju sendiri (action 'profile_import'), tanpa pemeriksaan atau pemakaian kuota draf AI. PDF diproses di

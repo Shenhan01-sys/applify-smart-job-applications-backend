@@ -12,6 +12,8 @@ import { PDF_MAX_BYTES } from '../services/linkedin-pdf.ts'
 import { profileImportRoutes } from '../api/routes/profile-import.ts'
 import { isOriginAllowed, parseAllowedOrigins } from '../services/deploy-config.ts'
 
+let ocrResult: string[] | null = []
+
 /**
  * POST /api/profile/import/linkedin-pdf pada Fastify sungguhan (app.inject, tanpa jaringan): login, validasi
  * berkas, batas laju, pratinjau, dan JAMINAN bahwa rute ini tidak menulis ke tabel profil maupun menyentuh kuota
@@ -62,7 +64,8 @@ beforeEach(async () => {
     llmCalls++
     return { text: JSON.stringify(AI_JSON), model: 'test:model' }
   }
-  const real = new LinkedInImportService({ llm: (p) => llm(p), now: () => NOW })
+  // OCR tiruan tanpa jaringan: ocrResult null = layanan OCR mati, [] = gambar tanpa teks.
+  const real = new LinkedInImportService({ llm: (p) => llm(p), now: () => NOW, ocrPages: async () => ocrResult })
   const importer = {
     importFromPdf: async (body: unknown, ctx: any) => {
       if (importerError) throw importerError
@@ -192,10 +195,15 @@ test('lebih dari 5 MB: 413 file_too_large, baik tepat 1 byte lewat maupun jauh l
   assert.equal(db.writes.length, 0)
 })
 
-test('PDF pindai (tanpa teks): 422 pdf_no_text; PDF rusak: 422 pdf_unreadable', async () => {
+test('PDF pindai (tanpa teks): 422 pdf_no_text; OCR mati: 503 ocr_unavailable; PDF rusak: 422 pdf_unreadable', async () => {
+  ocrResult = []
   const scan = await upload(makePdf([[], []]))
   assert.equal(scan.statusCode, 422)
   assert.equal(scan.json().code, 'pdf_no_text')
+  ocrResult = null
+  const down = await upload(makePdf([[], []]))
+  assert.equal(down.statusCode, 503)
+  assert.equal(down.json().code, 'ocr_unavailable')
   const broken = await upload(Buffer.from('%PDF-1.4\nrusak\n%%EOF'))
   assert.equal(broken.statusCode, 422)
   assert.equal(broken.json().code, 'pdf_unreadable')

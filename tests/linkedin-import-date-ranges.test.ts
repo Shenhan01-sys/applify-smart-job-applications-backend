@@ -58,6 +58,9 @@ const OK: Array<[string, string, string | null, boolean]> = [
   ['Sep 2023 - Currently', '2023-09-01', null, true],
   ['Sep 2023 - to date', '2023-09-01', null, true],
   ['Sep 2023 - Sekarang', '2023-09-01', null, true],
+  ['Mei 2024 - Skrg', '2024-05-01', null, true],
+  ['Mei 2024 - skrg.', '2024-05-01', null, true],
+  ['Jan 2023 s/d Skrg', '2023-01-01', null, true],
   ['Sep 2023 - Saat ini', '2023-09-01', null, true],
   ['Sep 2023 - Hingga kini', '2023-09-01', null, true],
   ['Sep 2023 - Sampai sekarang', '2023-09-01', null, true],
@@ -157,4 +160,11 @@ test('normalizeExtraction: jabatan sama di perusahaan sama pada dua periode kedu
   ])
   assert.equal(n.experiences.length, 2)
   assert.equal(n.dropped.experiences, 1)
+})
+
+test('tahun akhir singkatan Skrg berarti masih berjalan', () => {
+  const r = parseYearRange('2022 - Skrg')
+  assert.ok(r)
+  assert.equal(r!.start, 2022)
+  assert.equal(r!.end, 'present')
 })
