@@ -371,6 +371,12 @@ test('plan-form: fileTargets dan fileControlId/resumeUrl lama ada pada respons; 
   assert.deepEqual(none.fileTargets, [])
   assert.equal(none.fileControlId, null)
 
+  // Hanya input foto profil (JobStreet langkah profil): CV tidak boleh dipasang lewat jalur lama ke input foto.
+  const photoOnly = await planner.planForm({ ...base, rawControls: [fileCtl('p1', 'Profile photo (JPG, PNG)')] })
+  assert.deepEqual(photoOnly.fileTargets, [])
+  assert.equal(photoOnly.fileControlId, null)
+  assert.equal(photoOnly.resumeUrl, null)
+
   const blocked = await planner.planForm({ ...base, pageUrl: 'https://jobs.lever.co/login', hasPasswordInput: true, rawControls: [] })
   assert.equal(blocked.blocked, 'auth_required')
   assert.deepEqual(blocked.fileTargets, [])

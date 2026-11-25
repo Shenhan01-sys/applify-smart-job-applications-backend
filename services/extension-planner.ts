@@ -1218,13 +1218,17 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       EXT_MAX_PENDING_QUESTIONS
     )
 
+    // Kontrak lama (`fileControlId` + `resumeUrl`) hanya menunjuk input yang memang dikenali sebagai CV. Tanpa itu,
+    // ekstensi jatuh ke jalur lama dan memasang CV ke input berkas pertama, misalnya unggah foto profil JobStreet.
+    const fileTargets = planFileTargets(controls)
+    const resumeTarget = fileTargets.find((t) => t.kind === 'resume') ?? null
     return {
       blocked: null,
       note: null,
       actions,
-      fileControlId: fileControl?.controlId ?? null,
-      resumeUrl,
-      fileTargets: planFileTargets(controls),
+      fileControlId: resumeTarget?.controlId ?? null,
+      resumeUrl: resumeTarget ? resumeUrl : null,
+      fileTargets,
       submitControlId: submitControl?.controlId ?? null,
       pendingQuestions,
       aiError,
