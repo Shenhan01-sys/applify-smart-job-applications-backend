@@ -54,18 +54,31 @@ export function isKapsoConfigured(cfg: KapsoConfig = kapsoConfigFromEnv()): bool
   return Boolean(cfg.apiKey && cfg.phoneNumberId)
 }
 
+export interface NormalizePhoneOptions {
+  /**
+   * Untuk nomor yang diketik pengguna: tolak digit polos tanpa penanda negara (`+`, `00`, `0`, atau `62`).
+   * `81234567890` bisa nomor Indonesia yang kehilangan angka 0, bisa pula nomor Jepang (+81); menebaknya
+   * mengirim OTP ke orang lain (BS-05). Tanpa opsi ini digit polos dibaca sebagai E.164 tanpa `+`, sesuai
+   * format `from` pada webhook WhatsApp.
+   */
+  requireCountryPrefix?: boolean
+}
+
 /**
  * Normalisasi nomor WhatsApp Indonesia / internasional ke format E.164 (`+628...`) maupun digit polos (`628...`).
- * Mengembalikan null bila tidak valid (bukan 8-15 digit).
+ * Mengembalikan null bila tidak valid (bukan 8-15 digit). Angka 0 awal setelah kode negara Indonesia
+ * (`+62 0812...`) dibuang karena tidak ada nomor Indonesia yang berawalan `620`.
  */
-export function normalizeWhatsAppPhone(raw: unknown): { e164: string; waDigits: string } | null {
+export function normalizeWhatsAppPhone(raw: unknown, opts: NormalizePhoneOptions = {}): { e164: string; waDigits: string } | null {
   if (typeof raw !== 'string') return null
   let digits = raw.replace(/[^\d+]/g, '').trim()
   if (digits.startsWith('00')) digits = '+' + digits.slice(2)
   if (digits.startsWith('0')) digits = '+62' + digits.slice(1)
   if (!digits.startsWith('+')) {
-    digits = digits.startsWith('62') ? '+' + digits : digits
+    if (digits.startsWith('62')) digits = '+' + digits
+    else if (opts.requireCountryPrefix) return null
   }
+  if (digits.startsWith('+620')) digits = '+62' + digits.slice(4)
   const onlyDigits = digits.replace(/^\+/, '')
   if (!/^\d{8,15}$/.test(onlyDigits)) return null
   return { e164: `+${onlyDigits}`, waDigits: onlyDigits }

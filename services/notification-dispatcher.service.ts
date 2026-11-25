@@ -256,7 +256,8 @@ export async function requestWhatsappVerificationOtp(
   now: Date = new Date(),
   env: Env = process.env
 ): Promise<{ sent: true; phone: string; mode?: string }> {
-  const norm = normalizeWhatsAppPhone(rawPhone)
+  // Nomor ketikan pengguna wajib berpenanda negara: digit polos seperti 81234567890 tidak ditebak (BS-05).
+  const norm = normalizeWhatsAppPhone(rawPhone, { requireCountryPrefix: true })
   if (!norm) {
     throw new NotificationPreferenceError(400, 'invalid_whatsapp_phone', 'Nomor WhatsApp tidak valid. Gunakan format +628... atau 08...')
   }
@@ -362,7 +363,7 @@ export async function verifyWhatsappVerificationOtp(
   now: Date = new Date(),
   env: Env = process.env
 ): Promise<UserNotificationSettings> {
-  const norm = normalizeWhatsAppPhone(rawPhone)
+  const norm = normalizeWhatsAppPhone(rawPhone, { requireCountryPrefix: true })
   if (!norm) throw new NotificationPreferenceError(400, 'invalid_whatsapp_phone', 'Nomor WhatsApp tidak valid')
   const code = String(rawCode ?? '').replace(/[\s-]/g, '')
   if (!/^\d{6}$/.test(code)) throw new NotificationPreferenceError(400, 'invalid_otp', 'Kode OTP harus 6 digit angka')
