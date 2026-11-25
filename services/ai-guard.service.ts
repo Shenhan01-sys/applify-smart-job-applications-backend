@@ -31,7 +31,14 @@ import { KeyedMutex, type KeyedLock } from './keyed-mutex.js'
  * mencatat dalam satu langkah), jadi permintaan yang lalu ditolak karena kuota bulanan tetap memakai satu slot
  * batas laju. Di jalur lama permintaan seperti itu tidak dicatat.
  * Kuota bulanan lewat get_quota_status dibaca di sini tetapi baru berkurang saat recordDraft (setelah pipeline
- * selesai), jadi jendela balapan kuota bulanan lebih lebar dan TIDAK ditutup oleh mutex ini.
+ * selesai), jadi jendela balapan kuota bulanan lebih lebar dan tidak ditutup oleh mutex di atas. Jendela itu
+ * ditutup oleh reservasi dalam-proses (lihat `reserve` di check dan `inFlight`): permintaan yang akan memakai
+ * kuota (cover-letter) menaikkan hitungan "sedang berjalan" per pengguna begitu lolos periksa, dan pemeriksaan
+ * berikutnya memakai sisa = sisa RPC dikurangi hitungan itu. Pemanggil wajib memanggil `release()` di finally,
+ * SESUDAH recordDraft (sebelum itu draf yang sedang berjalan belum terlihat di get_quota_status).
+ * Asumsi satu instans: hitungan hanya ada di memori SATU proses Node, jadi dua proses (PM2 cluster, replika) tidak
+ * saling melihat reservasi. Lonjakan paralel lintas proses tetap dibatasi oleh RPC consume_ai_rate_slot (batas
+ * laju per menit atomik di database), tetapi kuota bulanan lintas proses baru berkurang saat recordDraft.
  *
  * Konsumsi kuota: Edge Function menghitung kuota dari baris ai_applications bulan berjalan. Rute backend tidak
  * membuat baris itu, jadi satu surat lamaran yang berhasil dibuat lewat /api/ai/cover-letter dicatat sebagai
@@ -57,6 +64,19 @@ export interface AiLimits {
   perMinute: number
   perHour: number
 }
+
+/** Opsi `check`. `reserve`: permintaan ini akan menghasilkan satu draf, jadi tahan satu kuota sampai `release()`. */
+export interface AiCheckOptions {
+  reserve?: boolean
+}
+
+export interface AiCheckResult {
+  quota: QuotaSummary
+  /** Lepas reservasi (aman dipanggil berulang; tidak berbuat apa-apa bila `reserve` tidak diminta). Panggil di finally. */
+  release: () => void
+}
+
+const NOOP_RELEASE = (): void => {}
 
 /** Minimal shape of the Supabase client used here (a fake is passed in tests). */
 export interface AiGuardDb {
@@ -134,6 +154,12 @@ export function importLimitsFromEnv(env: Record<string, string | undefined> = pr
 const sharedLocks = new KeyedMutex()
 
 export class AiGuardService {
+  /**
+   * Draf yang sedang dibuat per pengguna (sudah lolos check dengan reserve, belum release). Hanya satu proses;
+   * lihat catatan "Asumsi satu instans" di atas. Kunci dihapus saat hitungan kembali ke 0.
+   */
+  private readonly inFlight = new Map<string, number>()
+
   /** `client`, `limits`, dan `clock` hanya diisi di tes; produksi memuat klien Supabase server saat pertama dipakai. */
   constructor(
     private readonly client?: AiGuardDb,
@@ -146,15 +172,34 @@ export class AiGuardService {
     return this.client ?? ((await import('../api/index.js')).supabase as unknown as AiGuardDb)
   }
 
-  /**
-   * Izinkan satu permintaan AI atau lempar AiAccessError. Mengembalikan kuota bulanan terkini untuk antarmuka.
-   */
-  async check(userId: string, route: string): Promise<{ quota: QuotaSummary }> {
-    // Periksa lalu catat harus tak terpisahkan untuk pengguna ini (lihat balapan periksa-lalu-catat di atas).
-    return this.locks.run(`${userId}|${AI_REQUEST_ACTION}`, () => this.checkLocked(userId, route))
+  /** Jumlah draf yang sedang dibuat untuk pengguna ini (reservasi yang belum dilepas). */
+  inFlightDrafts(userId: string): number {
+    return this.inFlight.get(userId) ?? 0
   }
 
-  private async checkLocked(userId: string, route: string): Promise<{ quota: QuotaSummary }> {
+  /** Tambah satu reservasi dan kembalikan pelepasnya (idempoten). Sinkron, tanpa await, jadi atomik dalam proses. */
+  private reserveDraft(userId: string): () => void {
+    this.inFlight.set(userId, this.inFlightDrafts(userId) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const left = this.inFlightDrafts(userId) - 1
+      if (left > 0) this.inFlight.set(userId, left)
+      else this.inFlight.delete(userId)
+    }
+  }
+
+  /**
+   * Izinkan satu permintaan AI atau lempar AiAccessError. Mengembalikan kuota bulanan terkini untuk antarmuka.
+   * Dengan `reserve: true`, satu kuota ditahan sampai `release()` dipanggil (di finally, sesudah recordDraft).
+   */
+  async check(userId: string, route: string, options: AiCheckOptions = {}): Promise<AiCheckResult> {
+    // Periksa lalu catat harus tak terpisahkan untuk pengguna ini (lihat balapan periksa-lalu-catat di atas).
+    return this.locks.run(`${userId}|${AI_REQUEST_ACTION}`, () => this.checkLocked(userId, route, options.reserve === true))
+  }
+
+  private async checkLocked(userId: string, route: string, reserve: boolean): Promise<AiCheckResult> {
     const db = await this.db()
     const limits = this.limits ?? aiLimitsFromEnv()
     const now = this.clock()
@@ -174,30 +219,43 @@ export class AiGuardService {
       throw new AiAccessError(503, 'quota_check_failed', 'Kuota AI tidak dapat diperiksa sekarang. Coba lagi nanti.')
     }
     const quota = parseQuotaStatus(data)
-    if (quota.remaining <= 0) {
+    // Sisa efektif = sisa RPC dikurangi draf yang sedang dibuat (belum tercatat di get_quota_status).
+    const pending = this.inFlightDrafts(userId)
+    if (quota.remaining - pending <= 0) {
+      // Bentuk galat sama dengan kuota habis biasa. Bila yang menahan hanya draf yang sedang berjalan, angka
+      // `used` ikut menghitungnya supaya pesan dan angkanya konsisten.
+      const shown = quota.remaining <= 0 ? quota : { ...quota, used: quota.used + pending, remaining: 0, allowed: false }
       throw new AiAccessError(
         429,
         'quota_exhausted',
-        `Kuota draf AI bulan ini habis (${quota.used} dari ${quota.quota} terpakai). Kuota diperbarui di awal bulan depan.`,
-        { quota },
+        `Kuota draf AI bulan ini habis (${shown.used} dari ${shown.quota} terpakai). Kuota diperbarui di awal bulan depan.`,
+        { quota: shown },
       )
     }
+    // Reservasi dibuat di baris yang sama dengan pemeriksaan di atas (tanpa await di antaranya), jadi tidak ada
+    // permintaan lain dalam proses ini yang bisa menyelip di antara periksa dan tahan.
+    const release = reserve ? this.reserveDraft(userId) : NOOP_RELEASE
 
-    // 3) Jalur lama saja: catat permintaan yang lolos supaya batas laju bisa menghitungnya (RPC sudah mencatat).
-    if (slot.status === 'missing') {
-      const { error: logErr } = await db.from('application_logs').insert({
-        user_id: userId,
-        action: AI_REQUEST_ACTION,
-        platform: 'ai',
-        status: 'success',
-        details: { route },
-      })
-      if (logErr) {
-        console.error(`[ai-guard] pencatatan permintaan gagal: ${logErr.message}`)
-        throw new AiAccessError(503, 'rate_limit_check_failed', RATE_CHECK_FAILED_AI)
+    try {
+      // 3) Jalur lama saja: catat permintaan yang lolos supaya batas laju bisa menghitungnya (RPC sudah mencatat).
+      if (slot.status === 'missing') {
+        const { error: logErr } = await db.from('application_logs').insert({
+          user_id: userId,
+          action: AI_REQUEST_ACTION,
+          platform: 'ai',
+          status: 'success',
+          details: { route },
+        })
+        if (logErr) {
+          console.error(`[ai-guard] pencatatan permintaan gagal: ${logErr.message}`)
+          throw new AiAccessError(503, 'rate_limit_check_failed', RATE_CHECK_FAILED_AI)
+        }
       }
+    } catch (e) {
+      release() // permintaan ditolak: jangan menahan kuota
+      throw e
     }
-    return { quota }
+    return { quota, release }
   }
 
   /**

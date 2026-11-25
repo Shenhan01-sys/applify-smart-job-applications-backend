@@ -133,8 +133,12 @@ export async function aiRoutes(
       return reply.status(401).send({ success: false, error: 'Unauthorized' })
     }
     try {
-      const { quota } = await guard.check(userId, request.routeOptions?.url ?? request.url)
+      // Rute yang mencatat draf (`config.consumesDraft`) menahan satu kuota sampai handler selesai (release di
+      // finally, sesudah recordDraft), supaya permintaan paralel pada sisa kuota 1 tidak lolos semuanya.
+      const reserve = (request.routeOptions?.config as any)?.consumesDraft === true
+      const { quota, release } = await guard.check(userId, request.routeOptions?.url ?? request.url, { reserve })
       ;(request as any).aiQuota = quota
+      ;(request as any).aiRelease = release
     } catch (error: any) {
       if (error instanceof AiAccessError) {
         if (error.extra.retryAfterSec) reply.header('Retry-After', String(error.extra.retryAfterSec))
@@ -152,8 +156,14 @@ export async function aiRoutes(
     return undefined
   })
 
+  // Jaring pengaman: bila handler tidak sempat jalan (hook lain menjawab lebih dulu), reservasi tetap dilepas
+  // saat respons selesai. Pelepas idempoten, jadi aman bila handler sudah melepasnya di finally.
+  app.addHook('onResponse', async (request) => {
+    ;(request as any).aiRelease?.()
+  })
+
   // Generate cover letter
-  app.post('/cover-letter', async (request, reply) => {
+  app.post('/cover-letter', { config: { consumesDraft: true } }, async (request, reply) => {
     const { jobTitle, company, jobDescription, userProfile, tone, language } = request.body as any
 
     try {
@@ -175,6 +185,10 @@ export async function aiRoutes(
       return { success: true, coverLetter: doc.text, model: doc.model, language: doc.language, warnings: doc.warnings }
     } catch (error: any) {
       return sendAiError(reply, error)
+    } finally {
+      // Sukses atau galat: lepas kuota yang ditahan. Sesudah recordDraft, jadi draf yang berhasil sudah terlihat
+      // di get_quota_status sebelum reservasinya hilang.
+      ;(request as any).aiRelease?.()
     }
   })
 
