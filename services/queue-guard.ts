@@ -9,6 +9,7 @@
  * The same guard checks the shape of the recipient address of an email_apply job (header injection).
  */
 import { isValidApplyEmail } from './email-address.js'
+import { currentResumeUrlForApproval } from './resume-file.service.js'
 
 /** Minimal shape of the Supabase client used here (a fake is passed in tests). */
 export interface GuardDb {
@@ -140,7 +141,35 @@ export async function requireApprovedRow(
   if (!Number.isFinite(expires) || expires <= now.getTime()) {
     throw new ApprovalRequiredError('approval request has expired')
   }
+  await syncApprovedRowResume(db, userId, row as ApprovedRow)
   return row as ApprovedRow
+}
+
+/**
+ * Menyelaraskan CV pada persetujuan dengan CV profil saat ini sebelum pekerjaan masuk antrean (BS-U4-01): pengguna bisa
+ * mengganti atau menghapus CV sesudah draf diajukan, dan URL lama pada baris persetujuan mati bersama objek lamanya.
+ * Mengubah `row.resume_url` dan menyimpannya; gagal menyelaraskan tidak menggagalkan antrean (nilai lama dipakai).
+ * Klien database tanpa `storage` (fake tes) dilewati.
+ */
+async function syncApprovedRowResume(db: GuardDb, userId: string, row: ApprovedRow): Promise<void> {
+  if (!(db as any).storage) return
+  try {
+    const next = await currentResumeUrlForApproval(db as any, userId, row.resume_url)
+    if (!next.changed) return
+    const { error } = await db
+      .from('approval_requests')
+      .update({ resume_url: next.url })
+      .eq('id', row.id)
+      .eq('user_id', userId)
+      .eq('status', 'approved')
+    if (error) {
+      console.warn('[queue-guard] gagal menyimpan CV terbaru pada persetujuan:', String(error.message ?? error))
+      return
+    }
+    row.resume_url = next.url
+  } catch (e) {
+    console.warn('[queue-guard] gagal menyelaraskan CV persetujuan:', (e as Error)?.message)
+  }
 }
 
 /**

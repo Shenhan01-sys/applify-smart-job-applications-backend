@@ -7,7 +7,7 @@ import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswe
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { AiAccessError, aiGuardService, type AiGuardService } from '../../services/ai-guard.service.js'
 import { regenerateApprovalCoverLetter } from '../../services/approval-regenerate.service.js'
-import { resumeUrlForUser } from '../../services/resume-file.service.js'
+import { currentResumeUrlForApproval, resumeUrlForUser } from '../../services/resume-file.service.js'
 import { rerunApproval } from '../../services/rerun-guard.js'
 import { markApprovalSent } from '../../services/manual-submit-guard.js'
 import { notifyApplicationStatus } from '../../services/application-status.service.js'
@@ -262,10 +262,20 @@ export async function approvalRoutes(
     // Update status to approved. Guarded on status 'pending' so a double click (or two tabs) approves,
     // and queues, exactly once. Kolom apply_channel opsional sampai migrasi DRAFT diterapkan dan dibatasi
     // CHECK (apply_channel IN ('worker', 'extension')), jadi hanya ditulis untuk kedua nilai itu.
+    // CV pada baris persetujuan dibekukan saat draf diajukan. Bila pengguna mengganti atau menghapus CV di Profil
+    // sejak itu, URL lama sudah mati: segarkan dari CV profil saat ini supaya email, worker, dan ekstensi memakai CV yang sama.
+    let resumePatch: { resume_url: string | null } | Record<string, never> = {}
+    try {
+      const cv = await currentResumeUrlForApproval(db as any, userId, requestData.resume_url)
+      if (cv.changed) resumePatch = { resume_url: cv.url }
+    } catch {
+      resumePatch = {}
+    }
     const baseApprovalPatch: Record<string, any> = {
       status: 'approved',
       reviewed_at: new Date().toISOString(),
       ...(editedCoverLetter ? { cover_letter: editedCoverLetter } : {}),
+      ...resumePatch,
     }
     const channelPatch =
       dispatchTarget === 'worker' || dispatchTarget === 'extension'
