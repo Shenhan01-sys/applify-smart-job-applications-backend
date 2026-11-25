@@ -102,6 +102,49 @@ test('guardQueuePayload (GAP-10): email_apply tanpa resume_url ditolak 409 missi
   assert.equal(ok.allow_without_cv, true)
 })
 
+test('requireApprovedRow & guardQueuePayload (review GAP-10): kolom apply_channel hilang tetap mempertahankan resume_url sehingga email_apply tidak palsu 409', async () => {
+  const selects: string[] = []
+  const row = approval({ resume_url: 'https://storage.test/cv.pdf' })
+  const dbMissingApplyChannel = {
+    from(table: string) {
+      assert.equal(table, 'approval_requests')
+      return {
+        select(cols: string) {
+          selects.push(cols)
+          const chain: any = {
+            eq() {
+              return chain
+            },
+            async maybeSingle() {
+              if (cols.includes('apply_channel')) {
+                return {
+                  data: null,
+                  error: { code: '42703', message: 'column approval_requests.apply_channel does not exist' },
+                }
+              }
+              return { data: { ...row }, error: null }
+            },
+          }
+          return chain
+        },
+      }
+    },
+  }
+
+  const out = await guardQueuePayload(
+    dbMissingApplyChannel,
+    'u1',
+    'email_apply',
+    { approval_request_id: 'a1', apply_email: 'hr@x.test' },
+    NOW
+  )
+  assert.equal(out.approved, true)
+  assert.equal(out.apply_email, 'hr@x.test')
+  assert.equal(selects.length, 2)
+  assert.ok(selects[0].includes('apply_channel') && selects[0].includes('resume_url'))
+  assert.ok(!selects[1].includes('apply_channel') && selects[1].includes('resume_url'))
+})
+
 test('guardQueuePayload: job type lain kehilangan kunci persetujuan', async () => {
   const out = await guardQueuePayload(new FakeDb(), 'u1', 'search', { keywords: 'x', approved: true, approval_request_id: 'a1' }, NOW)
   assert.deepEqual(out, { keywords: 'x' })

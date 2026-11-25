@@ -67,7 +67,7 @@ test('OAuth Gmail: cookie HttpOnly hanya menyimpan hash nonce, SameSite=Lax same
     let googleExchangeCalls = 0
     const fakeFetch: typeof fetch = (async (url: any) => {
       if (!String(url).includes('/oauth2/v2/userinfo')) googleExchangeCalls++
-      return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }), { status: 200 })
+      return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600, scope: SCOPES }), { status: 200 })
     }) as typeof fetch
 
     const app = Fastify()
@@ -373,7 +373,7 @@ async function runCallback(opts: { tokenBody: Record<string, unknown>; existing?
   }
   const app = await buildOAuthApp({
     db,
-    fetchImpl: (async () => new Response(JSON.stringify({ access_token: 'at-new', expires_in: 3600, ...opts.tokenBody }), { status: 200 })) as typeof fetch,
+    fetchImpl: (async () => new Response(JSON.stringify({ access_token: 'at-new', expires_in: 3600, scope: SCOPES, ...opts.tokenBody }), { status: 200 })) as typeof fetch,
   })
   const start = await app.inject({ method: 'GET', url: '/api/oauth/google', headers: { authorization: 'Bearer valid' } })
   const state = new URL(String(start.headers.location)).searchParams.get('state')!
@@ -414,7 +414,11 @@ test('OAuth callback (#7): refresh_token baru dari Google dipakai', async () => 
 
 // ---- GAP-10: alamat Gmail pengirim (userinfo.email) ------------------------------------------------------------------
 
-async function runCallbackWithFetch(opts: { userinfo: () => Response | Promise<Response>; existingSessionData?: Record<string, unknown> }) {
+async function runCallbackWithFetch(opts: {
+  userinfo: () => Response | Promise<Response>
+  existingSessionData?: Record<string, unknown>
+  tokenScope?: string | null
+}) {
   const store = makeExtensionTestDb({ platform_sessions: [] })
   if (opts.existingSessionData) {
     store.tables.platform_sessions.push({ id: 's0', user_id: 'user-1', platform: 'gmail', is_active: true, expires_at: new Date(Date.now() + 1000).toISOString(), session_data: opts.existingSessionData })
@@ -436,12 +440,14 @@ async function runCallbackWithFetch(opts: { userinfo: () => Response | Promise<R
     },
   }
   const calls: string[] = []
+  const tokenPayload: Record<string, unknown> = { access_token: 'at-new', refresh_token: 'rt-new', expires_in: 3600 }
+  if (opts.tokenScope !== null) tokenPayload.scope = opts.tokenScope ?? SCOPES
   const app = await buildOAuthApp({
     db,
     fetchImpl: (async (url: any) => {
       calls.push(String(url))
       if (String(url).includes('/oauth2/v2/userinfo')) return opts.userinfo()
-      return new Response(JSON.stringify({ access_token: 'at-new', refresh_token: 'rt-new', expires_in: 3600 }), { status: 200 })
+      return new Response(JSON.stringify(tokenPayload), { status: 200 })
     }) as typeof fetch,
   })
   const start = await app.inject({ method: 'GET', url: '/api/oauth/google', headers: { authorization: 'Bearer valid' } })
@@ -509,4 +515,42 @@ test('OAuth GAP-10: /status email null untuk sesi lama tanpa gmail_email dan saa
   store.tables.platform_sessions[0].session_data = { encrypted: 'BLOB', gmail_email: 'a@gmail.com', refresh_failed: 'invalid_grant' }
   assert.deepEqual((await get()).json(), { gmail: false, connected: false, needs_reconnect: true, email: null })
   await app.close()
+})
+
+test('OAuth review GAP-10: bila tokens.scope tidak memuat gmail.send, tolak dengan scope_denied tanpa menyimpan sesi aktif', async () => {
+  await withEncryptionKey(async () => {
+    for (const tokenScope of ['https://www.googleapis.com/auth/userinfo.email', '', null] as const) {
+      const { res, row, calls, status } = await runCallbackWithFetch({
+        tokenScope,
+        userinfo: () => new Response(JSON.stringify({ email: 'pelamar@gmail.com' }), { status: 200 }),
+      })
+      assert.equal(res.statusCode, 302)
+      assert.equal(res.headers.location, 'https://app.applify.id/settings?gmail=error&reason=scope_denied', String(tokenScope))
+      assert.equal(row, undefined, 'sesi Gmail tidak boleh disimpan bila gmail.send dicabut')
+      assert.equal(calls.some((u) => u.includes('/oauth2/v2/userinfo')), false, 'tidak perlu memanggil userinfo bila scope inti ditolak')
+      assert.deepEqual(status.json(), { gmail: false, connected: false, needs_reconnect: false, email: null })
+    }
+  })
+})
+
+test('OAuth review GAP-10: bila hanya gmail.send disetujui (userinfo 403), tetap tersambung dengan gmail_email null dan log peringatan tanpa PII', async () => {
+  await withEncryptionKey(async () => {
+    const warnings: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '))
+    try {
+      const { res, row, status } = await runCallbackWithFetch({
+        tokenScope: 'https://www.googleapis.com/auth/gmail.send',
+        userinfo: () => new Response('{"error":"insufficient_scope"}', { status: 403 }),
+      })
+      assert.match(String(res.headers.location), /gmail=connected/)
+      assert.equal(row.is_active, true)
+      assert.equal(row.session_data.gmail_email, null)
+      assert.deepEqual(status.json(), { gmail: true, connected: true, needs_reconnect: false, email: null })
+      assert.ok(warnings.some((w) => /userinfo fetch failed.*403/.test(w)), JSON.stringify(warnings))
+      assert.ok(!warnings.some((w) => w.includes('@')), 'peringatan tidak boleh memuat alamat email')
+    } finally {
+      console.warn = origWarn
+    }
+  })
 })

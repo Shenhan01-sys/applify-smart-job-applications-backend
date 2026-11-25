@@ -367,6 +367,15 @@ export function rankJobC1(job: JobPosting, ctx: RankContext): JobRankResult {
   if (salary.score !== null) components.push({ weight: C1_RANKING_WEIGHTS.salary, score: salary.score })
   components.push({ weight: C1_RANKING_WEIGHTS.workType, score: workType.score })
   const totalWeight = components.reduce((sum, c) => sum + c.weight, 0)
+  const effectiveWeights = [
+    fitScore !== null ? C1_RANKING_WEIGHTS.fit : 0,
+    C1_RANKING_WEIGHTS.freshness,
+    salary.score !== null ? C1_RANKING_WEIGHTS.salary : 0,
+    C1_RANKING_WEIGHTS.workType,
+  ]
+  const weightsLabel = totalWeight > 0
+    ? effectiveWeights.map((w) => (w / totalWeight).toFixed(2)).join('/')
+    : '0.00/0.00/0.00/0.00'
   const rawWeighted = totalWeight > 0
     ? components.reduce((sum, c) => sum + c.weight * c.score, 0) / totalWeight
     : 0
@@ -403,7 +412,7 @@ export function rankJobC1(job: JobPosting, ctx: RankContext): JobRankResult {
       workType: workType.score,
       locationFactor,
       seniorityPenalty,
-      weights: '0.70/0.15/0.10/0.05',
+      weights: weightsLabel,
     },
   }
 }

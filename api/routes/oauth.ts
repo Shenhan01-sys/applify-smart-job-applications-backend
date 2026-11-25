@@ -19,8 +19,10 @@ export const OAUTH_STATE_TTL_SEC = 600
 /** Umur tiket mulai OAuth (navigasi langsung ke backend). Pendek dan sekali pakai. */
 export const OAUTH_START_TTL_SEC = 120
 
+export const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send'
+
 export const SCOPES = [
-  'https://www.googleapis.com/auth/gmail.send',
+  GMAIL_SEND_SCOPE,
   // Non-sensitif: hanya untuk membaca alamat email akun Gmail yang tersambung (ditampilkan di UI).
   'https://www.googleapis.com/auth/userinfo.email',
 ].join(' ')
@@ -362,6 +364,17 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
     }
     if (!tokens?.access_token) return fail('token_exchange')
 
+    // Google mengizinkan pengguna membatalkan salah satu scope di layar izin.
+    // Tanpa scope gmail.send, sesi tidak boleh disimpan aktif — tolak dengan scope_denied.
+    const grantedScopes =
+      typeof tokens.scope === 'string'
+        ? tokens.scope.split(/\s+/).map((s: string) => s.trim()).filter(Boolean)
+        : []
+    if (!grantedScopes.includes(GMAIL_SEND_SCOPE)) {
+      console.warn('[oauth] callback missing required gmail.send scope')
+      return fail('scope_denied')
+    }
+
     const db = await getDb()
 
     // Google hanya mengirim refresh_token pada persetujuan pertama (atau prompt=consent). Bila kosong, pertahankan
@@ -398,9 +411,12 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
         const ui: any = await uiResp.json()
         const e = typeof ui?.email === 'string' ? ui.email.trim().toLowerCase() : ''
         if (e.includes('@')) gmailEmail = e
+        else console.warn('[oauth] userinfo returned no valid email field')
+      } else {
+        console.warn('[oauth] userinfo fetch failed:', uiResp.status)
       }
-    } catch {
-      // abaikan: email tidak tersedia
+    } catch (e: any) {
+      console.warn('[oauth] userinfo fetch error:', e?.name ?? 'Error')
     }
 
     const blob = JSON.stringify({

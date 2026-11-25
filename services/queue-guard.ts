@@ -114,12 +114,21 @@ export async function requireApprovedRow(
     .eq('user_id', userId)
     .maybeSingle()
   if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204' || /apply_channel|resume_url/i.test(String(res.error.message ?? '')))) {
+    // Pertahankan resume_url pada kueri cadangan pertama bila hanya kolom apply_channel yang hilang di skema lama.
     res = await db
       .from('approval_requests')
-      .select('id, user_id, job_id, application_id, status, expires_at')
+      .select('id, user_id, job_id, application_id, status, expires_at, resume_url')
       .eq('id', approvalId)
       .eq('user_id', userId)
       .maybeSingle()
+    if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204' || /resume_url/i.test(String(res.error.message ?? '')))) {
+      res = await db
+        .from('approval_requests')
+        .select('id, user_id, job_id, application_id, status, expires_at')
+        .eq('id', approvalId)
+        .eq('user_id', userId)
+        .maybeSingle()
+    }
   }
   const { data: row, error } = res
   if (error) throw new Error(`approval lookup failed: ${error.message}`)

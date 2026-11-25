@@ -252,9 +252,13 @@ test('GAP-11: gaji tidak tercantum membuat breakdown.salary null dan bobot didis
   }
   const r = rankJobC1(job, { keywords: 'backend engineer', skills: ['Node.js'], location: 'Jakarta', nowMs: NOW })
   assert.equal(r.breakdown.salary, null)
+  assert.equal(r.breakdown.weights, '0.78/0.17/0.00/0.06')
   assert.ok(r.breakdown.fit !== null && r.breakdown.fit > 0)
   assert.ok(typeof r.score === 'number' && Number.isFinite(r.score) && r.score > 0 && r.score <= 100)
   assert.ok(r.reasons.some((s) => /gaji belum tercantum/i.test(s)))
+
+  const withSalary = rankJobC1({ ...job, salary_min: 10_000_000, salary_max: 15_000_000 }, { keywords: 'backend engineer', skills: ['Node.js'], location: 'Jakarta', nowMs: NOW })
+  assert.equal(withSalary.breakdown.weights, '0.70/0.15/0.10/0.05')
 
   const noBasis = rankJobC1(job, { keywords: '', skills: [], location: 'Jakarta', nowMs: NOW })
   assert.equal(noBasis.breakdown.salary, null)
