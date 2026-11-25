@@ -222,12 +222,14 @@ export async function automationRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
-    const { job_type, payload, priority = 0 } = request.body as any
+    // `priority` dari klien sengaja tidak dibaca: prioritas ditentukan server per job type (addUserJob),
+    // dan job_type di luar daftar izin (mis. company_insight) ditolak 400 (job_type_not_allowed).
+    const { job_type, payload } = (request.body ?? {}) as any
 
     // Same guard as /api/queue/apply: the client cannot set `approved`, email_apply needs a verified approval
     // row (403), and its apply_email must be one plain address (400, invalid_apply_email).
     try {
-      return await queueService.addGenericJob(userId, job_type, payload, priority)
+      return await queueService.addUserJob(userId, job_type, payload)
     } catch (error: any) {
       const clientError = clientErrorReply(error)
       if (clientError) return reply.status(clientError.statusCode).send(clientError.body)

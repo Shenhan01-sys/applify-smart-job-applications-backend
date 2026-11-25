@@ -157,7 +157,8 @@ test('rute POST /api/automation/queue memakai clientErrorReply, jadi galat 400 d
   // cannot be loaded in a unit test; its error mapping is checked in the source text instead.
   const src = readFileSync(new URL('../api/routes/automation.ts', import.meta.url), 'utf8')
   const handler = src.slice(src.indexOf("app.post('/queue'"))
-  assert.match(handler, /addGenericJob\(userId, job_type, payload, priority\)/)
+  // Rute memakai batas pengguna addUserJob (daftar izin job_type, prioritas dari server), bukan addGenericJob.
+  assert.match(handler, /addUserJob\(userId, job_type, payload\)/)
   assert.match(handler, /clientErrorReply\(error\)/)
   assert.match(handler, /reply\.status\(clientError\.statusCode\)\.send\(clientError\.body\)/)
 })

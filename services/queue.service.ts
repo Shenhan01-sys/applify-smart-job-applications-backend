@@ -1,4 +1,10 @@
-import { ApprovalChannelConflictError, guardQueuePayload, requireApprovedRow, type GuardDb } from './queue-guard.js'
+import {
+  ApprovalChannelConflictError,
+  guardQueuePayload,
+  InvalidPayloadError,
+  requireApprovedRow,
+  type GuardDb,
+} from './queue-guard.js'
 
 /**
  * Queue Service — DATABASE-AS-QUEUE (tanpa Redis / BullMQ).
@@ -26,6 +32,36 @@ const JOB = {
   emailApply: 'email_apply',
   companyInsight: 'company_insight',
 } as const;
+
+/**
+ * Job type yang boleh dimasukkan pengguna lewat POST /api/automation/queue, beserta prioritas bawaan dari server.
+ * Prioritas tidak pernah diambil dari klien: worker mengklaim job berdasarkan `priority desc`, jadi prioritas
+ * dari klien bisa dipakai menyerobot antrean. Nilai 0 sama dengan bawaan lama rute ini.
+ *
+ * Bukti pemakaian sah (dicek 2026-11-25):
+ *  - email_apply: satu-satunya job_type yang dikirim frontend lewat rute ini
+ *    (applify-smart-job-applications/src/services/emailApplyService.ts:257, `enqueueEmailApply`).
+ *  - apply: kembaran POST /api/queue/apply (api/routes/queue.ts), payload lewat guard persetujuan yang sama.
+ *  - search: kembaran POST /api/queue/scan (api/routes/queue.ts), isinya hanya keywords/location/platforms
+ *    dan worker memprosesnya untuk `job.user_id` pemilik baris saja.
+ *
+ * Sengaja tidak masuk daftar: `company_insight` (payload `{all: true}` menilai semua lowongan aktif: biaya LLM
+ * global, hanya untuk sistem) dan `extension_apply` (hanya dibuat oleh addApprovedExtensionApplyJob setelah
+ * persetujuan dan kanal diperiksa).
+ */
+export const USER_JOB_PRIORITY = {
+  [JOB.apply]: 0,
+  [JOB.emailApply]: 0,
+  [JOB.search]: 0,
+} as const
+
+export type UserJobType = keyof typeof USER_JOB_PRIORITY
+
+/** Prioritas bawaan server untuk job type milik pengguna; undefined bila job type tidak diizinkan. */
+function userJobPriority(jobType: unknown): number | undefined {
+  if (typeof jobType !== 'string' || !Object.hasOwn(USER_JOB_PRIORITY, jobType)) return undefined
+  return USER_JOB_PRIORITY[jobType as UserJobType]
+}
 
 /** Job type yang tidak punya handler di worker. */
 export class UnsupportedJobTypeError extends Error {}
@@ -179,8 +215,27 @@ export class QueueService {
   }
 
   /**
-   * Antrean generik (POST /api/automation/queue). Payload tetap lewat guard yang sama, jadi jalur ini
-   * tidak bisa dipakai untuk menyelundupkan `approved: true` atau email_apply tanpa persetujuan.
+   * Batas antara klien dan antrean untuk POST /api/automation/queue. Hanya job type di USER_JOB_PRIORITY yang
+   * diterima (selain itu InvalidPayloadError, jadi 400), dan `priority` kiriman klien diabaikan: yang dipakai
+   * prioritas bawaan server per job type. Payload lalu lewat addGenericJob (guard persetujuan yang sama).
+   */
+  async addUserJob(userId: string, jobType: unknown, payload: unknown, _clientPriority?: unknown) {
+    const priority = userJobPriority(jobType)
+    if (priority === undefined) {
+      throw new InvalidPayloadError(
+        'Jenis pekerjaan tidak diizinkan. Jenis yang boleh dimasukkan ke antrean: ' +
+          `${Object.keys(USER_JOB_PRIORITY).join(', ')}.`,
+        'job_type_not_allowed'
+      )
+    }
+    return this.addGenericJob(userId, jobType as UserJobType, payload, priority)
+  }
+
+  /**
+   * Antrean generik, untuk pemanggil internal/sistem (penjadwal, skrip) yang boleh memilih job type dan
+   * prioritas. JANGAN dipanggil dengan job_type atau priority yang berasal dari klien: rute HTTP harus lewat
+   * addUserJob. Payload tetap lewat guard yang sama, jadi jalur ini tidak bisa dipakai untuk menyelundupkan
+   * `approved: true` atau email_apply tanpa persetujuan.
    */
   async addGenericJob(userId: string, jobType: string, payload: unknown, priority = 0) {
     const supabase = await this.db()
