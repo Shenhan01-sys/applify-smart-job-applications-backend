@@ -551,6 +551,25 @@ function isSecretControl(c: SanitizedExtControl): boolean {
 
 export { workAuthorizationFromUsCitizenship }
 
+/** Label sakelar "belum punya pengalaman kerja" di formulir lamaran (Indonesia dan Inggris). */
+export const NO_WORK_EXPERIENCE_RE =
+  /baru masuk dunia kerja|belum (?:punya|memiliki|ada) pengalaman(?: kerja)?|tidak (?:punya|memiliki|ada) pengalaman(?: kerja)?|tanpa pengalaman kerja|fresh ?grad(?:uate)?|new to the workforce|(?:i have )?no (?:prior |previous )?work experience|don['’]?t have (?:any )?work experience/i
+
+/** Kolom riwayat kerja yang disembunyikan halaman sesudah sakelar "belum punya pengalaman" menyala. */
+export const WORK_EXPERIENCE_FIELD_RE =
+  /posisi pekerjaan|jabatan|nama perusahaan|perusahaan (?:terakhir|sebelumnya)|job title|role title|company name|employer|(?:start|end) date of (?:employment|role)|lama bekerja/i
+
+export const isNoWorkExperienceToggle = (c: SanitizedExtControl): boolean => NO_WORK_EXPERIENCE_RE.test(controlQuestionLabel(c))
+export const isWorkExperienceField = (c: SanitizedExtControl): boolean =>
+  !NO_WORK_EXPERIENCE_RE.test(controlQuestionLabel(c)) && WORK_EXPERIENCE_FIELD_RE.test(controlQuestionLabel(c))
+
+/** `none` hanya bila data pasti kosong; galat kueri (`workRows` bukan array) berarti `unknown`. */
+export function noWorkExperienceState(workRows: unknown, profile: any): 'none' | 'has' | 'unknown' {
+  if (typeof profile?.experience_years === 'number' && profile.experience_years > 0) return 'has'
+  if (!Array.isArray(workRows)) return 'unknown'
+  return workRows.length > 0 ? 'has' : 'none'
+}
+
 const controlQuestionLabel = (c: SanitizedExtControl): string => {
   if (c.kind === 'radio' && c.groupLabel) return c.groupLabel
   return c.label || c.placeholder || c.name
@@ -1147,9 +1166,30 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       plannedControlIds.add(c.controlId)
     }
 
+    // 0. Sakelar "belum punya pengalaman kerja" (JobStreet: "Saya baru masuk dunia kerja"). Uji live 26 November 2026:
+    //    pengguna tanpa riwayat kerja dimintai "Posisi pekerjaan" dan "Nama perusahaan" yang tidak bisa dijawab jujur.
+    //    Tanpa riwayat kerja (tabel kosong dan `experience_years` bukan angka positif), sakelar dicentang lebih dulu dan
+    //    kolom pengalaman di halaman yang sama tidak diisi atau ditanyakan, karena halaman menyembunyikannya sesudah
+    //    sakelar menyala. Dengan riwayat kerja, sakelar tidak pernah dicentang, termasuk oleh AI.
+    const workHistory = noWorkExperienceState(workRows, profile)
+    const freshToggles = fillable.filter((c) => c.kind === 'checkbox' && isNoWorkExperienceToggle(c))
+    if (workHistory !== 'unknown') {
+      for (const c of freshToggles) {
+        plannedControlIds.add(c.controlId)
+        if (workHistory === 'none' && c.checked !== true && c.currentValue !== 'true') {
+          plannedControlIds.delete(c.controlId)
+          addAction(c, true, 'fact')
+        }
+      }
+      if (workHistory === 'none' && freshToggles.length > 0) {
+        for (const c of controls) if (c.kind !== 'checkbox' && isWorkExperienceField(c)) plannedControlIds.add(c.controlId)
+      }
+    }
+
     // 1. Jawaban tersimpan pengguna (`user_form_answers`) selalu menang pertama. Putaran kedua melewatkannya: nilai
     //    tersimpan sudah dicoba dan tidak menempel di halaman. Persetujuan dan opt-in pemasaran tidak pernah diisi dari sini.
     for (const c of isRetry ? [] : fillable) {
+      if (plannedControlIds.has(c.controlId)) continue
       if (isGuardedCheckbox(c)) {
         // Persetujuan: hanya jawaban pengguna di panel untuk persetujuan ini, dan hanya bila tegas setuju.
         if (isConsentCheckbox(c) && !isMarketingOptIn(c) && args.approvalId) {
