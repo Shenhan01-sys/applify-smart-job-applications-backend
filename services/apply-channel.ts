@@ -128,6 +128,29 @@ export function sanitizeHttpUrl(raw: unknown): string | null {
   }
 }
 
+/** Akhiran nama host yang tidak pernah menjadi situs lowongan publik (jaringan lokal atau internal). */
+const NON_PUBLIC_HOST_SUFFIXES = ['localhost', 'local', 'localdomain', 'internal', 'intranet', 'lan', 'corp', 'home', 'home.arpa']
+
+/**
+ * URL http(s) yang pantas disimpan sebagai tautan lowongan: berhost nama domain publik, tanpa kredensial
+ * di URL, bukan IP literal (IPv4 dalam bentuk apa pun maupun IPv6), bukan `localhost`, dan bukan nama host
+ * satu label atau berakhiran jaringan lokal/internal. Pemeriksaan ini hanya membaca teks URL; resolusi DNS
+ * yang diarahkan ke IP privat tidak terdeteksi di sini.
+ */
+export function isPublicHttpUrl(raw: unknown): boolean {
+  const safe = sanitizeHttpUrl(raw)
+  if (!safe) return false
+  const u = new URL(safe)
+  if (u.username || u.password) return false
+  const host = u.hostname.toLowerCase().replace(/\.+$/, '')
+  if (!host || host.startsWith('[')) return false
+  const labels = host.split('.')
+  if (labels.length < 2) return false
+  // WHATWG URL menormalkan 0x7f.1 atau 2130706433 menjadi 127.0.0.1; label akhir tanpa huruf berarti IP literal.
+  if (!/[a-z]/.test(labels[labels.length - 1])) return false
+  return !NON_PUBLIC_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`))
+}
+
 /** Host adalah portal login yang diisi ekstensi (JobStreet, Glints, Kalibrr, Dealls) atau subdomainnya. */
 export function isLoginPortalHost(hostname: string): boolean {
   return hostMatchesDomain(hostname, EXTENSION_LOGIN_PORTAL_DOMAINS)

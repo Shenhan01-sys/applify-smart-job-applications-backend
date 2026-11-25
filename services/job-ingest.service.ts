@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { RankedJob } from './job-aggregation.service.js'
 import { salaryOfPosting, toDbSalary } from './salary.js'
+import { isPublicHttpUrl } from './apply-channel.js'
 
 /**
  * Job Ingest Service — menyimpan hasil agregasi ke tabel `jobs` (Supabase).
@@ -39,6 +40,20 @@ export interface IngestSummary {
   enriched: number
   errors: string[]
   byPlatform: Record<string, { inserted: number; duplicates: number; failed: number }>
+}
+
+/**
+ * URL lowongan dari scraper tidak dipercaya: hanya http(s) berhost publik yang boleh disimpan sebagai
+ * `external_url`, karena kolom ini dipakai worker, ekstensi, dan kartu lowongan. Tautan yang ditolak dikosongkan.
+ * Mengembalikan null bila sumber memberi URL tetapi semuanya ditolak. Teks URL yang lolos tidak diubah,
+ * supaya dedupe terhadap baris lama tetap cocok.
+ */
+export function publicUrlsOnly(job: RankedJob): RankedJob | null {
+  const present = (v: unknown) => typeof v === 'string' && v.trim() !== ''
+  const applyUrl = isPublicHttpUrl(job.apply_url) ? job.apply_url : undefined
+  const url = isPublicHttpUrl(job.url) ? job.url : ''
+  if ((present(job.apply_url) || present(job.url)) && !applyUrl && !url) return null
+  return { ...job, apply_url: applyUrl, url }
 }
 
 /** Nilai match_score yang sah (bulat 0-100) atau null. Nilai dari luar tidak dipercaya begitu saja. */
@@ -144,8 +159,15 @@ export async function ingestJobs(supabase: SupabaseClient, jobs: RankedJob[]): P
     }
   }
 
-  for (const job of jobs) {
-    const bucket = (summary.byPlatform[job.platform] ??= { inserted: 0, duplicates: 0, failed: 0 })
+  for (const source of jobs) {
+    const bucket = (summary.byPlatform[source.platform] ??= { inserted: 0, duplicates: 0, failed: 0 })
+    const job = publicUrlsOnly(source)
+    if (!job) {
+      summary.failed++
+      bucket.failed++
+      if (summary.errors.length < 10) summary.errors.push(`${source.platform}: URL lowongan ditolak (bukan http/https berhost publik)`)
+      continue
+    }
     const url = job.apply_url || job.url
     if (url) {
       let found = await lookup(url)
