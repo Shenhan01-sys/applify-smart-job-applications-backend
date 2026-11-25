@@ -8,15 +8,24 @@ import { guessExperienceLevel, htmlToText, jobTypeFromTitle, matchesKeywords, no
  * Formulir lamaran Greenhouse (job-boards.greenhouse.io/{board}/jobs/{id}) bisa diisi tanpa login.
  */
 /**
- * Formulir Greenhouse yang di-host Greenhouse sendiri. `absolute_url` bisa berupa halaman karier perusahaan
- * (contoh: careers.datadoghq.com/detail/7131726/?gh_jid=7131726). Worker hanya mengirim lamaran di host yang ada di
- * SUBMIT_ALLOWED_HOSTS, jadi lamaran dari halaman perusahaan terisi tetapi tidak pernah terkirim (25 November 2026).
+ * URL formulir yang bisa dikirim worker. `absolute_url` bisa berupa halaman karier perusahaan
+ * (contoh: careers.datadoghq.com/detail/7131726/?gh_jid=7131726). Host itu tidak ada di SUBMIT_ALLOWED_HOSTS, dan papan
+ * seperti Datadog juga mengalihkan job-boards.greenhouse.io/{board}/jobs/{id} ke halaman perusahaan (302), jadi
+ * lamaran terisi tetapi tidak pernah terkirim (25 November 2026). Formulir embed Greenhouse
+ * (job-boards.greenhouse.io/embed/job_app?for={board}&token={id}) tidak dialihkan dan tetap di host Greenhouse.
+ * Bila `absolute_url` sudah di host Greenhouse, URL itu dipakai apa adanya.
  */
-export function greenhouseHostedUrl(board: unknown, id: unknown): string | null {
+export function greenhouseApplyUrl(board: unknown, id: unknown, absoluteUrl: unknown): string | null {
+  const abs = typeof absoluteUrl === 'string' ? absoluteUrl.trim() : ''
+  try {
+    if (abs && /(^|\.)greenhouse\.io$/i.test(new URL(abs).hostname)) return abs
+  } catch {
+    // URL tidak sah: pakai formulir embed bila papan dan id sah.
+  }
   const b = typeof board === 'string' ? board.trim() : ''
   const i = typeof id === 'number' || typeof id === 'string' ? String(id).trim() : ''
-  if (!/^[A-Za-z0-9_-]{1,100}$/.test(b) || !/^\d{1,20}$/.test(i)) return null
-  return `https://job-boards.greenhouse.io/${b}/jobs/${i}`
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(b) || !/^\d{1,20}$/.test(i)) return abs || null
+  return `https://job-boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(b)}&token=${i}`
 }
 
 export function normalizeGreenhouseJob(job: any, board: string, companyName?: string): JobPosting | null {
@@ -30,7 +39,7 @@ export function normalizeGreenhouseJob(job: any, board: string, companyName?: st
     location,
     description,
     url: job.absolute_url,
-    apply_url: greenhouseHostedUrl(board, job.id) ?? job.absolute_url,
+    apply_url: greenhouseApplyUrl(board, job.id, job.absolute_url) ?? job.absolute_url,
     posted_at: job.updated_at,
     experience_level: guessExperienceLevel(job.title, description),
     job_type: jobTypeFromTitle(job.title),
