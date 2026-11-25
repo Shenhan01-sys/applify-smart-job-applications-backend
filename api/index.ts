@@ -27,14 +27,17 @@ import { sessionKeyProblem } from '../services/session-crypto.js'
 import { deployConfigWarnings, parseAllowedOrigins } from '../services/deploy-config.js'
 import { buildCorsOptions } from '../services/cors-options.js'
 import { installEmptyJsonBodyGuard } from '../services/empty-json-body.js'
+import { requestLogSerializers } from '../services/log-redact.js'
 
 // Produksi (Railway, Docker): log JSON polos ke stdout supaya mudah dibaca penampung log.
 // Lokal: pino-pretty berwarna.
+// serializers.req menyamarkan ?code=, ?state=, ?ticket=, dan ?token= di URL permintaan (H-01, services/log-redact.ts).
 const app = Fastify({
   logger:
     process.env.NODE_ENV === 'production'
-      ? true
+      ? { serializers: requestLogSerializers }
       : {
+          serializers: requestLogSerializers,
           transport: {
             target: 'pino-pretty',
             options: {
