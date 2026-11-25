@@ -87,11 +87,23 @@ function isWhatsAppUrl(rawUrl: string): boolean {
   }
 }
 
+/**
+ * "CV" juga bentuk badan usaha (CV Maju Jaya), jadi baris berawalan CV hanya ditolak
+ * bila isinya perintah mengirim CV/resume ("CV dan portofolio ke x@y.com").
+ */
+function isCvSendingLine(line: string): boolean {
+  if (/^\s*cv\.?\s*(?:(?:dan|atau|ke|lamaran|terbaru)\b|&)/i.test(line)) return true
+  return /@/.test(line) || /\bkirim/i.test(line)
+}
+
 function extractCompany(text: string, hint?: string): string {
   if (hint && hint.trim()) return hint.trim().slice(0, 200)
-  const explicit = text.match(/(?:^|\n)\s*(?:perusahaan|company|pt\.?|cv\.?)\s*[:\-]?\s*([^\n]{2,80})/i)
-  if (explicit) {
-    const raw = explicit[0].replace(/^(?:\s|\n)*(?:perusahaan|company)\s*[:\-]?\s*/i, '').trim()
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*(perusahaan|company|pt\.?|cv\.?)\s*[:\-]?\s*([^\n]{2,80})/i)
+    if (!m) continue
+    const label = m[1].toLowerCase()
+    if (label.startsWith('cv') && isCvSendingLine(line)) continue
+    const raw = (label === 'perusahaan' || label === 'company' ? m[2] : m[0]).trim()
     if (raw.length >= 2) return raw.slice(0, 200)
   }
   return 'Perusahaan (Off-Portal)'

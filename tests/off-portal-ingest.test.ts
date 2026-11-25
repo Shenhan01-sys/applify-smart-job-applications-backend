@@ -93,6 +93,35 @@ test('P0-01 rute POST /api/jobs/off-portal/parse: wajib auth, tolak input kosong
   }
 })
 
+function parseCompany(lines: string[]): string {
+  return parseOffPortalPosting(
+    { rawText: lines.join('\n'), sourceType: 'off_portal_poster' },
+    new Date('2026-11-26T00:00:00Z'),
+  ).jobs[0].company
+}
+
+test('extractCompany: baris "CV dan portofolio ke email" bukan nama perusahaan', () => {
+  for (const sendLine of [
+    'CV dan portofolio ke x@y.com',
+    'CV & portofolio ke hrd@maju.co.id',
+    'CV terbaru kirim ke HRD',
+    'CV atau resume Anda',
+    'CV lamaran ke hrd@maju.co.id',
+    'CV Maju Jaya kirim ke hrd@maju.co.id',
+  ]) {
+    assert.equal(parseCompany(['Lowongan: Admin', sendLine]), 'Perusahaan (Off-Portal)', sendLine)
+  }
+  // Baris CV pengiriman dilewati, perusahaan sesungguhnya di baris berikutnya tetap terbaca.
+  assert.equal(parseCompany(['CV dan portofolio ke x@y.com', 'PT Nusantara Digital']), 'PT Nusantara Digital')
+})
+
+test('extractCompany: CV sebagai badan usaha (CV Maju Jaya) tetap terbaca sebagai perusahaan', () => {
+  assert.equal(parseCompany(['CV Maju Jaya', 'Lowongan: Admin']), 'CV Maju Jaya')
+  assert.equal(parseCompany(['CV. Sinar Terang', 'Lokasi: Solo']), 'CV. Sinar Terang')
+  assert.equal(parseCompany(['Perusahaan: CV Karya Bersama']), 'CV Karya Bersama')
+  assert.equal(parseCompany(['PT Nusantara Digital', 'Kirim CV ke hrd@x.com']), 'PT Nusantara Digital')
+})
+
 test('P0-02 draf migrasi privat memuat kolom isolasi dan kebijakan RLS visibility=public OR created_by=auth.uid()', () => {
   const sql = readFileSync(DRAFT_SQL_PATH, 'utf8')
   assert.match(sql, /ADD COLUMN IF NOT EXISTS created_by UUID/)
