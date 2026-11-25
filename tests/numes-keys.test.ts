@@ -1,9 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  DEFAULT_NUMES_CALL_TIMEOUT_MS,
   MAX_NUMES_KEYS,
+  MIN_NUMES_CALL_MS,
+  NUMES_BUDGET_SHARE,
   NUMES_COOLDOWN_AUTH_MS,
   NUMES_COOLDOWN_RATE_MS,
+  NUMES_MAX_TOTAL_MS,
+  NUMES_MODEL_COOLDOWN_MS,
+  NumesBudget,
   NumesKeyPool,
   classifyNumesFailure,
   classifyTransportError,
@@ -94,7 +100,7 @@ test('numesErrorType membaca error.metadata.error_type dan tahan terhadap badan 
   }
 })
 
-test('classifyNumesFailure: 401/402/403/429/5xx berganti kunci, kesalahan permintaan dan blokir isi tidak', () => {
+test('classifyNumesFailure: hanya 401/402/403/429 berganti kunci; 5xx, 408, kesalahan permintaan, dan blokir isi tidak', () => {
   const v = (status: number, extra: Partial<NumesReply> = {}) => classifyNumesFailure({ status, ...extra })
   assert.deepEqual(v(401), { rotate: true, coolMs: NUMES_COOLDOWN_AUTH_MS, slow: false })
   assert.deepEqual(v(402), { rotate: true, coolMs: NUMES_COOLDOWN_RATE_MS, slow: false })
@@ -109,8 +115,10 @@ test('classifyNumesFailure: 401/402/403/429/5xx berganti kunci, kesalahan permin
   assert.deepEqual(v(429, { retryAfter: 0 }), { rotate: true, coolMs: 1_000, slow: false }, 'batas bawah 1 detik')
   assert.deepEqual(v(429, { retryAfter: '86400' }), { rotate: true, coolMs: 300_000, slow: false }, 'batas atas 5 menit')
   assert.deepEqual(v(429, { retryAfter: 'bukan angka atau tanggal' }), { rotate: true, coolMs: 60_000, slow: false })
-  for (const status of [500, 502, 503, 504]) assert.deepEqual(v(status), { rotate: true, coolMs: 0, slow: false })
-  assert.deepEqual(v(408, { errorType: 'timeout' }), { rotate: true, coolMs: 0, slow: true })
+  // galat server dan batas waktu server adalah soal modelnya, bukan kuncinya: kunci lain tidak menolong
+  for (const status of [500, 502, 503, 504]) assert.deepEqual(v(status), { rotate: false, coolMs: 0, slow: false })
+  assert.deepEqual(v(408, { errorType: 'timeout' }), { rotate: false, coolMs: 0, slow: true })
+  assert.deepEqual(v(408), { rotate: false, coolMs: 0, slow: true })
   assert.deepEqual(v(408, { errorType: 'cancelled' }), { rotate: false, coolMs: 0, slow: false })
   for (const status of [400, 404, 413, 415, 422]) assert.deepEqual(v(status), { rotate: false, coolMs: 0, slow: false })
 })
@@ -158,8 +166,6 @@ for (const [status, extra] of [
   [402, { errorType: 'insufficient_credits' }],
   [401, { errorType: 'invalid_credentials' }],
   [403, { errorType: 'verified_email_required' }],
-  [500, {}],
-  [503, { errorType: 'service_unavailable' }],
 ] as Array<[number, Partial<NumesReply>]>) {
   test(`run: ${status} pada kunci pertama = model yang sama dicoba lagi dengan kunci berikutnya`, async () => {
     const h = harness([K1, K2, K3], { [K1]: { status, ...extra } })
@@ -172,22 +178,184 @@ for (const [status, extra] of [
   })
 }
 
-test('run: batas waktu (galat) pada kunci pertama = kunci berikutnya dicoba', async () => {
-  const h = harness([K1, K2], { [K1]: Object.assign(new Error('timeout of 20000ms exceeded'), { code: 'ECONNABORTED' }) })
-  const out = await h.run()
-  assert.equal(out.reply?.status, 200)
-  assert.deepEqual(h.used, [0, 1])
-  assert.match(h.logs[0], /key 1\/2 -> timeout, trying next key/)
-})
+for (const [status, extra] of [
+  [500, {}],
+  [503, { errorType: 'service_unavailable' }],
+] as Array<[number, Partial<NumesReply>]>) {
+  test(`run: ${status} (galat server) melepas model itu, kunci berikutnya TIDAK dicoba`, async () => {
+    const h = harness([K1, K2, K3], { [K1]: { status, ...extra } })
+    const out = await h.run()
+    assert.equal(out.reply?.status, status)
+    assert.deepEqual(h.used, [0])
+    assert.match(h.logs[0], /not caused by the key/)
+    assert.equal(h.pool.modelCoolingLeftMs('numes:test/model:free'), 0, '5xx tidak mendinginkan model')
+  })
+}
 
-test('run: dua galat transport berturut-turut = model dilepas, tidak menghabiskan semua kunci', async () => {
-  const slow = Object.assign(new Error('timeout'), { code: 'ECONNABORTED' })
-  const h = harness([K1, K2, K3], { [K1]: slow, [K2]: slow, [K3]: { status: 200 } })
+test('run: batas waktu pada kunci pertama = model dilepas, kunci kedua TIDAK dicoba', async () => {
+  const slow = Object.assign(new Error('timeout of 12000ms exceeded'), { code: 'ECONNABORTED' })
+  const h = harness([K1, K2], { [K1]: slow })
   const out = await h.run()
   assert.equal(out.reply, null)
   assert.equal(out.error, slow)
-  assert.deepEqual(h.used, [0, 1])
-  assert.match(h.logs.at(-1)!, /giving up on this model/)
+  assert.equal(out.attempts, 1)
+  assert.deepEqual(h.used, [0])
+  assert.match(h.logs[0], /key 1\/2 -> timeout, giving up on this model/)
+  assert.doesNotMatch(h.logs.join('\n'), /trying next key/)
+})
+
+test('run: TimeoutError dari fetch (AbortSignal.timeout) juga melepas model dan mendinginkannya', async () => {
+  const h = harness([K1, K2, K3], { [K1]: new DOMException('The operation timed out.', 'TimeoutError') })
+  const out = await h.run()
+  assert.equal(out.reply, null)
+  assert.deepEqual(h.used, [0])
+  assert.equal(h.pool.modelCoolingLeftMs('numes:test/model:free'), NUMES_MODEL_COOLDOWN_MS)
+})
+
+test('run: galat sambungan (bukan batas waktu) melepas model tanpa mencoba kunci lain dan tanpa mendinginkan model', async () => {
+  const reset = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
+  const h = harness([K1, K2], { [K1]: reset })
+  const out = await h.run()
+  assert.equal(out.error, reset)
+  assert.deepEqual(h.used, [0])
+  assert.equal(h.pool.modelCoolingLeftMs('numes:test/model:free'), 0)
+})
+
+test('run: 408 dari server = model lambat: dilepas dan didinginkan, kunci lain tidak dicoba', async () => {
+  const h = harness([K1, K2], { [K1]: { status: 408, errorType: 'timeout' } })
+  const out = await h.run()
+  assert.equal(out.reply?.status, 408)
+  assert.deepEqual(h.used, [0])
+  assert.equal(h.pool.modelCoolingLeftMs('numes:test/model:free'), NUMES_MODEL_COOLDOWN_MS)
+  assert.match(h.logs[0], /giving up on this model/)
+})
+
+test('run: model yang kena batas waktu dilewati tanpa percobaan sampai pendinginannya selesai (5 menit), lalu dicoba lagi', async () => {
+  const slow = Object.assign(new Error('timeout'), { code: 'ECONNABORTED' })
+  const h = harness([K1, K2], { [K1]: slow, [K2]: slow })
+  const first = await h.run()
+  assert.equal(first.error, slow)
+  assert.deepEqual(h.used, [0])
+  h.used.length = 0
+  h.logs.length = 0
+  h.clock.advance(60_000)
+  const second = await h.run()
+  assert.deepEqual([second.reply, second.error, second.attempts, second.skipped], [null, null, 0, 'model_cooling'])
+  assert.deepEqual(h.used, [], 'tidak ada panggilan jaringan selama model didinginkan')
+  assert.match(h.logs[0], /too slow, cooling down 240s more, skipping/)
+  // model lain di kolam yang sama tidak terpengaruh
+  const other = await runWithNumesKeys(h.pool, async (_k, i) => (h.used.push(i), { status: 200 }), { label: 'numes:other/model:free', log: () => {} })
+  assert.equal(other.reply?.status, 200)
+  // sesudah 5 menit model dicoba lagi
+  h.clock.advance(NUMES_MODEL_COOLDOWN_MS)
+  h.used.length = 0
+  await h.run()
+  assert.equal(h.used.length, 1)
+})
+
+test('run: 429 pada semua kunci tidak mendinginkan modelnya (itu urusan kunci)', async () => {
+  const h = harness([K1, K2], { [K1]: { status: 429 }, [K2]: { status: 429 } })
+  await h.run()
+  assert.equal(h.pool.modelCoolingLeftMs('numes:test/model:free'), 0)
+})
+
+test('run: attempt menerima batas waktu: bawaan 12 detik, callTimeoutMs, dan limitMs (sisa anggaran pemanggil) yang lebih kecil', async () => {
+  const seen: number[] = []
+  const go = (extra: Record<string, unknown>) => {
+    seen.length = 0
+    return runWithNumesKeys(new NumesKeyPool([K1]), async (_k, _i, ms) => (seen.push(ms), { status: 200 }), { label: 'x', log: () => {}, ...extra })
+  }
+  assert.equal(DEFAULT_NUMES_CALL_TIMEOUT_MS, 12_000)
+  const all: number[] = []
+  for (const extra of [{}, { callTimeoutMs: 7_000 }, { callTimeoutMs: 20_000, limitMs: () => 9_000 }, { limitMs: () => 30_000 }]) {
+    await go(extra)
+    all.push(seen[0])
+  }
+  assert.deepEqual(all, [12_000, 7_000, 9_000, 12_000])
+  // pemanggil bilang waktunya habis: tidak ada percobaan
+  const none = await go({ limitMs: () => 0 })
+  assert.deepEqual([none.attempts, none.skipped], [0, 'budget'])
+})
+
+// ───────────────────────────────────────────────────────────── NumesBudget
+
+test('NumesBudget: batas = min(15 detik, 40% anggaran total); tanpa anggaran total hanya batas tetap', () => {
+  assert.equal(NUMES_MAX_TOTAL_MS, 15_000)
+  assert.equal(NUMES_BUDGET_SHARE, 0.4)
+  assert.equal(new NumesBudget({ totalBudgetMs: 34_000 }).limitMs, 13_600, 'Edge generate-application: 40% dari 34 detik')
+  assert.equal(new NumesBudget({ totalBudgetMs: 100_000 }).limitMs, 15_000, 'green-career-assessment: batas tetap 15 detik')
+  assert.equal(new NumesBudget({ totalBudgetMs: 10_000 }).limitMs, 4_000)
+  assert.equal(new NumesBudget({}).limitMs, 15_000)
+  assert.equal(new NumesBudget({ totalBudgetMs: 0 }).limitMs, 0)
+  assert.equal(new NumesBudget({ totalBudgetMs: 34_000, share: 0.5, maxTotalMs: 20_000 }).limitMs, 17_000)
+})
+
+test('NumesBudget: callTimeoutMs dipangkas ke sisa anggaran dan 0 bila sisa terlalu sedikit untuk satu panggilan', () => {
+  let t = 0
+  const b = new NumesBudget({ totalBudgetMs: 34_000, clock: () => t })
+  assert.equal(b.callTimeoutMs(12_000), 12_000)
+  b.spend(12_000)
+  assert.equal(b.spentMs, 12_000)
+  assert.equal(b.remainingMs, 1_600)
+  assert.equal(MIN_NUMES_CALL_MS, 4_000)
+  assert.equal(b.callTimeoutMs(12_000), 0, 'sisa 1,6 detik < 4 detik: dilewati')
+  const c = new NumesBudget({ totalBudgetMs: 100_000 })
+  c.spend(9_000)
+  assert.equal(c.callTimeoutMs(12_000), 6_000, 'sisa 6 detik: percobaan dipangkas ke 6 detik')
+  // batas per percobaan yang lebih kecil dari ambang minimum tetap bisa dipakai
+  const d = new NumesBudget({ totalBudgetMs: 100_000 })
+  assert.equal(d.callTimeoutMs(2_000), 2_000)
+  d.spend(14_000)
+  assert.equal(d.callTimeoutMs(2_000), 0, 'sisa 1 detik < 2 detik')
+  d.spend(-5)
+  assert.equal(d.spentMs, 14_000, 'nilai negatif diabaikan')
+})
+
+test('run: Numes lambat di semua entri = jatah Numes habis, entri berikutnya dilewati tanpa percobaan (Gemini tidak terdesak)', async () => {
+  const slow = Object.assign(new Error('timeout of 12000ms exceeded'), { code: 'ECONNABORTED' })
+  let t = 0
+  const budget = new NumesBudget({ totalBudgetMs: 34_000, clock: () => t })
+  const pool = new NumesKeyPool([K1, K2, K3])
+  const used: string[] = []
+  const logs: string[] = []
+  const call = (label: string) =>
+    runWithNumesKeys(
+      pool,
+      async (_key, index, timeoutMs) => {
+        used.push(`${label} key${index + 1} ${timeoutMs}ms`)
+        t += timeoutMs // tiap percobaan memakai seluruh batas waktunya
+        throw slow
+      },
+      { label, budget, log: (l) => logs.push(l) }
+    )
+  const glm = await call('numes:glm:free')
+  assert.equal(glm.error, slow)
+  const deepseek = await call('numes:deepseek:free')
+  assert.deepEqual(used, ['numes:glm:free key1 12000ms'], 'model kedua tidak memanggil jaringan sama sekali')
+  assert.deepEqual([deepseek.reply, deepseek.error, deepseek.attempts, deepseek.skipped], [null, null, 0, 'budget'])
+  assert.ok(t <= 13_600, `Numes memakai ${t} ms, lebih dari jatahnya`)
+  assert.ok(34_000 - t >= 20_000, 'sisa anggaran total cukup untuk satu panggilan Gemini penuh (20 detik)')
+  assert.match(logs.at(-1)!, /Numes time budget used up, skipping/)
+})
+
+test('run: jatah Numes yang tersisa memangkas batas waktu percobaan, dan percobaan tambahan tidak melewati jatah', async () => {
+  let t = 0
+  const budget = new NumesBudget({ totalBudgetMs: 34_000, clock: () => t })
+  const pool = new NumesKeyPool([K1, K2, K3])
+  const seen: number[] = []
+  const out = await runWithNumesKeys(
+    pool,
+    async (_key, _index, timeoutMs) => {
+      seen.push(timeoutMs)
+      t += 6_000 // 429 setelah 6 detik, tiap kali
+      return { status: 429 }
+    },
+    { label: 'x', budget, log: () => {} }
+  )
+  // 13,6 detik: percobaan 1 (12 detik, memakai 6), percobaan 2 (7,6 detik, memakai 6), sisa 1,6 detik < 4 detik: berhenti
+  assert.deepEqual(seen, [12_000, 7_600])
+  assert.equal(out.reply?.status, 429)
+  assert.equal(out.attempts, 2)
 })
 
 test('run: server tidak terjangkau = berhenti di kunci pertama (kunci lain gagal sama)', async () => {
@@ -280,8 +448,8 @@ test('run: canContinue=false menghentikan percobaan tambahan (anggaran waktu hab
 test('run: log hanya memuat nomor kunci, tidak pernah nilainya', async () => {
   const h = harness([K1, K2, K3], {
     [K1]: { status: 429, retryAfter: '3' },
-    [K2]: Object.assign(new Error(`socket hang up (Bearer ${K2})`), { code: 'ECONNRESET' }),
-    [K3]: { status: 503 },
+    [K2]: { status: 401 },
+    [K3]: Object.assign(new Error(`socket hang up (Bearer ${K3})`), { code: 'ECONNRESET' }),
   })
   await h.run()
   assert.ok(h.logs.length >= 3)

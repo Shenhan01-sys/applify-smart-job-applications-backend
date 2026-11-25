@@ -10,7 +10,7 @@
 // Anthropic paling akhir (`last`). Anthropic selalu di belakang apa pun isi FREE_MODELS / PRO_MODELS: pemilik ingin
 // menghemat kredit Anthropic, jadi Claude hanya dipakai bila semua penyedia lain gagal (keputusan 24 Nov 2026).
 
-import { NUMES_CHAT_URL, numesPoolFor, parseNumesKeys, type NumesKeyPool } from './numes-keys.js'
+import { DEFAULT_NUMES_CALL_TIMEOUT_MS, NUMES_CHAT_URL, numesPoolFor, parseNumesKeys, type NumesKeyPool } from './numes-keys.js'
 
 export type PremiumProvider = 'numes' | 'gemini' | 'anthropic'
 
@@ -51,6 +51,13 @@ export const DEFAULT_PRO_MODELS = `${NUMES_MODELS},gemini:gemini-4-hydrogen,gemi
 
 /** Batas waktu satu panggilan (ms). Gemini 4 pernah menggantung 90 detik, jadi sengaja pendek. */
 export const PREMIUM_CALL_TIMEOUT_MS = Number(process.env.AI_PREMIUM_TIMEOUT_MS || 25_000)
+
+/**
+ * Batas waktu satu percobaan Numes (ms), terpisah dari PREMIUM_CALL_TIMEOUT_MS: model gratis Numes yang lambat tidak
+ * ditunggu lebih lama dari ini (bawaan 12 detik, env NUMES_TIMEOUT_MS). Seluruh entri Numes dalam satu permintaan juga
+ * berbagi NumesBudget (paling banyak 40% sisa waktu atau 15 detik) supaya Gemini tetap kebagian waktu.
+ */
+export const NUMES_CALL_TIMEOUT_MS = Number(process.env.NUMES_TIMEOUT_MS) > 0 ? Number(process.env.NUMES_TIMEOUT_MS) : DEFAULT_NUMES_CALL_TIMEOUT_MS
 
 export interface PremiumKeys {
   gemini?: string

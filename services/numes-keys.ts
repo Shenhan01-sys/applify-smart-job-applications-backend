@@ -7,9 +7,16 @@
 //
 // Kunci dibaca dari NUMES_API_KEY, NUMES_API_KEY_2 sampai NUMES_API_KEY_5, lalu NUMES_API_KEYS (dipisah koma). Duplikat dan
 // nilai kosong dibuang, paling banyak MAX_NUMES_KEYS kunci. Satu panggilan model memakai kunci berurutan mulai dari
-// indeks yang berputar (round-robin) supaya pemakaian tersebar. Bila sebuah kunci gagal karena kunci itu sendiri
-// (401/402/403/429, kuota, galat 5xx, batas waktu), model yang sama dicoba lagi dengan kunci berikutnya. Kunci yang
-// ditolak karena kuota atau laju didinginkan sebentar di memori dan dilewati.
+// indeks yang berputar (round-robin) supaya pemakaian tersebar. Hanya status yang khas untuk kunci (401/402/403
+// kredit atau izin, 429 laju) yang membuat model yang sama dicoba lagi dengan kunci berikutnya; kunci yang ditolak
+// karena kuota atau laju didinginkan sebentar di memori dan dilewati.
+//
+// Batas waktu dan galat sambungan BUKAN soal kunci: modelnya yang lambat, kunci lain sama lambatnya. Model itu
+// langsung dilepas (tanpa mencoba kunci berikutnya) dan, bila karena batas waktu, didinginkan NUMES_MODEL_COOLDOWN_MS
+// di memori supaya permintaan berikutnya melewatinya tanpa menunggu lagi. Insiden 25 Nov 2026: dua kunci kali dua
+// model kali 12 sampai 20 detik menghabiskan seluruh anggaran waktu Edge Function (galat 502) sebelum Gemini sempat
+// dipanggil. Karena itu juga ada NumesBudget: seluruh entri Numes dalam satu permintaan hanya boleh memakai
+// NUMES_BUDGET_SHARE dari anggaran total (paling banyak NUMES_MAX_TOTAL_MS), sisanya dipastikan untuk penyedia lain.
 //
 // Sumber galat: https://numes.ai/docs/api-reference/errors dan /docs/api-reference/limits (dibaca 24 Nov 2026).
 // Bentuk galat: {"error":{"code":402,"message":"...","metadata":{"error_type":"insufficient_credits"}}}. Keputusan
@@ -28,8 +35,16 @@ export const NUMES_COOLDOWN_RATE_MS = 60_000
 export const NUMES_COOLDOWN_AUTH_MS = 10 * 60_000
 const COOLDOWN_MIN_MS = 1_000
 const COOLDOWN_MAX_MS = 5 * 60_000
-/** Galat transport (batas waktu, sambungan putus) berturut-turut sebelum model ini dilepas: server yang sama lambat untuk semua kunci. */
-export const MAX_NUMES_TRANSPORT_FAILURES = 2
+/** Batas waktu satu percobaan Numes (model gratis yang menjawab lambat tidak ditunggu lebih lama). Env NUMES_TIMEOUT_MS menimpanya. */
+export const DEFAULT_NUMES_CALL_TIMEOUT_MS = 12_000
+/** Seluruh entri Numes dalam satu permintaan memakai paling banyak ini (ms), apa pun anggaran totalnya. */
+export const NUMES_MAX_TOTAL_MS = 15_000
+/** Bagian anggaran total satu permintaan yang boleh dipakai seluruh entri Numes. Sisanya untuk Gemini dan penyedia lain. */
+export const NUMES_BUDGET_SHARE = 0.4
+/** Sisa anggaran Numes di bawah ini (atau di bawah batas per percobaan bila lebih kecil) tidak cukup untuk satu panggilan. */
+export const MIN_NUMES_CALL_MS = 4_000
+/** Model yang kena batas waktu dilewati selama ini (ms) di instance yang sama. */
+export const NUMES_MODEL_COOLDOWN_MS = 5 * 60_000
 
 type Env = Record<string, string | undefined>
 
@@ -52,12 +67,14 @@ export class NumesKeyPool {
   readonly keys: readonly string[]
   private cursor = 0
   private coolUntil: number[]
+  private modelCoolUntil: Map<string, number>
   private clock: () => number
 
   constructor(keys: readonly string[], clock: () => number = () => Date.now()) {
     this.keys = keys
     this.clock = clock
     this.coolUntil = keys.map(() => 0)
+    this.modelCoolUntil = new Map()
   }
 
   get size(): number {
@@ -75,6 +92,15 @@ export class NumesKeyPool {
 
   cool(index: number, ms: number): void {
     if (ms > 0 && index >= 0 && index < this.keys.length) this.coolUntil[index] = Math.max(this.coolUntil[index], this.clock() + ms)
+  }
+
+  /** Sisa pendinginan model (ms), 0 bila model siap. Model didinginkan karena lambat, bukan karena kuncinya. */
+  modelCoolingLeftMs(label: string): number {
+    return Math.max(0, (this.modelCoolUntil.get(label) ?? 0) - this.clock())
+  }
+
+  coolModel(label: string, ms: number): void {
+    if (ms > 0) this.modelCoolUntil.set(label, Math.max(this.modelCoolUntil.get(label) ?? 0, this.clock() + ms))
   }
 
   /**
@@ -110,9 +136,63 @@ export function numesPoolFromEnv(env: Env): NumesKeyPool {
   return numesPoolFor(parseNumesKeys(env))
 }
 
-/** Hanya untuk tes: lupakan semua kolam bersama. */
+/** Hanya untuk tes: lupakan semua kolam bersama (termasuk pendinginan kunci dan model). */
 export function resetNumesPools(): void {
   pools.clear()
+}
+
+export interface NumesBudgetOptions {
+  /** Anggaran total waktu permintaan (ms). Entri Numes boleh memakai `share` darinya. Kosong = hanya batas tetap. */
+  totalBudgetMs?: number
+  /** Bagian dari anggaran total. Bawaan NUMES_BUDGET_SHARE. */
+  share?: number
+  /** Batas tetap total waktu semua entri Numes (ms). Bawaan NUMES_MAX_TOTAL_MS. */
+  maxTotalMs?: number
+  clock?: () => number
+}
+
+/**
+ * Anggaran waktu bersama semua entri Numes dalam SATU permintaan: buat satu per permintaan dan berikan ke setiap
+ * runWithNumesKeys / postChat. Batasnya min(batas tetap, share * anggaran total); waktu tiap percobaan dijumlahkan.
+ * Bila sudah terlampaui, entri Numes sisanya dilewati dan rantai langsung ke penyedia berikutnya, jadi Numes yang
+ * lambat tidak pernah menghabiskan anggaran yang dicadangkan untuk Gemini.
+ */
+export class NumesBudget {
+  /** Batas total waktu Numes (ms) untuk permintaan ini. */
+  readonly limitMs: number
+  private spent = 0
+  private clock: () => number
+
+  constructor(opts: NumesBudgetOptions = {}) {
+    const maxTotal = opts.maxTotalMs !== undefined && opts.maxTotalMs >= 0 ? opts.maxTotalMs : NUMES_MAX_TOTAL_MS
+    const total = opts.totalBudgetMs
+    const share = opts.share !== undefined && opts.share >= 0 ? opts.share : NUMES_BUDGET_SHARE
+    this.limitMs = total !== undefined && Number.isFinite(total) ? Math.min(maxTotal, Math.max(0, Math.floor(total * share))) : maxTotal
+    this.clock = opts.clock ?? (() => Date.now())
+  }
+
+  now(): number {
+    return this.clock()
+  }
+
+  get spentMs(): number {
+    return this.spent
+  }
+
+  get remainingMs(): number {
+    return Math.max(0, this.limitMs - this.spent)
+  }
+
+  spend(ms: number): void {
+    if (ms > 0) this.spent += ms
+  }
+
+  /** Batas waktu percobaan berikutnya: `perCallMs` dipangkas ke sisa anggaran. 0 = sisa terlalu sedikit, lewati. */
+  callTimeoutMs(perCallMs: number): number {
+    const left = this.remainingMs
+    if (!(perCallMs > 0) || left < Math.min(MIN_NUMES_CALL_MS, perCallMs)) return 0
+    return Math.min(perCallMs, left)
+  }
 }
 
 /** error.metadata.error_type dari badan galat Numes, atau null. */
@@ -130,11 +210,11 @@ export interface NumesReply {
 }
 
 export interface NumesVerdict {
-  /** true = coba kunci berikutnya untuk model yang sama. */
+  /** true = coba kunci berikutnya untuk model yang sama (hanya untuk status yang khas untuk kunci). */
   rotate: boolean
   /** Lama kunci ini dilewati (ms), 0 = tidak didinginkan. */
   coolMs: number
-  /** true = lambat atau timeout di sisi server: dihitung terhadap MAX_NUMES_TRANSPORT_FAILURES. */
+  /** true = server menjawab bahwa modelnya lambat (408): model dilepas dan didinginkan, kunci lain tidak dicoba. */
   slow: boolean
 }
 
@@ -161,9 +241,9 @@ export function classifyNumesFailure(reply: NumesReply): NumesVerdict {
     const coolMs = wait === null ? NUMES_COOLDOWN_RATE_MS : Math.min(COOLDOWN_MAX_MS, Math.max(COOLDOWN_MIN_MS, wait))
     return { rotate: true, coolMs, slow: false }
   }
-  if (status === 408) return errorType === 'cancelled' ? { rotate: false, coolMs: 0, slow: false } : { rotate: true, coolMs: 0, slow: true }
-  if (status >= 500) return { rotate: true, coolMs: 0, slow: false }
-  // 400, 404, 413, 415, 422 dan sejenisnya: permintaannya yang salah, kunci lain tidak menolong.
+  // 408 (server menyerah menunggu modelnya): modelnya lambat, kunci lain sama saja.
+  if (status === 408) return { rotate: false, coolMs: 0, slow: errorType !== 'cancelled' }
+  // 5xx, 400, 404, 413, 415, 422 dan sejenisnya: modelnya atau permintaannya yang bermasalah, kunci lain tidak menolong.
   return { rotate: false, coolMs: 0, slow: false }
 }
 
@@ -190,7 +270,15 @@ export interface RunNumesOptions {
   /** Dipanggil sebelum tiap percobaan tambahan; false = berhenti (anggaran waktu habis). */
   canContinue?: () => boolean
   classifyError?: (error: unknown) => NumesTransportError
+  /** Batas waktu satu percobaan Numes (ms). Bawaan DEFAULT_NUMES_CALL_TIMEOUT_MS. */
+  callTimeoutMs?: number
+  /** Batas dari pemanggil (sisa anggaran total permintaan, ms), dihitung ulang tiap percobaan. 0 = habis. */
+  limitMs?: () => number
+  /** Anggaran bersama semua entri Numes dalam satu permintaan. Tanpa ini hanya batas per percobaan yang berlaku. */
+  budget?: NumesBudget
 }
+
+export type NumesSkipReason = 'no_key' | 'model_cooling' | 'budget'
 
 export interface NumesRunResult<R extends NumesReply> {
   /** Jawaban terakhir (2xx bila berhasil, selain itu jawaban gagal terakhir). null bila percobaan terakhir melempar galat. */
@@ -200,67 +288,98 @@ export interface NumesRunResult<R extends NumesReply> {
   /** Nomor kunci (indeks, mulai 0) pada percobaan terakhir; null bila tidak ada percobaan. */
   keyIndex: number | null
   attempts: number
+  /** Alasan tidak ada satu pun percobaan: tanpa kunci, model sedang didinginkan karena lambat, atau anggaran waktu habis. */
+  skipped?: NumesSkipReason
 }
 
 /**
- * Jalankan satu panggilan model dengan kolam kunci. `attempt(key, index)` mengirim satu permintaan dan
- * mengembalikan status (dan Retry-After serta error_type bila ada); galat jaringan dilempar. Mengembalikan
- * jawaban 2xx pertama, atau hasil percobaan terakhir bila semua kunci gagal (pemanggil lalu pindah ke model berikutnya).
+ * Jalankan satu panggilan model dengan kolam kunci. `attempt(key, index, timeoutMs)` mengirim satu permintaan dengan
+ * batas waktu `timeoutMs` dan mengembalikan status (dan Retry-After serta error_type bila ada); galat jaringan
+ * dilempar. Mengembalikan jawaban 2xx pertama, atau hasil percobaan terakhir bila semua kunci gagal (pemanggil lalu
+ * pindah ke model berikutnya).
+ *
+ * Kunci berikutnya hanya dicoba untuk status khas kunci (401/402/403/429). Batas waktu, galat sambungan, 408, 5xx, dan
+ * galat permintaan melepas model ini saat itu juga. Batas waktu dan 408 juga mendinginkan model selama
+ * NUMES_MODEL_COOLDOWN_MS, sehingga panggilan berikutnya melewatinya tanpa percobaan (`skipped: 'model_cooling'`).
  */
 export async function runWithNumesKeys<R extends NumesReply>(
   pool: NumesKeyPool,
-  attempt: (key: string, index: number) => Promise<R>,
+  attempt: (key: string, index: number, timeoutMs: number) => Promise<R>,
   opts: RunNumesOptions
 ): Promise<NumesRunResult<R>> {
   const log = opts.log ?? ((line: string) => console.warn(line))
   const classifyError = opts.classifyError ?? classifyTransportError
+  const skip = (reason: NumesSkipReason, why: string): NumesRunResult<R> => {
+    log(`[AI] ${opts.label}: ${why}, skipping`)
+    return { reply: null, error: null, keyIndex: null, attempts: 0, skipped: reason }
+  }
+  const coolingLeft = pool.modelCoolingLeftMs(opts.label)
+  if (coolingLeft > 0) return skip('model_cooling', `model was too slow, cooling down ${Math.ceil(coolingLeft / 1000)}s more`)
   const order = pool.plan()
-  if (order.length === 0) {
-    log(`[AI] ${opts.label}: ${pool.size === 0 ? 'no Numes key configured' : 'every Numes key is cooling down'}, skipping`)
-    return { reply: null, error: null, keyIndex: null, attempts: 0 }
+  if (order.length === 0) return skip('no_key', pool.size === 0 ? 'no Numes key configured' : 'every Numes key is cooling down')
+  const perCallMs = opts.callTimeoutMs !== undefined && opts.callTimeoutMs > 0 ? opts.callTimeoutMs : DEFAULT_NUMES_CALL_TIMEOUT_MS
+  /** Batas waktu percobaan berikutnya: batas Numes, sisa anggaran pemanggil, dan sisa anggaran Numes. 0 = jangan coba. */
+  const nextTimeoutMs = (): number => {
+    let ms = perCallMs
+    if (opts.limitMs) {
+      const limit = opts.limitMs()
+      if (!(limit > 0)) return 0
+      ms = Math.min(ms, limit)
+    }
+    return opts.budget ? opts.budget.callTimeoutMs(ms) : ms
+  }
+  const giveUp = (index: number, why: string, coolModelMs: number): string => {
+    if (coolModelMs > 0) pool.coolModel(opts.label, coolModelMs)
+    return `[AI] ${opts.label} key ${index + 1}/${pool.size} -> ${why}, giving up on this model${coolModelMs > 0 ? ` (skipped for ${Math.round(coolModelMs / 1000)}s)` : ''}`
   }
   let reply: R | null = null
   let error: unknown | null = null
   let keyIndex: number | null = null
   let attempts = 0
-  let slow = 0
   for (let i = 0; i < order.length; i++) {
     if (i > 0 && opts.canContinue && !opts.canContinue()) break
+    const timeoutMs = nextTimeoutMs()
+    if (timeoutMs <= 0) {
+      if (attempts === 0) return skip('budget', 'Numes time budget used up')
+      log(`[AI] ${opts.label}: Numes time budget used up, no more keys tried`)
+      break
+    }
     const index = order[i]
     const more = i < order.length - 1
     const tag = `[AI] ${opts.label} key ${index + 1}/${pool.size}`
     attempts++
     keyIndex = index
+    const startedAt = opts.budget ? opts.budget.now() : 0
     try {
-      const r = await attempt(pool.keys[index], index)
+      const r = await attempt(pool.keys[index], index, timeoutMs)
+      if (opts.budget) opts.budget.spend(opts.budget.now() - startedAt)
       reply = r
       error = null
       if (r.status >= 200 && r.status < 300) return { reply, error, keyIndex, attempts }
       const verdict = classifyNumesFailure(r)
       pool.cool(index, verdict.coolMs)
       const why = `HTTP ${r.status}${r.errorType ? ` (${r.errorType})` : ''}`
+      if (verdict.slow) {
+        log(giveUp(index, why, NUMES_MODEL_COOLDOWN_MS))
+        break
+      }
       if (!verdict.rotate) {
         log(`${tag} -> ${why}, not caused by the key, not retrying with another key`)
         break
       }
-      if (verdict.slow && ++slow >= MAX_NUMES_TRANSPORT_FAILURES) {
-        log(`${tag} -> ${why}, giving up on this model`)
-        break
-      }
       log(`${tag} -> ${why}${verdict.coolMs ? `, cooling down ${Math.round(verdict.coolMs / 1000)}s` : ''}${more ? ', trying next key' : ''}`)
     } catch (e) {
+      if (opts.budget) opts.budget.spend(opts.budget.now() - startedAt)
       reply = null
       error = e
       const kind = classifyError(e)
       if (kind === 'unreachable') {
         log(`${tag} -> server unreachable, not retrying with another key`)
-        break
+      } else {
+        // Batas waktu: modelnya yang lambat, kunci lain sama lambatnya. Didinginkan supaya permintaan berikutnya tidak menunggu lagi.
+        log(giveUp(index, kind, kind === 'timeout' ? NUMES_MODEL_COOLDOWN_MS : 0))
       }
-      if (++slow >= MAX_NUMES_TRANSPORT_FAILURES) {
-        log(`${tag} -> ${kind}, giving up on this model`)
-        break
-      }
-      log(`${tag} -> ${kind}${more ? ', trying next key' : ''}`)
+      break
     }
   }
   return { reply, error, keyIndex, attempts }

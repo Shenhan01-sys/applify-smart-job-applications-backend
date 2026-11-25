@@ -23,7 +23,7 @@ for (const k of ['NUMES_API_KEY', 'NUMES_API_KEY_2', 'NUMES_API_KEY_3', 'NUMES_A
 const { DEFAULT_FREE_MODELS, DEFAULT_PRO_MODELS, parseModelList, premiumChain, premiumChainParts, resolvePremiumModel } = await import('../services/ai-providers.ts')
 const { aiPipelineService } = await import('../services/ai-pipeline.service.ts')
 const { tracingService } = await import('../services/tracing.service.ts')
-const { resetNumesPools, NUMES_COOLDOWN_RATE_MS } = await import('../services/numes-keys.ts')
+const { resetNumesPools, NUMES_COOLDOWN_RATE_MS, NUMES_MODEL_COOLDOWN_MS } = await import('../services/numes-keys.ts')
 ;(tracingService as any).traceAIGeneration = async () => ({ traceId: 't', generationId: 'g' })
 
 const LETTER = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'uat', 'letter-indonesian-greeting-user018.txt'), 'utf8')
@@ -45,6 +45,8 @@ let script: Record<string, Script>
   const auth = String(cfg?.headers?.Authorization ?? '')
   calls.push({ url, model: body.model, headers: cfg?.headers, timeout: cfg?.timeout, temperature: body.temperature, max_tokens: body.max_tokens, auth })
   let reply: Reply | undefined = typeof script[body.model] === 'function' ? (script[body.model] as (a: string) => Reply)(auth) : (script[body.model] as Reply | undefined)
+  // Batas waktu axios (ECONNABORTED): server menggantung sampai batas waktunya habis, jadi waktu tiruan maju sebanyak itu.
+  if (reply instanceof Error && (reply as any).code === 'ECONNABORTED') skew += Number((reply as any).elapsedMs ?? cfg?.timeout ?? 0)
   if (reply instanceof Error) throw reply
   if (typeof reply === 'number') return { status: reply, data: { error: 'x' }, headers: {} }
   if (reply !== undefined && typeof reply === 'object') return { status: reply.status, data: reply.data ?? { error: 'x' }, headers: reply.headers ?? {} }
@@ -191,7 +193,7 @@ test('paket Free dengan kunci Numes: Numes GLM menjawab lebih dulu, Gemini dan A
   assert.equal(calls[0].headers['Content-Type'], 'application/json')
   assert.equal(typeof calls[0].temperature, 'number', 'Numes menerima temperature')
   assert.equal(calls[0].max_tokens, 1500)
-  assert.equal(calls[0].timeout, 25_000)
+  assert.equal(calls[0].timeout, 12_000, 'Numes: batas waktu 12 detik per percobaan, bukan 25 detik Gemini')
 })
 
 test('kunci Numes berputar tiap panggilan (round-robin): kunci 1, 2, 3, lalu 1 lagi', async () => {
@@ -206,8 +208,6 @@ for (const [name, reply] of [
   ['402', { status: 402, data: { error: { code: 402, message: 'insufficient credits', metadata: { error_type: 'insufficient_credits' } } } }],
   ['401', { status: 401, data: { error: { code: 401, message: 'invalid credentials', metadata: { error_type: 'invalid_credentials' } } } }],
   ['403', { status: 403, data: { error: { code: 403, message: 'x', metadata: { error_type: 'verified_email_required' } } } }],
-  ['503', 503],
-  ['batas waktu', Object.assign(new Error('timeout of 25000ms exceeded'), { code: 'ECONNABORTED' })],
 ] as Array<[string, Reply]>) {
   test(`Numes: ${name} pada kunci 1 = model yang sama dicoba lagi dengan kunci 2, Gemini tidak disentuh`, async () => {
     setNumesKeys(NK1, NK2, NK3)
@@ -217,6 +217,85 @@ for (const [name, reply] of [
     assert.deepEqual(calls.map((c) => [c.model, c.auth]), [[GLM, `Bearer ${NK1}`], [GLM, `Bearer ${NK2}`]])
   })
 }
+
+/** Batas waktu axios. Tanpa `elapsedMs` server menggantung sampai batas waktunya habis (waktu tiruan maju sebanyak itu). */
+const TIMEOUT = (elapsedMs?: number) => Object.assign(new Error('timeout of 12000ms exceeded'), { code: 'ECONNABORTED', elapsedMs })
+const JSON_OK = JSON.stringify({ full_name: 'Tokoh Sintetis', skills: ['Python'] })
+
+test('Numes: 503 (galat server) pada kunci 1 melepas model itu, kunci 2 tidak dicoba, model berikutnya dipakai', async () => {
+  setNumesKeys(NK1, NK2, NK3)
+  script[GLM] = 503
+  script[DSK] = LETTER
+  const doc = await aiPipelineService.generateCoverLetter(params())
+  assert.equal(doc.model, `numes:${DSK}`)
+  assert.deepEqual(calls.map((c) => [c.model, c.auth]), [[GLM, `Bearer ${NK1}`], [DSK, `Bearer ${NK2}`]])
+})
+
+test('Numes: batas waktu pada kunci 1 = kunci 2 TIDAK dicoba (modelnya yang lambat), model Numes berikutnya dipakai', async () => {
+  setNumesKeys(NK1, NK2, NK3)
+  script[GLM] = TIMEOUT(1_000) // sambungan putus cepat: jatah Numes masih ada untuk model berikutnya
+  script[DSK] = LETTER
+  const doc = await aiPipelineService.generateCoverLetter(params())
+  assert.equal(doc.model, `numes:${DSK}`)
+  assert.deepEqual(calls.map((c) => [c.model, c.auth, c.timeout]), [[GLM, `Bearer ${NK1}`, 12_000], [DSK, `Bearer ${NK2}`, 12_000]])
+  assert.match(captured.join('\n'), /key 1\/3 -> timeout, giving up on this model/)
+  assert.doesNotMatch(captured.join('\n'), /trying next key/)
+})
+
+test('Numes: model yang kena batas waktu didinginkan 5 menit; permintaan berikutnya melewatinya tanpa menunggu, lalu dicoba lagi', async () => {
+  setNumesKeys(NK1, NK2)
+  script[GLM] = TIMEOUT(1_000)
+  script[DSK] = LETTER
+  await aiPipelineService.generateCoverLetter(params())
+  assert.deepEqual(calls.map((c) => c.model), [GLM, DSK])
+  calls.length = 0
+  skew += 60_000
+  await aiPipelineService.generateCoverLetter(params())
+  assert.deepEqual(calls.map((c) => c.model), [DSK], 'GLM dilewati tanpa panggilan')
+  assert.match(captured.join('\n'), /numes:z-ai\/glm-5\.3-flash:free: model was too slow, cooling down/)
+  calls.length = 0
+  skew += NUMES_MODEL_COOLDOWN_MS
+  await aiPipelineService.generateCoverLetter(params())
+  assert.equal(calls[0].model, GLM, 'sesudah 5 menit GLM dicoba lagi')
+})
+
+test('Numes lambat di SEMUA entri: jatah Numes (15 detik) habis, Gemini tetap dipanggil dengan batas waktu penuh', async () => {
+  setNumesKeys(NK1, NK2, NK3)
+  script[GLM] = TIMEOUT()
+  script[DSK] = TIMEOUT()
+  script['gemini-3.5-flash-lite'] = LETTER
+  const doc = await aiPipelineService.generateCoverLetter(params())
+  assert.equal(doc.model, 'gemini:gemini-3.5-flash-lite')
+  // GLM: 12 detik lalu dilepas; sisa jatah 3 detik < 4 detik, jadi DeepSeek dilewati tanpa panggilan; Gemini menjawab
+  assert.deepEqual(calls.map((c) => c.model), [GLM, 'gemini-3.5-flash-lite'])
+  assert.equal(calls[1].timeout, 25_000)
+  assert.equal(skew, 12_000, 'Numes hanya memakai 12 detik')
+})
+
+test('Numes lambat di semua entri dengan deadline 34 detik: Numes paling banyak 40% (13,6 detik), Gemini mendapat sisa waktunya', async () => {
+  setNumesKeys(NK1, NK2)
+  script[GLM] = TIMEOUT()
+  script[DSK] = TIMEOUT()
+  script['gemini-3.5-flash-lite'] = JSON_OK
+  const out = await aiPipelineService.completeJson({ system: 's', user: 'u', deadlineAt: Date.now() + 34_000 })
+  assert.equal(out.model, 'gemini:gemini-3.5-flash-lite')
+  assert.deepEqual(calls.map((c) => c.model), [GLM, 'gemini-3.5-flash-lite'])
+  assert.equal(calls[0].timeout, 12_000)
+  assert.ok(calls[1].timeout! >= 20_000 && calls[1].timeout! <= 22_000, `Gemini timeout=${calls[1].timeout}`)
+})
+
+test('Numes: deadline pendek memangkas batas waktu percobaan Numes ke jatahnya (40%); jatah di bawah 4 detik = Numes dilewati, Gemini langsung', async () => {
+  setNumesKeys(NK1)
+  script[GLM] = JSON_OK
+  await aiPipelineService.completeJson({ system: 's', user: 'u', deadlineAt: Date.now() + 12_000 })
+  assert.equal(calls[0].model, GLM)
+  assert.equal(calls[0].timeout, 4_800, '40% dari 12 detik')
+  calls.length = 0
+  script['gemini-3.5-flash-lite'] = JSON_OK
+  const out = await aiPipelineService.completeJson({ system: 's', user: 'u', deadlineAt: Date.now() + 8_000 })
+  assert.equal(out.model, 'gemini:gemini-3.5-flash-lite')
+  assert.deepEqual(calls.map((c) => c.model), ['gemini-3.5-flash-lite'], 'jatah Numes 3,2 detik terlalu pendek: tidak dipanggil')
+})
 
 test('Numes: kunci yang kena 429 didinginkan; panggilan berikutnya melewatinya sampai 60 detik berlalu', async () => {
   setNumesKeys(NK1, NK2, NK3)
@@ -243,15 +322,17 @@ test('Numes: semua kunci gagal pada GLM = DeepSeek dicoba (dengan kunci bergilir
   assert.deepEqual(calls.map((c) => c.model), [GLM, GLM, 'gemini-3.5-flash-lite'])
 })
 
-test('Numes: 5xx tidak mendinginkan kunci; model berikutnya mulai dari kunci yang bergilir (kunci 2)', async () => {
+test('Numes: 5xx tidak mendinginkan kunci maupun model; model berikutnya mulai dari kunci yang bergilir (kunci 2)', async () => {
   setNumesKeys(NK1, NK2)
   script[GLM] = 503
   script[DSK] = (auth) => (auth === `Bearer ${NK2}` ? LETTER : 503)
   const doc = await aiPipelineService.generateCoverLetter(params())
   assert.equal(doc.model, `numes:${DSK}`)
-  assert.deepEqual(calls.map((c) => [c.model, c.auth]), [
-    [GLM, `Bearer ${NK1}`], [GLM, `Bearer ${NK2}`], [DSK, `Bearer ${NK2}`],
-  ])
+  assert.deepEqual(calls.map((c) => [c.model, c.auth]), [[GLM, `Bearer ${NK1}`], [DSK, `Bearer ${NK2}`]])
+  calls.length = 0
+  script[GLM] = LETTER
+  await aiPipelineService.generateCoverLetter(params())
+  assert.equal(calls[0].model, GLM, 'GLM tidak didinginkan oleh 503')
 })
 
 test('Anthropic hanya sesudah Numes, Gemini, OpenRouter, dan Groq gagal semuanya', async () => {

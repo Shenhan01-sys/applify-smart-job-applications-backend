@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { tracingService } from './tracing.service.js'
-import { PREMIUM_CALL_TIMEOUT_MS, premiumChainParts } from './ai-providers.js'
-import { numesErrorType, runWithNumesKeys } from './numes-keys.js'
+import { NUMES_CALL_TIMEOUT_MS, PREMIUM_CALL_TIMEOUT_MS, premiumChainParts } from './ai-providers.js'
+import { NumesBudget, numesErrorType, runWithNumesKeys } from './numes-keys.js'
 import { acceptJsonObject } from './json-output.js'
 import {
   GROUNDING_RULES,
@@ -237,6 +237,8 @@ interface CallState {
   soft: { text: string; model: string } | null
   /** Penyedia Numes/Gemini/Anthropic yang sudah pasti tidak bisa dipakai di permintaan ini (kunci ditolak atau tidak terjangkau). */
   skipProviders: Set<string>
+  /** Jatah waktu bersama semua entri Numes di permintaan ini (paling banyak 40% sisa waktu atau 15 detik), supaya Numes yang lambat tidak menghabiskan waktu Gemini. */
+  numesBudget: NumesBudget
 }
 
 export class AIPipelineService {
@@ -309,18 +311,25 @@ export class AIPipelineService {
           // jawabannya bisa kosong atau terpotong, jadi diberi ruang minimal 1600.
           max_tokens: target.provider === 'anthropic' ? Math.max(params.max_tokens ?? 2000, 1600) : params.max_tokens ?? 2000,
         }
-        const post = (headers: Record<string, string>) =>
-          axios.post(target.url, body, { headers, timeout: callTimeout(params, PREMIUM_CALL_TIMEOUT_MS), validateStatus: () => true })
+        const post = (headers: Record<string, string>, timeoutMs?: number) =>
+          axios.post(target.url, body, { headers, timeout: timeoutMs ?? callTimeout(params, PREMIUM_CALL_TIMEOUT_MS), validateStatus: () => true })
         let response: { status: number; data: any }
         if (target.provider === 'numes' && target.pool) {
-          // Kolam kunci: tiap kunci mencoba model yang sama, kunci yang gagal digantikan kunci berikutnya.
+          // Kolam kunci: kunci berikutnya hanya dicoba untuk 401/402/403/429. Batas waktu (12 detik, NUMES_TIMEOUT_MS) melepas
+          // modelnya dan mendinginkannya 5 menit, jadi rantai langsung lanjut ke model atau penyedia berikutnya.
           const run = await runWithNumesKeys(
             target.pool,
-            async (key) => {
-              const r = await post({ ...target.headers, Authorization: `Bearer ${key}` })
+            async (key, _index, timeoutMs) => {
+              const r = await post({ ...target.headers, Authorization: `Bearer ${key}` }, timeoutMs)
               return { status: r.status, data: r.data, retryAfter: r.headers?.['retry-after'], errorType: numesErrorType(r.data) }
             },
-            { label, canContinue: () => !budgetSpent(params) }
+            {
+              label,
+              canContinue: () => !budgetSpent(params),
+              limitMs: () => (budgetSpent(params) ? 0 : timeLeft(params)),
+              callTimeoutMs: NUMES_CALL_TIMEOUT_MS,
+              budget: state.numesBudget,
+            }
           )
           if (!run.reply) {
             if (run.error) throw run.error
@@ -353,7 +362,14 @@ export class AIPipelineService {
   }
 
   private async callAIDetailed(params: AIGenerationParams): Promise<{ text: string; model: string }> {
-    const state: CallState = { rejections: [], attempts: 0, soft: null, skipProviders: new Set() }
+    const left = timeLeft(params)
+    const state: CallState = {
+      rejections: [],
+      attempts: 0,
+      soft: null,
+      skipProviders: new Set(),
+      numesBudget: new NumesBudget({ totalBudgetMs: left === Infinity ? undefined : Math.max(0, left) }),
+    }
     const premium = await this.callPremium(params, state, 'first')
     if (premium) return premium
     const chain = Date.now() < openRouterCappedUntil || budgetSpent(params)
