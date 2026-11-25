@@ -10,6 +10,8 @@ import type { JobPosting } from '../mcp/shared/types.js'
  *   - salary (kelengkapan & kecocokan kisaran gaji):                                  0.10
  *   - workType (kecocokan remote / hybrid / on-site):                                  0.05
  * Lalu dikalikan locationFactor (0.55..1.0) dan dikurangi seniorityPenalty (0..25), lalu dijepit 0..100.
+ * Komponen yang datanya kosong (fit, freshness, salary, workType) bernilai null dan tidak ikut dihitung:
+ * bobot komponen yang tersedia dibagi ulang secara proporsional, tanpa angka sintetis.
  *
  * Mengapa Catatan 29 (0.70/0.15/0.10/0.05) dibanding Catatan 28 (0.75/0.15/0.10):
  * Catatan 28 menggabungkan gaji dan tipe kerja ke satu komponen 0.10. Memisahkan gaji (0.10) dan
@@ -77,10 +79,12 @@ export interface RankContext {
 export interface RankBreakdown {
   /** null bila tidak ada kata kunci, skill, atau teks lowongan yang bisa dibandingkan. */
   fit: number | null
-  freshness: number
+  /** null bila lowongan tidak mencantumkan tanggal terbit yang valid. */
+  freshness: number | null
   /** null bila lowongan tidak mencantumkan kisaran gaji. */
   salary: number | null
-  workType: number
+  /** null bila lowongan tidak mencantumkan tipe kerja (remote/hybrid/on-site). */
+  workType: number | null
   locationFactor: number
   seniorityPenalty: number
   weights: string
@@ -183,10 +187,11 @@ function synonymVariantsFor(term: string, queryNorm: string): string[] {
   return [...variants]
 }
 
-function computeFreshnessScore(postedAt: string | undefined, nowMs: number): { score: number; reason: string } {
+function computeFreshnessScore(postedAt: string | undefined, nowMs: number): { score: number | null; reason: string } {
   const parsed = Date.parse(postedAt ?? '')
   if (Number.isNaN(parsed)) {
-    return { score: 30, reason: 'Tanggal terbit belum tercantum' }
+    // Tanpa tanggal terbit tidak ada dasar menilai kebaruan: jangan mengarang skor, bobotnya didistribusikan ulang.
+    return { score: null, reason: 'Tanggal terbit belum tercantum' }
   }
   const ageDays = Math.max(0, (nowMs - parsed) / DAY_MS)
   if (ageDays <= 1) return { score: 100, reason: 'Baru diposting (<24 jam)' }
@@ -219,14 +224,15 @@ function computeSalaryScore(job: JobPosting, desiredSalary?: number | null): { s
   return { score: 75, reason: 'Kisaran gaji dicantumkan transparan' }
 }
 
-function computeWorkTypeScore(job: JobPosting, preferredWorkTypes?: string[]): { score: number; reason: string | null } {
+function computeWorkTypeScore(job: JobPosting, preferredWorkTypes?: string[]): { score: number | null; reason: string | null } {
   const jobWt = normalizeText(job.work_type)
+  // Tipe kerja lowongan kosong: tidak ada dasar menilai, baik dengan maupun tanpa preferensi pengguna.
+  if (!jobWt) return { score: null, reason: null }
   const prefs = (preferredWorkTypes ?? []).map((w) => normalizeText(w)).filter(Boolean)
   if (prefs.length > 0) {
-    if (jobWt && prefs.includes(jobWt)) {
+    if (prefs.includes(jobWt)) {
       return { score: 100, reason: `Tipe kerja cocok (${job.work_type})` }
     }
-    if (!jobWt) return { score: 50, reason: null }
     return { score: 15, reason: `Tipe kerja (${job.work_type}) kurang sesuai preferensi` }
   }
   if (jobWt === 'remote') return { score: 85, reason: 'Mendukung kerja remote' }
@@ -363,15 +369,15 @@ export function rankJobC1(job: JobPosting, ctx: RankContext): JobRankResult {
   // supaya gaji yang tidak dicantumkan tidak menjadi angka sintetis dan tidak menghukum lowongan.
   const components: Array<{ weight: number; score: number }> = []
   if (fitScore !== null) components.push({ weight: C1_RANKING_WEIGHTS.fit, score: fitScore })
-  components.push({ weight: C1_RANKING_WEIGHTS.freshness, score: freshness.score })
+  if (freshness.score !== null) components.push({ weight: C1_RANKING_WEIGHTS.freshness, score: freshness.score })
   if (salary.score !== null) components.push({ weight: C1_RANKING_WEIGHTS.salary, score: salary.score })
-  components.push({ weight: C1_RANKING_WEIGHTS.workType, score: workType.score })
+  if (workType.score !== null) components.push({ weight: C1_RANKING_WEIGHTS.workType, score: workType.score })
   const totalWeight = components.reduce((sum, c) => sum + c.weight, 0)
   const effectiveWeights = [
     fitScore !== null ? C1_RANKING_WEIGHTS.fit : 0,
-    C1_RANKING_WEIGHTS.freshness,
+    freshness.score !== null ? C1_RANKING_WEIGHTS.freshness : 0,
     salary.score !== null ? C1_RANKING_WEIGHTS.salary : 0,
-    C1_RANKING_WEIGHTS.workType,
+    workType.score !== null ? C1_RANKING_WEIGHTS.workType : 0,
   ]
   const weightsLabel = totalWeight > 0
     ? effectiveWeights.map((w) => (w / totalWeight).toFixed(2)).join('/')

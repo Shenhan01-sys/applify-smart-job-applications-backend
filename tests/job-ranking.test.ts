@@ -313,3 +313,57 @@ test('GAP-11: agregasi mengurutkan lowongan berskor numerik di atas lowongan ber
   assert.ok(typeof agg.jobs[0].rank_score === 'number' && Number.isFinite(agg.jobs[0].rank_score))
   assert.equal(agg.jobs[1].rank_score, null)
 })
+
+// ───────────────────────────────────────────── 47.3 P1-04: tanggal terbit dan tipe kerja kosong tidak dikarang
+
+const baseNoDates: JobPosting = {
+  id: 'p104',
+  title: 'Backend Engineer',
+  company: 'Acme',
+  location: 'Jakarta',
+  description: 'Node.js dan PostgreSQL',
+  url: 'https://example.test/p104',
+}
+const p104Ctx = { keywords: 'backend engineer', skills: ['Node.js'], location: 'Jakarta', nowMs: NOW }
+
+test('P1-04: posted_at kosong atau tidak valid membuat breakdown.freshness null dan bobotnya didistribusikan ulang', () => {
+  for (const posted_at of [undefined, '', 'bukan tanggal']) {
+    const r = rankJobC1({ ...baseNoDates, posted_at }, p104Ctx)
+    assert.equal(r.breakdown.freshness, null, String(posted_at))
+    assert.equal(r.breakdown.workType, null)
+    assert.equal(r.breakdown.salary, null)
+    // Hanya fit yang punya data: bobot efektif 1.00 dan skor sama dengan fit (lokasi cocok, tanpa penalti).
+    assert.equal(r.breakdown.weights, '1.00/0.00/0.00/0.00')
+    assert.equal(r.score, r.breakdown.fit)
+    assert.ok(r.reasons.some((s) => /tanggal terbit belum tercantum/i.test(s)))
+  }
+})
+
+test('P1-04: work_type kosong membuat breakdown.workType null, baik dengan maupun tanpa preferensi tipe kerja', () => {
+  const dated = { ...baseNoDates, posted_at: hoursAgo(3) }
+  const noPref = rankJobC1(dated, p104Ctx)
+  assert.equal(noPref.breakdown.workType, null)
+  assert.equal(noPref.breakdown.weights, '0.82/0.18/0.00/0.00')
+
+  const withPref = rankJobC1(dated, { ...p104Ctx, workTypes: ['remote'] })
+  assert.equal(withPref.breakdown.workType, null)
+  assert.equal(withPref.breakdown.weights, '0.82/0.18/0.00/0.00')
+  assert.equal(withPref.score, noPref.score)
+})
+
+test('P1-04: work_type terisi tetap dinilai (cocok 100, tidak cocok 15, remote tanpa preferensi 85, on-site 55)', () => {
+  const dated = { ...baseNoDates, posted_at: hoursAgo(3) }
+  assert.equal(rankJobC1({ ...dated, work_type: 'remote' }, { ...p104Ctx, workTypes: ['remote'] }).breakdown.workType, 100)
+  assert.equal(rankJobC1({ ...dated, work_type: 'on-site' }, { ...p104Ctx, workTypes: ['remote'] }).breakdown.workType, 15)
+  assert.equal(rankJobC1({ ...dated, work_type: 'remote' }, p104Ctx).breakdown.workType, 85)
+  assert.equal(rankJobC1({ ...dated, work_type: 'on-site' }, p104Ctx).breakdown.workType, 55)
+})
+
+test('P1-04: lowongan tanpa tanggal tidak lagi dihukum angka sintetis 30 dan tidak melampaui lowongan baru yang sama persis', () => {
+  const undated = rankJobC1(baseNoDates, p104Ctx)
+  const fresh = rankJobC1({ ...baseNoDates, posted_at: hoursAgo(3) }, p104Ctx)
+  const stale = rankJobC1({ ...baseNoDates, posted_at: daysAgo(60) }, p104Ctx)
+  assert.ok(typeof undated.score === 'number' && typeof fresh.score === 'number' && typeof stale.score === 'number')
+  assert.ok(fresh.score >= undated.score, `${fresh.score} < ${undated.score}`)
+  assert.ok(undated.score > stale.score, `${undated.score} <= ${stale.score}`)
+})
