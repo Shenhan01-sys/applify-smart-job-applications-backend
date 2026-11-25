@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify'
 import { QueueService, queueService } from '../../services/queue.service.js'
 import { ApprovalChannelConflictError, PlatformLimitReachedError } from '../../services/queue-guard.js'
-import { resolveApplyChannel, routesToExtension } from '../../services/apply-channel.js'
+import { approvalDispatchTarget, resolveApplyChannel, type ApprovalDispatchTarget } from '../../services/apply-channel.js'
 import { grantExtensionConsent, readExtensionAutoUse } from '../../services/extension-consent.js'
 import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
@@ -247,28 +247,33 @@ export async function approvalRoutes(
     const editedCoverLetter =
       typeof body.cover_letter === 'string' && body.cover_letter.trim() ? body.cover_letter : undefined
 
-    // Tentukan kanal eksekusi dari metadata lowongan: ekstensi (`extension_apply`) HANYA untuk host yang bisa
-    // dibuka ekstensi (portal login dan ATS dikenal, lihat EXTENSION_HOST_DOMAINS). Situs eksternal atau email
-    // langsung di luar daftar itu tetap lewat worker/manual seperti sebelumnya, bukan antrean ekstensi yang tak
-    // akan pernah diambil.
-    let targetChannel: 'worker' | 'extension' = 'worker'
+    // Tentukan kanal eksekusi dari metadata lowongan (E2E-01):
+    // - `manual` (LinkedIn / manualOnly) & `email_direct`: persetujuan dicatat, TIDAK mengantrekan worker/ekstensi.
+    // - `extension`: hanya untuk host portal login / ATS yang didukung ekstensi (bukan `email_direct`).
+    // - `worker`: ATS publik atau cadangan bila klasifikasi tidak tersedia.
+    let dispatchTarget: ApprovalDispatchTarget = 'worker'
     try {
       const classified = await resolveApplyChannel(db, requestData.job_id)
-      if (routesToExtension(classified)) targetChannel = 'extension'
+      dispatchTarget = approvalDispatchTarget(classified)
     } catch {
-      targetChannel = 'worker'
+      dispatchTarget = 'worker'
     }
 
     // Update status to approved. Guarded on status 'pending' so a double click (or two tabs) approves,
-    // and queues, exactly once.Kolom apply_channel opsional sampai migrasi DRAFT diterapkan.
+    // and queues, exactly once. Kolom apply_channel opsional sampai migrasi DRAFT diterapkan dan dibatasi
+    // CHECK (apply_channel IN ('worker', 'extension')), jadi hanya ditulis untuk kedua nilai itu.
     const baseApprovalPatch: Record<string, any> = {
       status: 'approved',
       reviewed_at: new Date().toISOString(),
       ...(editedCoverLetter ? { cover_letter: editedCoverLetter } : {}),
     }
+    const channelPatch =
+      dispatchTarget === 'worker' || dispatchTarget === 'extension'
+        ? { ...baseApprovalPatch, apply_channel: dispatchTarget }
+        : baseApprovalPatch
     let approveRes = await db
       .from('approval_requests')
-      .update({ ...baseApprovalPatch, apply_channel: targetChannel })
+      .update(channelPatch)
       .eq('id', id)
       .eq('user_id', userId)
       .eq('status', 'pending')
@@ -306,12 +311,33 @@ export async function approvalRoutes(
         .eq('user_id', userId)
     }
 
+    // Lowongan email langsung dan LinkedIn (manualOnly) tidak boleh masuk antrean worker atau ekstensi.
+    if (dispatchTarget === 'email_direct') {
+      return {
+        success: true,
+        message: 'Application approved; send via Email Apply panel',
+        queue_job_id: null,
+        apply_channel: 'email_direct',
+        queued: false,
+      }
+    }
+    if (dispatchTarget === 'manual') {
+      return {
+        success: true,
+        message: 'Application approved; manual submission required for this portal',
+        queue_job_id: null,
+        apply_channel: 'manual',
+        queued: false,
+        manual_only: true,
+      }
+    }
+
     // Persetujuan pengguna = izin kirim untuk lamaran ini (HITL). Worker tetap memerlukan
     // ALLOW_REAL_SUBMIT=true sebelum benar-benar menekan tombol kirim; ekstensi menunggu klik Kirim Sekarang.
     try {
       // Jalur ekstensi butuh izin pengguna. Bila belum memilih "selalu pakai ekstensi", persetujuan tetap
       // tercatat tetapi TIDAK diantrekan; klien menampilkan pilihan lalu memanggil POST /:id/extension-consent.
-      if (targetChannel === 'extension' && !(await readExtensionAutoUse(db, userId))) {
+      if (dispatchTarget === 'extension' && !(await readExtensionAutoUse(db, userId))) {
         return {
           success: true,
           message: 'Application approved; permission to use the browser extension is required before it is queued',
@@ -322,14 +348,14 @@ export async function approvalRoutes(
       }
       const qs = getQueue()
       const queued =
-        targetChannel === 'extension'
+        dispatchTarget === 'extension'
           ? await qs.addApprovedExtensionApplyJob(userId, id)
           : await qs.addApprovedApplyJob(userId, id)
       return {
         success: true,
         message: 'Application approved and queued for submission',
         queue_job_id: queued.id,
-        apply_channel: targetChannel,
+        apply_channel: dispatchTarget,
       }
     } catch (err: any) {
       // Jangan biarkan status "approved" tanpa pekerjaan di antrean (kecuali konflik kanal/klaim lain yang memang sudah ada).

@@ -100,23 +100,31 @@ test('approve: situs eksternal tak dikenal tetap ke worker (apply), bukan extens
   assert.equal(store.tables.approval_requests[0].apply_channel, 'worker')
 })
 
-test('approve: email langsung di host yang tak bisa dibuka ekstensi tetap ke worker', async () => {
+test('approve: email langsung tidak diantrekan ke worker/ekstensi (E2E-01)', async () => {
   const { store, app } = await build({ approval_requests: [approval({ job_id: JOB_EMAIL })] })
   const res = await approve(app)
   assert.equal(res.statusCode, 200, res.body)
-  assert.equal(res.json().apply_channel, 'worker')
-  assert.equal(queueOf(store)[0].job_type, 'apply')
+  assert.equal(res.json().apply_channel, 'email_direct')
+  assert.equal(res.json().extension_consent_required, undefined)
+  assert.equal(res.json().queue_job_id, null)
+  assert.equal(queueOf(store).length, 0)
 })
 
-test('approve: ATS publik ke worker; LinkedIn ke worker (manual ditangani di sana), tanpa permintaan izin', async () => {
-  for (const job_id of [JOB_ATS, JOB_LINKEDIN]) {
-    const { store, app } = await build({ approval_requests: [approval({ job_id })] })
-    const res = await approve(app)
-    assert.equal(res.statusCode, 200, res.body)
-    assert.equal(res.json().apply_channel, 'worker', job_id)
-    assert.equal(res.json().extension_consent_required, undefined, job_id)
-    assert.equal(queueOf(store)[0].job_type, 'apply', job_id)
-  }
+test('approve: ATS publik ke worker; LinkedIn tidak diantrekan ke worker (manual, E2E-01), tanpa permintaan izin', async () => {
+  const ats = await build({ approval_requests: [approval({ job_id: JOB_ATS })] })
+  const resAts = await approve(ats.app)
+  assert.equal(resAts.statusCode, 200, resAts.body)
+  assert.equal(resAts.json().apply_channel, 'worker', JOB_ATS)
+  assert.equal(resAts.json().extension_consent_required, undefined, JOB_ATS)
+  assert.equal(queueOf(ats.store)[0].job_type, 'apply', JOB_ATS)
+
+  const li = await build({ approval_requests: [approval({ job_id: JOB_LINKEDIN })] })
+  const resLi = await approve(li.app)
+  assert.equal(resLi.statusCode, 200, resLi.body)
+  assert.equal(resLi.json().apply_channel, 'manual', JOB_LINKEDIN)
+  assert.equal(resLi.json().extension_consent_required, undefined, JOB_LINKEDIN)
+  assert.equal(resLi.json().queue_job_id, null, JOB_LINKEDIN)
+  assert.equal(queueOf(li.store).length, 0, JOB_LINKEDIN)
 })
 
 // ---- Izin pengguna saat approve -----------------------------------------------------------------------
