@@ -49,8 +49,8 @@ const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, m
 export interface RankedJob extends JobPosting {
   platform: string
   relevance: number
-  /** Skor peringkat hybrid C1 (0..100). */
-  rank_score?: number
+  /** Skor peringkat hybrid C1 (0..100), atau null bila tidak ada dasar kecocokan. */
+  rank_score?: number | null
   /** Alasan skor C1 yang mudah diaudit pengguna (camelCase & snake_case untuk kompatibilitas UI/API). */
   score_reasons?: string[]
   scoreReasons?: string[]
@@ -88,9 +88,21 @@ const timeOf = (s?: string) => {
   const t = Date.parse(s ?? '')
   return Number.isNaN(t) ? 0 : t
 }
-/** Urutan stabil: skor hybrid C1 menurun (jatuh ke relevansi bila tak ada), lalu tanggal terbit terbaru. */
-export const byRelevanceThenDate = (a: RankedJob, b: RankedJob) =>
-  (b.rank_score ?? b.relevance) - (a.rank_score ?? a.relevance) || timeOf(b.posted_at) - timeOf(a.posted_at)
+const numericRank = (job: RankedJob): number | null =>
+  typeof job.rank_score === 'number' && Number.isFinite(job.rank_score) ? job.rank_score : null
+
+/**
+ * Urutan stabil: lowongan dengan skor hybrid C1 numerik selalu di atas yang berskor null, lalu skor menurun,
+ * lalu relevansi legacy, lalu tanggal terbit terbaru. Tidak ada NaN dari perbandingan null.
+ */
+export const byRelevanceThenDate = (a: RankedJob, b: RankedJob) => {
+  const ar = numericRank(a)
+  const br = numericRank(b)
+  if (ar !== null && br !== null) return br - ar || b.relevance - a.relevance || timeOf(b.posted_at) - timeOf(a.posted_at)
+  if (ar !== null) return -1
+  if (br !== null) return 1
+  return b.relevance - a.relevance || timeOf(b.posted_at) - timeOf(a.posted_at)
+}
 
 export async function aggregateJobs(params: AggregateParams): Promise<AggregateResult> {
   const t0 = Date.now()

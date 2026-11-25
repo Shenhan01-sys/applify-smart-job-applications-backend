@@ -67,6 +67,7 @@ test('C1 saturasi BM25: pengulangan kata di deskripsi tidak mengalahkan kecocoka
   const spamRes = rankJobC1(keywordSpam, { keywords: 'backend engineer', skills: ['PostgreSQL'], location: 'Jakarta', nowMs: NOW })
 
   assert.ok(realRes.score > spamRes.score, `real (${realRes.score}) harus menang melawan keyword stuffing (${spamRes.score})`)
+  assert.ok(realRes.breakdown.fit !== null && spamRes.breakdown.fit !== null)
   assert.ok(realRes.breakdown.fit > spamRes.breakdown.fit)
 })
 
@@ -201,4 +202,110 @@ test('aggregateJobs mengurutkan hasil dengan skor hybrid C1 dan menyertakan scor
   assert.ok((agg.jobs[0].rank_score ?? 0) > (agg.jobs[1].rank_score ?? 0))
   assert.ok(Array.isArray(agg.jobs[0].score_reasons) && agg.jobs[0].score_reasons.length >= 3)
   assert.deepEqual(agg.jobs[0].scoreReasons, agg.jobs[0].score_reasons)
+})
+
+// ───────────────────────────────────────────── GAP-11: skor jujur saat data kosong
+
+test('GAP-11: tanpa kata kunci dan tanpa skill, score dan breakdown.fit bernilai null, bukan 50', () => {
+  const job: JobPosting = {
+    id: 'no-input',
+    title: 'Backend Engineer',
+    company: 'Acme',
+    location: 'Jakarta',
+    description: 'Node.js dan PostgreSQL',
+    posted_at: hoursAgo(3),
+    url: 'https://example.test/no-input',
+  }
+  const r = rankJobC1(job, { keywords: '', skills: [], location: 'Jakarta', nowMs: NOW })
+  assert.equal(r.score, null)
+  assert.equal(r.breakdown.fit, null)
+  assert.deepEqual(r.matchedKeywords, [])
+  assert.deepEqual(r.matchedSkills, [])
+  assert.ok(r.reasons.some((s) => /belum cukup/i.test(s)), JSON.stringify(r.reasons))
+  assert.ok(!r.reasons.some((s) => /50%/.test(s)))
+})
+
+test('GAP-11: judul, deskripsi, requirements, dan skills kosong membuat score null walau kueri diisi', () => {
+  const empty: JobPosting = {
+    id: 'empty-text',
+    company: 'Acme',
+    location: 'Jakarta',
+    posted_at: hoursAgo(3),
+    url: 'https://example.test/empty-text',
+  }
+  const r = rankJobC1(empty, { keywords: 'backend engineer', skills: ['Node.js'], location: 'Jakarta', nowMs: NOW })
+  assert.equal(r.score, null)
+  assert.equal(r.breakdown.fit, null)
+  assert.ok(r.reasons.some((s) => /belum cukup/i.test(s)))
+})
+
+test('GAP-11: gaji tidak tercantum membuat breakdown.salary null dan bobot didistribusikan ulang tanpa NaN', () => {
+  const job: JobPosting = {
+    id: 'no-salary',
+    title: 'Backend Engineer',
+    company: 'Acme',
+    location: 'Jakarta',
+    work_type: 'remote',
+    description: 'Node.js dan PostgreSQL',
+    posted_at: hoursAgo(3),
+    url: 'https://example.test/no-salary',
+  }
+  const r = rankJobC1(job, { keywords: 'backend engineer', skills: ['Node.js'], location: 'Jakarta', nowMs: NOW })
+  assert.equal(r.breakdown.salary, null)
+  assert.ok(r.breakdown.fit !== null && r.breakdown.fit > 0)
+  assert.ok(typeof r.score === 'number' && Number.isFinite(r.score) && r.score > 0 && r.score <= 100)
+  assert.ok(r.reasons.some((s) => /gaji belum tercantum/i.test(s)))
+
+  const noBasis = rankJobC1(job, { keywords: '', skills: [], location: 'Jakarta', nowMs: NOW })
+  assert.equal(noBasis.breakdown.salary, null)
+  assert.equal(noBasis.score, null)
+})
+
+test('GAP-11: agregasi mengurutkan lowongan berskor numerik di atas lowongan berskor null', async () => {
+  class Gap11Board extends BaseMCPClient {
+    name = 'gap11-null'
+    baseUrl = 'https://gap11.test'
+    displayName = 'Gap 11 Board'
+    kind = 'board' as const
+    async searchJobs(): Promise<MCPResponse> {
+      return {
+        success: true,
+        data: {
+          jobs: [
+            {
+              id: 'gap11-empty',
+              company: 'Acme',
+              location: 'Jakarta, Indonesia',
+              posted_at: hoursAgo(1),
+              url: 'https://gap11.test/empty',
+            },
+            {
+              id: 'gap11-scored',
+              title: 'Backend Engineer',
+              company: 'Acme',
+              location: 'Jakarta, Indonesia',
+              description: 'Node.js dan PostgreSQL',
+              posted_at: daysAgo(10),
+              url: 'https://gap11.test/scored',
+            },
+          ],
+        },
+      }
+    }
+    async getJobDetails(): Promise<MCPResponse> {
+      return { success: false, error: 'n/a' }
+    }
+  }
+  mcpRegistry.register('gap11-null', new Gap11Board())
+  const agg = await aggregateJobs({
+    keywords: 'backend engineer',
+    skills: ['Node.js'],
+    location: 'any',
+    platforms: ['gap11-null'],
+    nowMs: NOW,
+  })
+  assert.equal(agg.jobs.length, 2)
+  assert.equal(agg.jobs[0].id, 'gap11-scored')
+  assert.ok(typeof agg.jobs[0].rank_score === 'number' && Number.isFinite(agg.jobs[0].rank_score))
+  assert.equal(agg.jobs[1].rank_score, null)
 })
