@@ -150,6 +150,16 @@ async function runConsent(
     if (classified.manualOnly) {
       return { status: 409, body: { error: 'Lowongan ini hanya bisa dilamar manual', code: 'manual_only' } }
     }
+    // Gate J5-02: tolak kanal email_direct dan host di luar EXTENSION_HOST_DOMAINS agar tidak membuang kuota percobaan.
+    if (classified.channel === 'email_direct' || !classified.extensionSupported) {
+      return {
+        status: 409,
+        body: {
+          error: 'Situs lowongan ini tidak didukung Ekstensi Browser Applify; gunakan panel Email atau lamar manual.',
+          code: 'not_extension_channel',
+        },
+      }
+    }
 
     // Persetujuan yang dulu berjalan di worker (mis. berhenti karena butuh login) pindah kanal sebelum antre,
     // karena enqueue menolak persetujuan yang kanalnya bukan 'extension'.

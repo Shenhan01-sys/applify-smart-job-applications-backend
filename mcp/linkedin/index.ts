@@ -27,9 +27,22 @@ export class LinkedInMCPClient extends BaseMCPClient {
   requiresCompany = false
   private browser: any = null
   private context: any = null
+  private launchFn?: (opts: any) => Promise<any>
+
+  constructor(opts?: { launch?: (opts: any) => Promise<any> }) {
+    super()
+    this.launchFn = opts?.launch
+  }
+
+  private launchBrowser(headless: boolean) {
+    if (this.launchFn) {
+      return this.launchFn(chromiumLaunchOptions({ headless, args: LINKEDIN_LAUNCH_ARGS }))
+    }
+    return chromium.launch(chromiumLaunchOptions({ headless, args: LINKEDIN_LAUNCH_ARGS }))
+  }
 
   async initBrowser(headless = true, userDataDir?: string) {
-    this.browser = await chromium.launch(chromiumLaunchOptions({ headless, args: LINKEDIN_LAUNCH_ARGS }))
+    this.browser = await this.launchBrowser(headless)
     this.context = await this.browser.newContext(linkedinContextOptions(userDataDir))
   }
 
@@ -44,6 +57,36 @@ export class LinkedInMCPClient extends BaseMCPClient {
     }
   }
 
+  /**
+   * Jalankan satu tugas halaman dengan isolasi context per permintaan (BS-P2-06):
+   * bila caller tidak memanggil initBrowser() secara eksplisit, browser & context dibuat khusus
+   * untuk panggilan ini dan selalu ditutup di finally agar tidak bocor atau bentrok antar-permintaan.
+   */
+  private async withPage<T>(fn: (page: any) => Promise<T>): Promise<T> {
+    const owned = !this.context
+    const browser = owned ? await this.launchBrowser(true) : null
+    const context = owned ? await browser.newContext(linkedinContextOptions()) : this.context
+    let page: any = null
+    try {
+      page = await context.newPage()
+      return await fn(page)
+    } finally {
+      if (page) {
+        try {
+          await page.close()
+        } catch {}
+      }
+      if (owned) {
+        try {
+          await context.close()
+        } catch {}
+        try {
+          await browser.close()
+        } catch {}
+      }
+    }
+  }
+
   async searchJobs(params: {
     keywords?: string
     location?: string
@@ -51,45 +94,40 @@ export class LinkedInMCPClient extends BaseMCPClient {
     page?: number
     limit?: number
   }): Promise<MCPResponse> {
-    if (!this.context) {
-      await this.initBrowser()
-    }
-
     try {
-      const page = await this.context.newPage()
-      const { keywords = '', location = '' } = params
+      const jobs = await this.withPage(async (page) => {
+        const { keywords = '', location = '' } = params
 
-      // Build search URL
-      const searchUrl = new URL(`${this.baseUrl}/jobs/search`)
-      if (keywords) searchUrl.searchParams.set('keywords', keywords)
-      if (location) searchUrl.searchParams.set('location', location)
-      searchUrl.searchParams.set('f_TPR', 'r86400') // Past 24 hours
+        // Build search URL
+        const searchUrl = new URL(`${this.baseUrl}/jobs/search`)
+        if (keywords) searchUrl.searchParams.set('keywords', keywords)
+        if (location) searchUrl.searchParams.set('location', location)
+        searchUrl.searchParams.set('f_TPR', 'r86400') // Past 24 hours
 
-      await page.goto(searchUrl.toString(), { waitUntil: 'networkidle' })
+        await page.goto(searchUrl.toString(), { waitUntil: 'networkidle' })
 
-      // Wait for job listings
-      await page.waitForSelector('[data-job-id]', { timeout: 10000 })
+        // Wait for job listings
+        await page.waitForSelector('[data-job-id]', { timeout: 10000 })
 
-      // Extract job data
-      const jobs = await page.evaluate(() => {
-        const jobCards = document.querySelectorAll('[data-job-id]')
-        return Array.from(jobCards).slice(0, 25).map((card: any) => {
-          const jobId = card.getAttribute('data-job-id') || ''
-          const titleEl = card.querySelector('.job-card-list__title')
-          const companyEl = card.querySelector('.job-card-container__company-name')
-          const locationEl = card.querySelector('.job-card-container__metadata-item')
+        // Extract job data
+        return await page.evaluate(() => {
+          const jobCards = document.querySelectorAll('[data-job-id]')
+          return Array.from(jobCards).slice(0, 25).map((card: any) => {
+            const jobId = card.getAttribute('data-job-id') || ''
+            const titleEl = card.querySelector('.job-card-list__title')
+            const companyEl = card.querySelector('.job-card-container__company-name')
+            const locationEl = card.querySelector('.job-card-container__metadata-item')
 
-          return {
-            id: jobId,
-            title: titleEl?.textContent?.trim() || '',
-            company: companyEl?.textContent?.trim() || '',
-            location: locationEl?.textContent?.trim() || '',
-            url: `https://www.linkedin.com/jobs/view/${jobId}`,
-          }
+            return {
+              id: jobId,
+              title: titleEl?.textContent?.trim() || '',
+              company: companyEl?.textContent?.trim() || '',
+              location: locationEl?.textContent?.trim() || '',
+              url: `https://www.linkedin.com/jobs/view/${jobId}`,
+            }
+          })
         })
       })
-
-      await page.close()
 
       const jobPostings: JobPosting[] = jobs
         .filter((j: any) => j.id && j.title)
@@ -115,28 +153,23 @@ export class LinkedInMCPClient extends BaseMCPClient {
   }
 
   async getJobDetails(jobId: string): Promise<MCPResponse> {
-    if (!this.context) {
-      await this.initBrowser()
-    }
-
     try {
-      const page = await this.context.newPage()
-      await page.goto(`${this.baseUrl}/jobs/view/${jobId}`, {
-        waitUntil: 'networkidle',
+      const details = await this.withPage(async (page) => {
+        await page.goto(`${this.baseUrl}/jobs/view/${jobId}`, {
+          waitUntil: 'networkidle',
+        })
+
+        await page.waitForSelector('.jobs-unified-top-card', { timeout: 10000 })
+
+        return await page.evaluate(() => {
+          const title = document.querySelector('.jobs-unified-top-card__job-title')?.textContent?.trim()
+          const company = document.querySelector('.jobs-unified-top-card__company-name')?.textContent?.trim()
+          const location = document.querySelector('.jobs-unified-top-card__bullet')?.textContent?.trim()
+          const description = document.querySelector('.jobs-description__container')?.textContent?.trim()
+
+          return { title, company, location, description }
+        })
       })
-
-      await page.waitForSelector('.jobs-unified-top-card', { timeout: 10000 })
-
-      const details = await page.evaluate(() => {
-        const title = document.querySelector('.jobs-unified-top-card__job-title')?.textContent?.trim()
-        const company = document.querySelector('.jobs-unified-top-card__company-name')?.textContent?.trim()
-        const location = document.querySelector('.jobs-unified-top-card__bullet')?.textContent?.trim()
-        const description = document.querySelector('.jobs-description__container')?.textContent?.trim()
-
-        return { title, company, location, description }
-      })
-
-      await page.close()
 
       return {
         success: true,

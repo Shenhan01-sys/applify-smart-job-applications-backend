@@ -4,6 +4,12 @@ import { enrichJob } from '../../services/job-detail.service.js'
 import { resolveApplyChannel } from '../../services/apply-channel.js'
 import { salaryBenchmark } from '../../services/salary-benchmark.service.js'
 import { backfillState, isBackfillAdmin, runBackfill, selectBackfillTargets } from '../../services/job-backfill.service.js'
+import {
+  MAX_OFF_PORTAL_QR_URLS,
+  MAX_OFF_PORTAL_TEXT_CHARS,
+  parseOffPortalPosting,
+  type OffPortalSourceType,
+} from '../../services/off-portal-ingest.service.js'
 
 /** Batas POST /:id/enrich per pengguna: tiap permintaan bisa memicu satu fetch ke situs lowongan. */
 export const ENRICH_LIMIT_PER_MINUTE = 30
@@ -102,6 +108,46 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
     } catch (error: any) {
       return reply.status(500).send({ error: error?.message ?? 'Failed to compute salary benchmark' })
     }
+  })
+
+  // Pratinjau parsing lowongan off-portal (link/caption/poster/QR) secara stateless (tanpa menulis ke DB).
+  app.post('/off-portal/parse', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+
+    const wait = retryAfterSeconds(userId)
+    if (wait > 0) {
+      return reply.status(429).header('Retry-After', String(wait)).send({ error: 'Too many requests', retry_after_seconds: wait })
+    }
+
+    const body = (request.body ?? {}) as Record<string, unknown>
+    const rawText = typeof body.rawText === 'string' ? body.rawText : ''
+    const sourceUrl = typeof body.sourceUrl === 'string' ? body.sourceUrl : undefined
+    const qrUrls = Array.isArray(body.qrUrls)
+      ? body.qrUrls.filter((u): u is string => typeof u === 'string').slice(0, MAX_OFF_PORTAL_QR_URLS)
+      : undefined
+    if (!rawText.trim() && !sourceUrl?.trim() && (!qrUrls || qrUrls.length === 0)) {
+      return reply.status(400).send({ error: 'Isi rawText, sourceUrl, atau qrUrls terlebih dahulu.', code: 'empty_off_portal_input' })
+    }
+    if (rawText.length > MAX_OFF_PORTAL_TEXT_CHARS) {
+      return reply.status(400).send({ error: `rawText maksimal ${MAX_OFF_PORTAL_TEXT_CHARS} karakter.`, code: 'off_portal_text_too_long' })
+    }
+    const sourceType: OffPortalSourceType =
+      body.sourceType === 'off_portal_poster' || body.sourceType === 'off_portal_caption'
+        ? body.sourceType
+        : 'off_portal_link'
+
+    return parseOffPortalPosting(
+      {
+        rawText,
+        sourceUrl,
+        sourceType,
+        qrUrls,
+        companyHint: typeof body.companyHint === 'string' ? body.companyHint : undefined,
+        locationHint: typeof body.locationHint === 'string' ? body.locationHint : undefined,
+      },
+      new Date(now()),
+    )
   })
 
   // Klasifikasi kanal lamaran (public_ats | email_direct | auth_portal | external_web) beserta aturan LinkedIn manual.

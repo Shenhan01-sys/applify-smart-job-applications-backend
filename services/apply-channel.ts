@@ -184,6 +184,17 @@ export function isPublicAtsUrl(rawUrl: unknown): boolean {
   return hostMatchesDomain(new URL(safe).hostname, PUBLIC_ATS_DOMAINS)
 }
 
+/** Portal Uji Applify: halaman lamaran tiruan milik Applify untuk uji coba (worker, bukan ekstensi; selaras FE J5-06). */
+const TEST_PORTAL_HOST = 'applify-smart-job-applications.vercel.app'
+const TEST_PORTAL_PATH = '/uji-portal'
+
+export function isTestPortalUrl(rawUrl: unknown): boolean {
+  const safe = sanitizeHttpUrl(rawUrl)
+  if (!safe) return false
+  const u = new URL(safe)
+  return u.hostname.toLowerCase() === TEST_PORTAL_HOST && (u.pathname === TEST_PORTAL_PATH || u.pathname.startsWith(`${TEST_PORTAL_PATH}/`))
+}
+
 export function extractUrlsFromText(text: string): string[] {
   if (!text) return []
   const matches = text.match(/https?:\/\/[^\s<>"'\])}`]+/gi) ?? []
@@ -245,6 +256,22 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
       extensionSupported: false,
       manualOnly: true,
       reason: 'Lowongan LinkedIn hanya dilamar manual demi keamanan akun (worker dan ekstensi tidak dijalankan di domain LinkedIn).',
+    }
+  }
+
+  // Portal Uji Applify diproses agen (worker), bukan ekstensi (selaras frontend J5-06).
+  if (isTestPortalUrl(primaryUrl)) {
+    return {
+      channel: 'external_web',
+      platform: platform || 'portal-uji',
+      applyUrl: primaryUrl,
+      resolvedApplyUrl: null,
+      applyEmail: null,
+      autoWorkerSupported: true,
+      emailApplySupported: false,
+      extensionSupported: false,
+      manualOnly: false,
+      reason: 'Formulir uji milik Applify. Agen server yang mengisinya tanpa Ekstensi Browser.',
     }
   }
 

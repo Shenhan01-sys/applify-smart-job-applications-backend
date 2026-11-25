@@ -201,16 +201,20 @@ export async function notificationRoutes(
  * atau `X-Hub-Signature-256` (Meta-forwarded) memakai `KAPSO_WEBHOOK_SECRET`, lalu memperbarui
  * `whatsapp_last_inbound_at` hanya untuk pesan inbound (`whatsapp.message.received`).
  */
+/** Batas ukuran body webhook Kapso (128 KB) dan jumlah nomor per payload (BS-P2-07). */
+export const MAX_KAPSO_WEBHOOK_BYTES = 128 * 1024
+export const MAX_KAPSO_WEBHOOK_PHONES = 50
+
 export async function whatsappWebhookRoutes(app: FastifyInstance, opts: NotificationRoutesOptions = {}) {
   const getDb = async (): Promise<GuardDb> => opts.db ?? ((await import('../index.js')).supabase as unknown as GuardDb)
   const env = opts.env ?? process.env
   const now = opts.now ?? (() => new Date())
 
-  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) => {
+  app.addContentTypeParser('application/json', { parseAs: 'buffer', bodyLimit: MAX_KAPSO_WEBHOOK_BYTES }, (_req, body, done) => {
     const raw = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''), 'utf8')
     done(null, { raw })
   })
-  app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, body, done) => {
+  app.addContentTypeParser('*', { parseAs: 'buffer', bodyLimit: MAX_KAPSO_WEBHOOK_BYTES }, (_req, body, done) => {
     const raw = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''), 'utf8')
     done(null, { raw })
   })
@@ -221,6 +225,9 @@ export async function whatsappWebhookRoutes(app: FastifyInstance, opts: Notifica
       return reply.status(503).send({ error: 'KAPSO_WEBHOOK_SECRET not configured' })
     }
     const rawBuf = (request.body as { raw?: Buffer } | undefined)?.raw
+    if (Buffer.isBuffer(rawBuf) && rawBuf.length > MAX_KAPSO_WEBHOOK_BYTES) {
+      return reply.status(413).send({ error: 'Webhook payload too large', code: 'payload_too_large' })
+    }
     if (!Buffer.isBuffer(rawBuf) || !verifyKapsoWebhookRequest(rawBuf, request.headers as Record<string, unknown>, secret)) {
       return reply.status(401).send({ error: 'Invalid webhook signature' })
     }
@@ -234,7 +241,7 @@ export async function whatsappWebhookRoutes(app: FastifyInstance, opts: Notifica
       }
     }
 
-    const phones = extractInboundWebhookPhones(payload, request.headers['x-webhook-event'])
+    const phones = extractInboundWebhookPhones(payload, request.headers['x-webhook-event']).slice(0, MAX_KAPSO_WEBHOOK_PHONES)
     const db = await getDb()
     let updated = 0
     for (const phone of phones) {

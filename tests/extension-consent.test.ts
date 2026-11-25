@@ -330,13 +330,26 @@ test('extension-consent: LinkedIn (manual saja) ditolak 409 manual_only', async 
   assert.equal(queueOf(store).length, 0)
 })
 
-test('extension-consent: worker sudah selesai dengan auth_required, belum terkirim: dialihkan ke ekstensi', async () => {
+test('extension-consent: host tak didukung ekstensi (JOB_UNKNOWN) dan email_direct ditolak 409 not_extension_channel (J5-02)', async () => {
+  for (const job_id of [JOB_UNKNOWN, JOB_EMAIL]) {
+    const { store, app } = await build({
+      approval_requests: [approval({ status: 'approved', job_id, apply_channel: 'worker' })],
+    })
+    const res = await consent(app, { always: true })
+    assert.equal(res.statusCode, 409, job_id)
+    assert.equal(res.json().code, 'not_extension_channel', job_id)
+    assert.equal(queueOf(store).length, 0, job_id)
+    assert.equal(store.tables.user_automation_settings.length, 0, job_id)
+  }
+})
+
+test('extension-consent: worker pada ATS dikenal (JOB_ATS) berhenti auth_required, belum terkirim: dialihkan ke ekstensi', async () => {
   const { store, app } = await build({
-    approval_requests: [approval({ status: 'approved', job_id: JOB_UNKNOWN, apply_channel: 'worker' })],
+    approval_requests: [approval({ status: 'approved', job_id: JOB_ATS, apply_channel: 'worker' })],
     automation_queue: [
       {
         id: 'q-old', user_id: USER_ID, job_type: 'apply', status: 'completed',
-        payload: { approval_request_id: APPROVAL, job_id: JOB_UNKNOWN },
+        payload: { approval_request_id: APPROVAL, job_id: JOB_ATS },
         result: { status: 'blocked', reason: 'auth_required' },
       },
     ],
@@ -352,7 +365,7 @@ test('extension-consent: worker sudah selesai dengan auth_required, belum terkir
 
 test('extension-consent: kanal approval dikembalikan bila antre gagal (tidak terkunci di kanal ekstensi)', async () => {
   const { store, app } = await build(
-    { approval_requests: [approval({ status: 'approved', job_id: JOB_UNKNOWN, apply_channel: 'worker' })] },
+    { approval_requests: [approval({ status: 'approved', job_id: JOB_ATS, apply_channel: 'worker' })] },
     { failTables: { automation_queue: { code: 'XX000', message: 'boom' } } }
   )
   const res = await consent(app, {})
