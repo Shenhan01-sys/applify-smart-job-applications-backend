@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { isPublicHttpUrl } from './apply-channel.js'
+import { isPublicHttpUrl, isSocialPostUrl } from './apply-channel.js'
 import { isValidApplyEmail } from './email-address.js'
 import {
   MAX_OFF_PORTAL_ROLES,
@@ -178,7 +178,9 @@ export async function savePrivateOffPortalJobs(
     const company =
       (typeof raw.company === 'string' && raw.company.trim() ? raw.company.trim() : 'Perusahaan (Off-Portal)').slice(0, 200)
     const location = (typeof raw.location === 'string' && raw.location.trim() ? raw.location.trim() : 'Indonesia').slice(0, 120)
-    const applyUrl = typeof raw.applyUrl === 'string' && isPublicHttpUrl(raw.applyUrl) ? raw.applyUrl.trim() : null
+    // Tautan postingan Instagram/X/Facebook/dst. bukan tautan lamaran, walau klien lama masih mengirimnya.
+    const applyUrl =
+      typeof raw.applyUrl === 'string' && isPublicHttpUrl(raw.applyUrl) && !isSocialPostUrl(raw.applyUrl) ? raw.applyUrl.trim() : null
     const whatsappUrl = typeof raw.whatsappUrl === 'string' && isPublicHttpUrl(raw.whatsappUrl) ? raw.whatsappUrl.trim() : null
     const applyEmail = typeof raw.applyEmail === 'string' && isValidApplyEmail(raw.applyEmail.trim()) ? raw.applyEmail.trim() : null
     const rawDesc = typeof raw.description === 'string' ? raw.description.trim().slice(0, MAX_OFF_PORTAL_TEXT_CHARS) : ''

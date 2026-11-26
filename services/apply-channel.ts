@@ -199,6 +199,40 @@ export function isLinkedInUrl(rawUrl: unknown): boolean {
   return isLinkedInHost(new URL(safe).hostname)
 }
 
+export type SocialPostPlatform = 'instagram' | 'x' | 'facebook' | 'threads' | 'tiktok' | 'linkedin_post'
+
+export const SOCIAL_POST_PLATFORM_LABELS: Record<SocialPostPlatform, string> = {
+  instagram: 'Instagram',
+  x: 'X (Twitter)',
+  facebook: 'Facebook',
+  threads: 'Threads',
+  tiktok: 'TikTok',
+  linkedin_post: 'LinkedIn',
+}
+
+/**
+ * Tautan ke postingan atau profil media sosial (Instagram, X/Twitter, Facebook, Threads, TikTok, postingan LinkedIn).
+ * Server tidak bisa membaca isinya karena platform-platform ini meminta login, dan tautan seperti ini bukan
+ * tautan lamaran. Halaman lowongan LinkedIn (`/jobs`, `/company/.../jobs`) bukan termasuk, tetapi tetap manual-only.
+ */
+export function detectSocialPostPlatform(rawUrl: unknown): SocialPostPlatform | null {
+  const safe = sanitizeHttpUrl(rawUrl)
+  if (!safe) return null
+  const u = new URL(safe)
+  const host = u.hostname
+  if (hostMatchesDomain(host, ['instagram.com', 'instagr.am'])) return 'instagram'
+  if (hostMatchesDomain(host, ['x.com', 'twitter.com'])) return 'x'
+  if (hostMatchesDomain(host, ['facebook.com', 'fb.com', 'fb.me', 'fb.watch'])) return 'facebook'
+  if (hostMatchesDomain(host, ['threads.net', 'threads.com'])) return 'threads'
+  if (hostMatchesDomain(host, ['tiktok.com'])) return 'tiktok'
+  if (isLinkedInHost(host) && /^\/(?:posts|feed\/update|pulse|embed\/feed)(?:\/|$)/i.test(u.pathname)) return 'linkedin_post'
+  return null
+}
+
+export function isSocialPostUrl(rawUrl: unknown): boolean {
+  return detectSocialPostPlatform(rawUrl) !== null
+}
+
 export function isPublicAtsUrl(rawUrl: unknown): boolean {
   const safe = sanitizeHttpUrl(rawUrl)
   if (!safe) return false

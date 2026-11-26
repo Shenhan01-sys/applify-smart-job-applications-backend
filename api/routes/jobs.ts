@@ -263,6 +263,8 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
         acceptedUrls: [],
         rejectedUrls: [...new Set(extraRejectedUrls)],
         jobs: [],
+        socialPosts: [],
+        needsCaption: false,
         ocr: ocrMeta,
         qr: qrMeta,
         warnings,
@@ -286,7 +288,7 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
       rejectedUrls: [...new Set([...parsed.rejectedUrls, ...extraRejectedUrls])],
       ocr: ocrMeta,
       qr: qrMeta,
-      warnings,
+      warnings: [...warnings, ...parsed.warnings],
     }
   })
 
