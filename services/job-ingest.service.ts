@@ -131,6 +131,7 @@ type Existing = {
   description?: string | null
   requirements?: unknown
   salary_min?: number | null
+  visibility?: string | null
 }
 
 /**
@@ -161,18 +162,37 @@ export async function ingestJobs(supabase: SupabaseClient, jobs: RankedJob[]): P
   const summary: IngestSummary = { attempted: jobs.length, inserted: 0, duplicates: 0, failed: 0, backfilled: 0, enriched: 0, errors: [], byPlatform: {} }
   const flags: Flags = { extras: true, score: true, detail: true }
   let level = 0
+  let hasVisibility = true
 
   const lookup = async (url: string): Promise<Existing[]> => {
     for (;;) {
-      const { data, error } = await supabase.from('jobs').select(LOOKUP_COLS[level]).eq('external_url', url).limit(1)
-      if (error && level < LOOKUP_COLS.length - 1 && COLUMN_ERROR.test(error.message ?? '')) {
-        // Skema live tanpa kolom itu: turun tingkat; duplikat tetap terdeteksi lewat id saja.
-        level++
-        if (level >= 1) flags.detail = false
-        if (level >= 2) flags.score = false
-        continue
+      const cols = hasVisibility ? `${LOOKUP_COLS[level]}, visibility` : LOOKUP_COLS[level]
+      const { data, error } = await supabase
+        .from('jobs')
+        .select(cols)
+        .eq('external_url', url)
+        .limit(hasVisibility ? 10 : 1)
+      if (error && COLUMN_ERROR.test(error.message ?? '')) {
+        if (hasVisibility && /visibility/i.test(error.message ?? '')) {
+          // Skema pra-migrasi tanpa kolom visibility: jatuh ke kueri tanpa kolom itu.
+          hasVisibility = false
+          continue
+        }
+        if (level < LOOKUP_COLS.length - 1) {
+          // Skema live tanpa kolom itu: turun tingkat; duplikat tetap terdeteksi lewat id saja.
+          level++
+          if (level >= 1) flags.detail = false
+          if (level >= 2) flags.score = false
+          continue
+        }
+        if (hasVisibility) {
+          hasVisibility = false
+          continue
+        }
       }
-      return (data ?? []) as unknown as Existing[]
+      const rows = (data ?? []) as unknown as Existing[]
+      // Ingesti publik tidak pernah mencocokkan atau menimpa baris lowongan privat milik pengguna.
+      return rows.filter((r) => r.visibility !== 'private')
     }
   }
 

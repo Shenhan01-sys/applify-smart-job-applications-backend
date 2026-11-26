@@ -1,4 +1,5 @@
 import { isValidApplyEmail } from './email-address.js'
+import { isJobAccessibleToUser, selectJobWithVisibility } from './private-job-access.js'
 
 /**
  * Klasifikasi kanal lamaran untuk satu lowongan (`jobs` row).
@@ -433,15 +434,22 @@ export function approvalDispatchTarget(c: ChannelClassification | null | undefin
 
 export async function resolveApplyChannel(
   db: { from(table: string): any },
-  jobId: string
+  jobId: string,
+  opts?: { userId?: string }
 ): Promise<ChannelClassification | null> {
-  const { data: job, error } = await db
-    .from('jobs')
-    .select('id, platform_source, title, company, external_url, description')
-    .eq('id', jobId)
-    .maybeSingle()
+  const { data: job, error } = await selectJobWithVisibility(
+    db,
+    jobId,
+    'id, platform_source, title, company, external_url, description'
+  )
 
-  if (error) throw new Error(`channel lookup failed: ${error.message}`)
+  if (error) {
+    if (error.code === '22P02') return null
+    throw new Error(`channel lookup failed: ${error.message}`)
+  }
   if (!job) return null
+  if (opts?.userId !== undefined && !isJobAccessibleToUser(job, opts.userId)) {
+    return null
+  }
   return classifyJobChannel(job)
 }

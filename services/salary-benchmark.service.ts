@@ -1,4 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import {
+  isJobAccessibleToUser,
+  isMissingVisibilityColumnError,
+  selectJobWithVisibility,
+} from './private-job-access.js'
 
 /**
  * Salary Benchmark — pembanding gaji untuk satu lowongan, dihitung dari lowongan aktif lain di tabel `jobs`
@@ -71,14 +76,21 @@ const cityOf = (location: unknown): string | null => {
 
 const round = (n: number) => Math.round(n)
 
-/** null bila lowongan tidak ada. Galat DB dilempar ke pemanggil (rute menjawab 500). */
-export async function salaryBenchmark(db: SupabaseClient, jobId: string): Promise<SalaryBenchmark | null> {
-  const { data: job, error: jobErr } = await db.from('jobs').select('id, title, location').eq('id', jobId).maybeSingle()
+/** null bila lowongan tidak ada atau lowongan privat milik pengguna lain. Galat DB dilempar ke pemanggil (rute menjawab 500). */
+export async function salaryBenchmark(
+  db: SupabaseClient,
+  jobId: string,
+  opts?: { userId?: string }
+): Promise<SalaryBenchmark | null> {
+  const { data: job, error: jobErr } = await selectJobWithVisibility(db, jobId, 'id, title, location')
   if (jobErr) {
     if (jobErr.code === '22P02') return null
     throw new Error(jobErr.message)
   }
   if (!job) return null
+  if (opts?.userId !== undefined && !isJobAccessibleToUser(job, opts.userId)) {
+    return null
+  }
 
   const keywords = titleKeywords(job.title)
   const city = cityOf(job.location)
@@ -88,16 +100,25 @@ export async function salaryBenchmark(db: SupabaseClient, jobId: string): Promis
   }
   if (keywords.length === 0) return empty
 
-  const { data, error } = await db
-    .from('jobs')
-    .select('id, title, location, salary_min, salary_max, salary_currency, salary_period, external_url, platform_source')
-    .eq('status', 'active')
-    .gt('salary_min', 0)
-    .or('salary_currency.eq.IDR,salary_currency.is.null')
-    .or('salary_period.eq.month,salary_period.is.null')
-    .or(keywords.map((k) => `title.ilike.%${k}%`).join(','))
-    .limit(QUERY_LIMIT)
+  const basePeerCols = 'id, title, location, salary_min, salary_max, salary_currency, salary_period, external_url, platform_source'
+  const queryPeers = (cols: string) =>
+    db
+      .from('jobs')
+      .select(cols)
+      .eq('status', 'active')
+      .gt('salary_min', 0)
+      .or('salary_currency.eq.IDR,salary_currency.is.null')
+      .or('salary_period.eq.month,salary_period.is.null')
+      .or(keywords.map((k) => `title.ilike.%${k}%`).join(','))
+      .limit(QUERY_LIMIT)
+
+  let peerRes = await queryPeers(`${basePeerCols}, visibility, created_by`)
+  if (peerRes.error && isMissingVisibilityColumnError(peerRes.error)) {
+    peerRes = await queryPeers(basePeerCols)
+  }
+  const { data: rawPeers, error } = peerRes
   if (error) throw new Error(error.message)
+  const data = (rawPeers ?? []).filter((r: any) => isJobAccessibleToUser(r, opts?.userId))
 
   type Cand = { mid: number; hits: number; city: string | null }
   const cands: Cand[] = []

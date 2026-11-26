@@ -35,6 +35,7 @@ export interface DetailResult {
 }
 
 import { verifyPublicUrlDns, type DnsLookupFn } from './public-url-dns.service.js'
+import { isJobAccessibleToUser } from './private-job-access.js'
 
 export interface FetchDetailOptions {
   timeoutMs?: number
@@ -536,6 +537,8 @@ export interface EnrichDeps {
   now?: () => Date
   timeoutMs?: number
   maxBytes?: number
+  /** Pemilik sesi pemanggil: bila diberikan, lowongan privat milik pengguna lain ditolak sebagai not_found (404). */
+  userId?: string
 }
 
 export interface EnrichResult {
@@ -577,6 +580,9 @@ export async function enrichJob(db: SupabaseClient, jobId: string, deps: EnrichD
     return fail('error', R.readFailed)
   }
   if (!row) return fail('not_found', R.jobNotFound)
+  if (deps.userId !== undefined && !isJobAccessibleToUser(row, deps.userId)) {
+    return fail('not_found', R.jobNotFound)
+  }
 
   const unchanged = (reason: string): EnrichResult => ({ job: row, enriched: false, reason, status: 'ok' })
   if (row.status === CLOSED_JOB_STATUS) return unchanged(R.closed)

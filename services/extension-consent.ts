@@ -144,8 +144,8 @@ async function runConsent(
     const verdict = decideExtensionConsent(facts)
     if ('error' in verdict) return { status: verdict.status, body: { error: verdict.error, code: verdict.code } }
 
-    // LinkedIn tidak pernah dikerjakan ekstensi (manual saja). Lowongan yang hilang tidak bisa diisi.
-    const classified = await resolveApplyChannel(db, String(facts.approval?.job_id))
+    // LinkedIn tidak pernah dikerjakan ekstensi (manual saja). Lowongan yang hilang atau privat milik pengguna lain ditolak.
+    const classified = await resolveApplyChannel(db, String(facts.approval?.job_id), { userId })
     if (!classified) return { status: 422, body: { error: 'Lowongan tidak ditemukan', code: 'job_not_found' } }
     if (classified.manualOnly) {
       return { status: 409, body: { error: 'Lowongan ini hanya bisa dilamar manual', code: 'manual_only' } }
