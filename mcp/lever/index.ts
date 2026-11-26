@@ -1,4 +1,5 @@
 import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
+import { getOrFetchBoardPayload } from '../shared/board-cache.js'
 import { guessExperienceLevel, htmlToText, matchesKeywords, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
 
 /**
@@ -48,7 +49,9 @@ export class LeverMCPClient extends BaseMCPClient {
     const { company, keywords } = params
     if (!company) return { success: false, error: 'lever: parameter company (slug papan) wajib diisi' }
     try {
-      const data = await this.fetch(`${this.baseUrl}/${encodeURIComponent(company)}?mode=json`)
+      const data = await getOrFetchBoardPayload(`lever:${company}`, () =>
+        this.fetch(`${this.baseUrl}/${encodeURIComponent(company)}?mode=json`)
+      )
       const jobs = (Array.isArray(data) ? data : [])
         .map((j: any) => normalizeLeverPosting(j, company))
         .filter((j: JobPosting | null): j is JobPosting => !!j && matchesKeywords(j, keywords))

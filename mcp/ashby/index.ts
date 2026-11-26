@@ -1,4 +1,5 @@
 import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
+import { getOrFetchBoardPayload } from '../shared/board-cache.js'
 import { guessExperienceLevel, htmlToText, matchesKeywords, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
 
 /**
@@ -67,7 +68,9 @@ export class AshbyMCPClient extends BaseMCPClient {
     const { company, keywords } = params
     if (!company) return { success: false, error: 'ashby: parameter company (slug papan) wajib diisi' }
     try {
-      const data = await this.fetch(`${this.baseUrl}/${encodeURIComponent(company)}?includeCompensation=true`)
+      const data = await getOrFetchBoardPayload(`ashby:${company}`, () =>
+        this.fetch(`${this.baseUrl}/${encodeURIComponent(company)}?includeCompensation=true`)
+      )
       const jobs = (Array.isArray(data?.jobs) ? data.jobs : [])
         .map((j: any) => normalizeAshbyJob(j, company))
         .filter((j: JobPosting | null): j is JobPosting => !!j && matchesKeywords(j, keywords))

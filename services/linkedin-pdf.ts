@@ -16,6 +16,8 @@ export const PDF_MIN_TEXT_CHARS = 80
  * Hanya dipakai bila halaman lain di berkas yang sama punya teks; PDF yang seluruhnya tipis tetap lewat PDF_MIN_TEXT_CHARS.
  */
 export const PDF_MIN_PAGE_CHARS = 20
+export const OCR_NOT_CONFIGURED_MESSAGE =
+  'PDF ini berupa gambar, tetapi layanan pembaca teks gambar (OCR) belum diaktifkan di server ini. Unduh ulang CV dari Canva sebagai PDF Standar tanpa opsi Ratakan PDF, atau isi profil secara manual.'
 export const OCR_UNAVAILABLE_MESSAGE =
   'PDF ini berupa gambar, dan pembaca teks gambar (OCR) sedang tidak tersedia. Coba lagi beberapa menit lagi. Bila tetap gagal, unduh ulang CV dari Canva sebagai PDF Standar tanpa opsi Ratakan PDF.'
 export const PDF_NO_TEXT_MESSAGE =
@@ -47,18 +49,36 @@ export class LinkedInImportError extends Error {
 /** Berkas harus berupa PDF sungguhan: tidak kosong, di bawah batas ukuran, dan diawali penanda `%PDF`. */
 export function assertPdfUpload(body: unknown): Buffer {
   if (!Buffer.isBuffer(body)) {
-    throw new LinkedInImportError(400, 'not_pdf', 'Unggah berkas PDF dari LinkedIn (Simpan ke PDF).')
+    throw new LinkedInImportError(400, 'not_pdf', 'Unggah berkas PDF (CV standar atau simpan dari LinkedIn).')
   }
   if (body.length === 0) {
-    throw new LinkedInImportError(400, 'empty_file', 'Berkas kosong. Pilih PDF yang diunduh dari LinkedIn.')
+    throw new LinkedInImportError(400, 'empty_file', 'Berkas kosong. Pilih berkas PDF yang valid.')
   }
   if (body.length > PDF_MAX_BYTES) {
-    throw new LinkedInImportError(413, 'file_too_large', 'Ukuran PDF terlalu besar, maksimal 5 MB.')
+    throw new LinkedInImportError(413, 'file_too_large', 'Ukuran PDF terlalu besar, maksimal 5 MB. Kompres PDF atau ekspor ulang dengan ukuran lebih kecil.')
   }
   if (body.subarray(0, 4).toString('latin1') !== '%PDF') {
-    throw new LinkedInImportError(400, 'not_pdf', 'Berkas ini bukan PDF. Unggah PDF yang diunduh dari LinkedIn (Simpan ke PDF).')
+    throw new LinkedInImportError(400, 'not_pdf', 'Berkas ini bukan PDF. Unggah berkas PDF yang valid.')
   }
   return body
+}
+
+/**
+ * Deteksi teks sampah hasil CIDFont / tabel ToUnicode rusak (48.1 BS-U1-03):
+ * panjang non-spasi bisa >= 80 karakter tetapi isinya didominasi karakter pengganti (\uFFFD), area privat Unicode,
+ * atau simbol acak tanpa kata terbaca. Mengembalikan true agar layanan otomatis jatuh ke OCR.
+ */
+export function isGarbledPdfText(pages: readonly string[]): boolean {
+  const joined = pages.join('\n')
+  const nonWs = joined.replace(/\s+/g, '')
+  if (nonWs.length < PDF_MIN_TEXT_CHARS) return false
+  const badGlyphs = (nonWs.match(/[\uFFFD\uE000-\uF8FF\u0000-\u0008\u000B\u000C\u000E-\u001F]/g) ?? []).length
+  if (badGlyphs / nonWs.length >= 0.15) return true
+  const alnum = meaningfulChars(nonWs)
+  if (alnum / nonWs.length < 0.35) return true
+  const words = joined.match(/\p{L}{3,}/gu) ?? []
+  if (nonWs.length >= 120 && words.length < 5) return true
+  return false
 }
 
 /** Jumlah huruf dan angka (tanpa spasi dan tanda baca) dalam teks satu halaman. */
@@ -109,7 +129,7 @@ async function readPages(buffer: Buffer): Promise<string[]> {
     const { text } = await extractText(pdf, { mergePages: false })
     const pages = Array.isArray(text) ? text : [String(text ?? '')]
     const chars = pages.join('').replace(/\s+/g, '').length
-    if (chars < PDF_MIN_TEXT_CHARS) {
+    if (chars < PDF_MIN_TEXT_CHARS || isGarbledPdfText(pages)) {
       throw new LinkedInImportError(422, 'pdf_no_text', PDF_NO_TEXT_MESSAGE)
     }
     return pages

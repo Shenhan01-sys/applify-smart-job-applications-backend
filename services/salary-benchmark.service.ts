@@ -69,9 +69,46 @@ const midpoint = (r: { salary_min?: any; salary_max?: any }) => {
   return Number.isFinite(lo) && Number.isFinite(hi) ? (lo + hi) / 2 : NaN
 }
 
-const cityOf = (location: unknown): string | null => {
-  const c = String(location ?? '').split(',')[0].trim().toLowerCase()
-  return c || null
+const CITY_NORMALIZE_MAP: Record<string, string> = {
+  'jakarta selatan': 'jakarta',
+  'jakarta pusat': 'jakarta',
+  'jakarta barat': 'jakarta',
+  'jakarta timur': 'jakarta',
+  'jakarta utara': 'jakarta',
+  'dki jakarta': 'jakarta',
+  'south jakarta': 'jakarta',
+  'central jakarta': 'jakarta',
+  'west jakarta': 'jakarta',
+  'east jakarta': 'jakarta',
+  'north jakarta': 'jakarta',
+  jaksel: 'jakarta',
+  jakpus: 'jakarta',
+  jakbar: 'jakarta',
+  jaktim: 'jakarta',
+  jakut: 'jakarta',
+  jogja: 'yogyakarta',
+  yogya: 'yogyakarta',
+  'di yogyakarta': 'yogyakarta',
+  'daerah istimewa yogyakarta': 'yogyakarta',
+  sleman: 'yogyakarta',
+  bantul: 'yogyakarta',
+  sby: 'surabaya',
+  bdg: 'bandung',
+  smg: 'semarang',
+  solo: 'surakarta',
+}
+
+/** Segmen kota pertama apa adanya (lowercase) untuk tampilan `city`. */
+export const cityOf = (location: unknown): string | null => {
+  const raw = String(location ?? '').split(',')[0].trim().toLowerCase().replace(/\s+/g, ' ')
+  return raw || null
+}
+
+/** Normalisasi alias kota agar "Jakarta Selatan" / "Jaksel" cocok dengan "Jakarta" untuk hitungan `same_city_*` (47.3 P3-02). */
+export const cityAliasOf = (location: unknown): string | null => {
+  const raw = cityOf(location)
+  if (!raw) return null
+  return CITY_NORMALIZE_MAP[raw] ?? raw
 }
 
 const round = (n: number) => Math.round(n)
@@ -94,6 +131,7 @@ export async function salaryBenchmark(
 
   const keywords = titleKeywords(job.title)
   const city = cityOf(job.location)
+  const cityKey = cityAliasOf(job.location)
   const empty: SalaryBenchmark = {
     n: 0, p25: null, median: null, p75: null, currency: 'IDR', period: 'month', keywords,
     sufficient: false, city, same_city_n: 0, same_city_median: null,
@@ -129,7 +167,7 @@ export async function salaryBenchmark(
   if (error) throw new Error(error.message)
   const data = (rawPeers ?? []).filter((r: any) => isJobAccessibleToUser(r, opts?.userId))
 
-  type Cand = { mid: number; hits: number; city: string | null }
+  type Cand = { mid: number; hits: number; cityKey: string | null }
   const cands: Cand[] = []
   for (const r of (data ?? []) as any[]) {
     if (r.id === jobId) continue
@@ -146,13 +184,13 @@ export async function salaryBenchmark(
     const t = String(r.title ?? '').toLowerCase()
     const hits = keywords.filter((k) => t.includes(k)).length
     if (hits === 0) continue
-    cands.push({ mid, hits, city: cityOf(r.location) })
+    cands.push({ mid, hits, cityKey: cityAliasOf(r.location) })
   }
 
   const strong = cands.filter((c) => c.hits >= 2)
   const used = strong.length >= MIN_SAMPLE ? strong : cands
   const sorted = used.map((c) => c.mid).sort((a, b) => a - b)
-  const local = used.filter((c) => city !== null && c.city === city).map((c) => c.mid).sort((a, b) => a - b)
+  const local = used.filter((c) => cityKey !== null && c.cityKey === cityKey).map((c) => c.mid).sort((a, b) => a - b)
 
   return {
     ...empty,

@@ -202,7 +202,8 @@ export function mergeProfileIntoSettings(
  */
 // The AI question can wait on a whole model chain (Numes, Gemini, OpenRouter free models, Groq, then Anthropic last). Creating the approval
 // must not hang on it: after this long the answer is left as "no data, check it yourself".
-const AI_ANSWER_TIMEOUT_MS = Number(process.env.APPROVAL_ANSWER_TIMEOUT_MS || 25_000)
+const rawAnswerTimeout = Number(process.env.APPROVAL_ANSWER_TIMEOUT_MS)
+const AI_ANSWER_TIMEOUT_MS = Number.isFinite(rawAnswerTimeout) && rawAnswerTimeout > 0 ? rawAnswerTimeout : 25_000
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>

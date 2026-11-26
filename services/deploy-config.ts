@@ -86,5 +86,9 @@ export function deployConfigWarnings(env: Env = process.env): string[] {
     }
   }
 
+  if ((env.NOTIFICATIONS_ENABLED ?? '').trim().toLowerCase() === 'true' && !(env.INTERNAL_NOTIFY_SECRET ?? '').trim()) {
+    warnings.push('NOTIFICATIONS_ENABLED=true tetapi INTERNAL_NOTIFY_SECRET belum diisi. Permintaan notifikasi internal dari worker akan ditolak.')
+  }
+
   return warnings
 }

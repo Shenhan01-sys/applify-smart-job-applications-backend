@@ -1,4 +1,5 @@
 import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
+import { getOrFetchBoardPayload } from '../shared/board-cache.js'
 import { guessExperienceLevel, htmlToText, matchesKeywords, normalizeJobType, normalizeWorkType } from '../shared/utils.js'
 
 /**
@@ -44,7 +45,9 @@ export class WorkableMCPClient extends BaseMCPClient {
     const { company, keywords } = params
     if (!company) return { success: false, error: 'workable: parameter company (slug papan) wajib diisi' }
     try {
-      const data = await this.fetch(`${this.baseUrl}/widget/accounts/${encodeURIComponent(company)}?details=true`)
+      const data = await getOrFetchBoardPayload(`workable:${company}`, () =>
+        this.fetch(`${this.baseUrl}/widget/accounts/${encodeURIComponent(company)}?details=true`)
+      )
       const jobs = (Array.isArray(data?.jobs) ? data.jobs : [])
         .map((j: any) => normalizeWorkableJob(j, company, data?.name))
         .filter((j: JobPosting | null): j is JobPosting => !!j && matchesKeywords(j, keywords))

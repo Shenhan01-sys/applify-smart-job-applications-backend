@@ -43,7 +43,8 @@ export interface AggregateParams {
 
 export const MAX_PAGES = 5
 /** Jeda antarhalaman pada sumber yang sama (ms). Diubah lewat env supaya tes tidak menunggu. */
-const PAGE_DELAY_MS = Number(process.env.SEARCH_PAGE_DELAY_MS ?? 800)
+const rawPageDelay = Number(process.env.SEARCH_PAGE_DELAY_MS)
+const PAGE_DELAY_MS = Number.isFinite(rawPageDelay) && rawPageDelay >= 0 ? rawPageDelay : 800
 const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, ms)) : Promise.resolve())
 
 export interface RankedJob extends JobPosting {

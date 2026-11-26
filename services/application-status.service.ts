@@ -34,15 +34,34 @@ const HEADLINE: Record<ApplicationStatus, string> = {
 export const escapeHtml = (s: unknown): string =>
   String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
+/**
+ * U5-P1-02: Satu `TELEGRAM_CHAT_ID` operator berisiko mengumpulkan judul/perusahaan lamaran lintas pengguna.
+ * Di produksi, metadata lamaran pada pesan Telegram disamarkan secara default kecuali `TELEGRAM_INCLUDE_JOB_METADATA=true`,
+ * atau bisa dipaksa samarkan di lingkungan mana pun dengan `TELEGRAM_REDACT_JOB_METADATA=true`.
+ * Kanal pribadi pengguna (WhatsApp/Email terautentik) tetap menerima judul dan perusahaan lengkap.
+ */
+export function shouldRedactTelegramMetadata(env: Record<string, string | undefined> = process.env): boolean {
+  const forceRedact = (env.TELEGRAM_REDACT_JOB_METADATA ?? '').trim().toLowerCase()
+  if (forceRedact === 'true' || forceRedact === '1') return true
+  if (forceRedact === 'false' || forceRedact === '0') return false
+  const include = (env.TELEGRAM_INCLUDE_JOB_METADATA ?? '').trim().toLowerCase()
+  if (include === 'true' || include === '1') return false
+  return (env.NODE_ENV ?? '').trim().toLowerCase() === 'production'
+}
+
 export function statusMessage(p: {
   status: ApplicationStatus
   title?: string | null
   company?: string | null
   followUpAt?: string | null
+  /** True menyamarkan judul lowongan & nama perusahaan pada chat Telegram operator bersama (U5-P1-02). */
+  redactMetadata?: boolean
 }): string {
   const lines = [
     `📌 <b>Applify</b> status lamaran: <b>${escapeHtml(HEADLINE[p.status])}</b>`,
-    `Lowongan: ${escapeHtml(p.title ?? '?')} @ ${escapeHtml(p.company ?? '?')}`,
+    p.redactMetadata
+      ? 'Lowongan: [disamarkan — lihat halaman Lamaran di Applify]'
+      : `Lowongan: ${escapeHtml(p.title ?? '?')} @ ${escapeHtml(p.company ?? '?')}`,
   ]
   if (p.status === 'submitted' && p.followUpAt) {
     lines.push(`Pengingat follow-up: ${escapeHtml(p.followUpAt.slice(0, 10))} (follow-up dikirim manual oleh kamu)`)
@@ -117,7 +136,13 @@ export async function notifyApplicationStatus(
     ? await db.from('jobs').select('title, company').eq('id', app.job_id).maybeSingle()
     : { data: null }
 
-  const htmlMsg = statusMessage({ status, title: job?.title, company: job?.company, followUpAt: app.follow_up_scheduled })
+  const htmlMsg = statusMessage({
+    status,
+    title: job?.title,
+    company: job?.company,
+    followUpAt: app.follow_up_scheduled,
+    redactMetadata: shouldRedactTelegramMetadata(),
+  })
   const res = opts?.skipTelegram ? { ok: false, error: 'skipped' } : await notifier.sendTelegram(htmlMsg)
 
   let userChannels: string[] = []
