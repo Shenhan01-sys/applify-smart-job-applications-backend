@@ -16,7 +16,9 @@ import { requireSessionKey, sessionKeyProblem, SessionKeyConfigError } from './s
 
 export const EXTENSION_TOKEN_PREFIX = 'ext_tok_v1.'
 export const EXTENSION_SCOPE = 'extension:apply' as const
-export const DEFAULT_EXTENSION_TTL_SEC = 4 * 60 * 60 // 4 jam
+// Keputusan Hans 26 Nov 2026: bawaan UAT 8 jam (sama dengan batas maksimum), supaya responden tidak perlu
+// menghubungkan ulang di tengah sesi uji.
+export const DEFAULT_EXTENSION_TTL_SEC = 8 * 60 * 60 // 8 jam
 export const MIN_EXTENSION_TTL_SEC = 60
 export const MAX_EXTENSION_TTL_SEC = 8 * 60 * 60 // 8 jam
 

@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   createExtensionToken,
+  DEFAULT_EXTENSION_TTL_SEC,
+  MAX_EXTENSION_TTL_SEC,
   EXTENSION_SCOPE,
   ExtensionTokenConfigError,
   isExtensionOriginAllowed,
@@ -29,6 +31,27 @@ test('createExtensionToken & verifyExtensionToken: menerbitkan token bertanda ta
 
   const expired = verifyExtensionToken(issued.token, { now: new Date('2026-11-23T13:00:01Z'), env: VALID_ENV })
   assert.deepEqual(expired, { ok: false, reason: 'expired' })
+})
+
+test('TTL token ekstensi UAT: bawaan 8 jam (keputusan Hans 26 Nov), batas maksimum tetap 8 jam, minimum 60 detik', () => {
+  assert.equal(DEFAULT_EXTENSION_TTL_SEC, 8 * 60 * 60)
+  assert.equal(MAX_EXTENSION_TTL_SEC, 8 * 60 * 60)
+  assert.equal(DEFAULT_EXTENSION_TTL_SEC, MAX_EXTENSION_TTL_SEC)
+
+  const t0 = new Date('2026-11-26T00:00:00Z')
+  // Tanpa ttlSec: bawaan 8 jam.
+  const byDefault = createExtensionToken(USER_ID, { now: t0, env: VALID_ENV })
+  assert.equal(byDefault.ttlSeconds, 28_800)
+  assert.equal(byDefault.expiresAt, '2026-11-26T08:00:00.000Z')
+  // Sesudah 7 jam 59 menit masih sah, sesudah 8 jam lewat 1 detik kedaluwarsa.
+  assert.equal(verifyExtensionToken(byDefault.token, { now: new Date('2026-11-26T07:59:00Z'), env: VALID_ENV }).ok, true)
+  assert.deepEqual(verifyExtensionToken(byDefault.token, { now: new Date('2026-11-26T08:00:01Z'), env: VALID_ENV }), {
+    ok: false,
+    reason: 'expired',
+  })
+  // Permintaan lebih dari 8 jam dipotong ke 8 jam; di bawah 1 menit dinaikkan ke 60 detik.
+  assert.equal(createExtensionToken(USER_ID, { ttlSec: 24 * 3600, now: t0, env: VALID_ENV }).ttlSeconds, 28_800)
+  assert.equal(createExtensionToken(USER_ID, { ttlSec: 5, now: t0, env: VALID_ENV }).ttlSeconds, 60)
 })
 
 test('verifyExtensionToken: menolak manipulasi payload atau tanda tangan palsu', () => {
