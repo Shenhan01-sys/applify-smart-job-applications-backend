@@ -256,6 +256,17 @@ export async function approvalRoutes(
       return reply.status(422).send({ error: 'Approval request has no job_id; cannot queue submission' })
     }
 
+    // Lapisan kedua kepemilikan lowongan privat: baris approval_requests bisa dimasukkan klien langsung lewat RLS
+    // ("approval_requests insert pending"), tanpa melewati pemeriksaan di POST /api/approvals. Persetujuan untuk lowongan
+    // privat milik orang lain tidak boleh disetujui, jadi tidak pernah masuk antrean worker atau ekstensi.
+    {
+      const { data: jobRow, error: jobErr } = await selectJobWithVisibility(db, String(requestData.job_id), 'id')
+      if (jobErr) return failServer(request, reply, jobErr)
+      if (jobRow && !isJobAccessibleToUser(jobRow, userId)) {
+        return reply.status(404).send({ error: 'Job not found' })
+      }
+    }
+
     // Cover letter hasil edit pengguna di layar review = versi yang disetujui.
     const body = (request.body ?? {}) as { cover_letter?: unknown }
     const editedCoverLetter =

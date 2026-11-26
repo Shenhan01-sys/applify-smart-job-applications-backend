@@ -121,3 +121,51 @@ describe('Prioritas Tinggi Gelombang 5: POST /api/approvals kepemilikan lowongan
     }
   })
 })
+
+describe('Lapisan kedua: POST /api/approvals/:id/approve menolak persetujuan untuk lowongan privat milik orang lain', () => {
+  function approveDb(jobRow: Record<string, any>) {
+    let approvalWrites = 0
+    const approval = {
+      id: '11111111-1111-4111-8111-111111111111',
+      user_id: 'user-other',
+      job_id: 'job-1',
+      status: 'pending',
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    }
+    return {
+      get approvalWrites() {
+        return approvalWrites
+      },
+      from(table: string) {
+        if (table === 'approval_requests') {
+          const chain: any = {
+            select: () => chain,
+            eq: () => chain,
+            single: async () => ({ data: approval, error: null }),
+            update: () => {
+              approvalWrites++
+              return chain
+            },
+          }
+          return chain
+        }
+        if (table === 'jobs') {
+          return {
+            select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: jobRow, error: null }) }) }),
+          }
+        }
+        return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) }
+      },
+    }
+  }
+
+  it('approval yang disisipkan langsung lewat RLS untuk lowongan privat orang lain: 404 dan baris tidak diubah', async () => {
+    const db = approveDb({ id: 'job-1', visibility: 'private', created_by: 'user-owner' })
+    const app = await buildApp(db, 'user-other')
+    const res = await app.inject({ method: 'POST', url: '/api/approvals/11111111-1111-4111-8111-111111111111/approve', payload: {} })
+    assert.equal(res.statusCode, 404)
+    assert.match(res.body, /Job not found/)
+    assert.equal(db.approvalWrites, 0)
+    await app.close()
+  })
+})
