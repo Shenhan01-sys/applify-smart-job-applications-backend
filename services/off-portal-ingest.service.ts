@@ -22,6 +22,14 @@ import {
   extractRoleTitles,
   splitCaptionLines,
 } from './off-portal-extract.js'
+import {
+  OFF_PORTAL_AI_TIMEOUT_MS,
+  normalizeOffPortalAiOutput,
+  offPortalAiTriggers,
+  withOffPortalAiTimeout,
+  type OffPortalAiCandidate,
+  type OffPortalAiExtractor,
+} from './off-portal-ai.service.js'
 
 /**
  * Parser deterministik pratinjau ingesti lowongan off-portal (link, caption media sosial, teks poster/OCR,
@@ -37,6 +45,8 @@ import {
  *   - Menyertakan deteksi kontak WhatsApp (`wa.me` / `api.whatsapp.com`), formulir eksternal (Google Form/Typeform/Tally),
  *     email HR, klasifikasi kanal, serta laporan anti-scam (`assessJobSafety`).
  *   - Ekstraksi posisi, perusahaan, dan lokasi ada di `off-portal-extract.ts`.
+ *   - `parseOffPortalPosting` murni aturan dan sinkron. `parseOffPortalPostingWithAi` menjalankannya, lalu memanggil cadangan AI
+ *     (`off-portal-ai.service.ts`) hanya bila aturan gagal membaca lowongan. Kandidat bertanda `extraction: 'rules' | 'ai'`.
  */
 
 export type OffPortalSourceType = 'off_portal_link' | 'off_portal_poster' | 'off_portal_caption'
@@ -52,6 +62,9 @@ export interface OffPortalParseInput {
 }
 
 export type OffPortalUnreadField = 'title' | 'company' | 'location'
+/** Bidang yang bisa diisi cadangan AI. */
+export type OffPortalAiField = 'title' | 'company' | 'location' | 'applyUrl' | 'applyEmail'
+export type OffPortalExtraction = 'rules' | 'ai'
 
 export interface ParsedOffPortalJob {
   title: string
@@ -71,6 +84,10 @@ export interface ParsedOffPortalJob {
   unreadFields: OffPortalUnreadField[]
   /** Peringatan khusus lowongan ini, mis. LinkedIn wajib dilamar manual. */
   warnings: string[]
+  /** Sumber kandidat: parser aturan, atau cadangan AI (hanya bila parser aturan gagal membaca lowongan). */
+  extraction: OffPortalExtraction
+  /** Bidang yang diisi AI (kosong bila `extraction` 'rules'). Isinya perlu diperiksa pengguna. */
+  aiFields: OffPortalAiField[]
 }
 
 export interface OffPortalSocialPost {
@@ -98,6 +115,21 @@ export { MAX_OFF_PORTAL_ROLES, extractRoleTitles }
 
 export const LINKEDIN_MANUAL_APPLY_WARNING =
   'Lowongan LinkedIn wajib dilamar manual di LinkedIn. Applify tidak mengisi atau mengirim lamaran di LinkedIn, jadi simpan lowongannya lalu lamar sendiri lewat tautannya.'
+
+const AI_FIELD_LABELS: Record<OffPortalAiField, string> = {
+  title: 'posisi',
+  company: 'perusahaan',
+  location: 'lokasi',
+  applyUrl: 'tautan lamaran',
+  applyEmail: 'email lamaran',
+}
+
+export const OFF_PORTAL_AI_RESULT_WARNING =
+  'Sebagian isi lowongan dibaca dengan bantuan AI karena aturan sederhana tidak menemukannya. Periksa posisi, perusahaan, dan lokasinya sebelum menyimpan.'
+
+function aiJobWarning(fields: readonly OffPortalAiField[]): string {
+  return `Dibaca dengan bantuan AI karena aturan sederhana tidak menemukannya: ${fields.map((f) => AI_FIELD_LABELS[f]).join(', ')}. Periksa sebelum menyimpan.`
+}
 
 export function buildSocialCaptionRequiredMessage(posts: OffPortalSocialPost[]): string {
   const labels = [...new Set(posts.map((p) => p.label))].join(', ')
@@ -152,13 +184,105 @@ export function buildPublicationFingerprint(parts: {
   return crypto.createHash('sha256').update(payload, 'utf8').digest('hex')
 }
 
-export function parseOffPortalPosting(input: OffPortalParseInput, now: Date = new Date()): OffPortalParseResult {
+interface JobBase {
+  sourceType: OffPortalSourceType
+  sourceGroupId: string
+  now: Date
+}
+
+interface JobSpec {
+  title: string
+  company: string
+  location: string
+  locationFound: boolean
+  description: string
+  applyUrl: string | null
+  applyEmail: string | null
+  whatsappUrl: string | null
+  extraction?: OffPortalExtraction
+  aiFields?: OffPortalAiField[]
+}
+
+/** Satu kandidat dari bidang yang sudah ditentukan. Dipakai bersama oleh jalur aturan (satu lowongan, multi-perusahaan) dan cadangan AI. */
+function buildJob(base: JobBase, s: JobSpec): ParsedOffPortalJob {
+  const channel = classifyJobChannel({
+    platform_source: base.sourceType,
+    external_url: s.applyUrl,
+    apply_email: s.applyEmail,
+    description: s.description,
+  })
+  const safety = assessJobSafety(
+    {
+      title: s.title,
+      company: s.company,
+      description: s.description,
+      external_url: s.applyUrl,
+      apply_email: s.applyEmail,
+      posted_at: base.now.toISOString(),
+    },
+    base.now,
+  )
+  const unreadFields: OffPortalUnreadField[] = []
+  if (s.title === OFF_PORTAL_TITLE_PLACEHOLDER) unreadFields.push('title')
+  if (s.company === OFF_PORTAL_COMPANY_PLACEHOLDER) unreadFields.push('company')
+  if (!s.locationFound) unreadFields.push('location')
+  const aiFields = s.aiFields ?? []
+  const warnings: string[] = []
+  if (isLinkedInUrl(s.applyUrl)) warnings.push(LINKEDIN_MANUAL_APPLY_WARNING)
+  if (aiFields.length > 0) warnings.push(aiJobWarning(aiFields))
+  return {
+    title: s.title,
+    company: s.company,
+    location: s.location,
+    description: s.description,
+    sourceType: base.sourceType,
+    sourceGroupId: base.sourceGroupId,
+    publicationFingerprint: buildPublicationFingerprint({
+      title: s.title,
+      company: s.company,
+      applyUrl: s.applyUrl,
+      applyEmail: s.applyEmail,
+      description: s.description,
+    }),
+    applyUrl: s.applyUrl,
+    applyEmail: s.applyEmail,
+    whatsappUrl: s.whatsappUrl,
+    formProvider: detectFormProvider(s.applyUrl),
+    channel,
+    safety,
+    unreadFields,
+    warnings,
+    extraction: s.extraction ?? 'rules',
+    aiFields,
+  }
+}
+
+/** Konteks parser aturan yang dipakai cadangan AI untuk membangun ulang kandidat. Null untuk tempelan multi-perusahaan. */
+interface AiMergeContext {
+  rawText: string
+  base: JobBase
+  description: string
+  company: string
+  location: string
+  locationFound: boolean
+  applyUrl: string | null
+  applyEmail: string | null
+  whatsappUrl: string | null
+}
+
+interface Analysis {
+  result: OffPortalParseResult
+  ai: AiMergeContext | null
+}
+
+function analyzeOffPortalPosting(input: OffPortalParseInput, now: Date): Analysis {
   const rawText = typeof input.rawText === 'string' ? input.rawText.slice(0, MAX_OFF_PORTAL_TEXT_CHARS) : ''
   const sourceType: OffPortalSourceType =
     input.sourceType === 'off_portal_poster' || input.sourceType === 'off_portal_caption'
       ? input.sourceType
       : 'off_portal_link'
   const sourceGroupId = input.sourceGroupId?.trim() || crypto.randomUUID()
+  const base: JobBase = { sourceType, sourceGroupId, now }
   const lines = splitCaptionLines(rawText)
 
   // Urutan kandidat tautan: tautan yang diisi pengguna, QR, nilai "apply:" di teks, lalu tautan lain di teks.
@@ -201,14 +325,17 @@ export function parseOffPortalPosting(input: OffPortalParseInput, now: Date = ne
     warnings.push(buildSocialCaptionRequiredMessage(socialPosts))
     if (socialPosts.some((p) => p.platform === 'linkedin_post')) warnings.push(LINKEDIN_MANUAL_APPLY_WARNING)
     return {
-      sourceGroupId,
-      sourceType,
-      acceptedUrls,
-      rejectedUrls,
-      jobs: [],
-      socialPosts,
-      needsCaption: true,
-      warnings,
+      result: {
+        sourceGroupId,
+        sourceType,
+        acceptedUrls,
+        rejectedUrls,
+        jobs: [],
+        socialPosts,
+        needsCaption: true,
+        warnings,
+      },
+      ai: null,
     }
   }
   if (socialPosts.length > 0) {
@@ -219,7 +346,6 @@ export function parseOffPortalPosting(input: OffPortalParseInput, now: Date = ne
   const whatsappUrl = applyCandidates.find(isWhatsAppUrl) ?? null
   const primaryApplyUrl = applyCandidates.find((u) => !isWhatsAppUrl(u)) ?? applyCandidates[0] ?? null
   const applyEmail = extractApplyEmail(rawText)
-  const formProvider = detectFormProvider(primaryApplyUrl)
   const companyInfo = extractCompanyName(lines, { hint: input.companyHint, applyUrl: primaryApplyUrl })
   const company = companyInfo.name
   const locationInfo = extractLocationValue(lines, rawText, input.locationHint)
@@ -227,53 +353,30 @@ export function parseOffPortalPosting(input: OffPortalParseInput, now: Date = ne
   const roleTitles = extractRoleTitles(rawText)
   const primaryIsLinkedIn = isLinkedInUrl(primaryApplyUrl)
 
-  const jobs: ParsedOffPortalJob[] = roleTitles.map((title) => {
+  const jobs = roleTitles.map((title) => {
     const description = rawText.trim() || `${title} — ${company}`
-    const channel = classifyJobChannel({
-      platform_source: sourceType,
-      external_url: primaryApplyUrl,
-      apply_email: applyEmail,
-      description,
-    })
-    const safety = assessJobSafety(
-      {
-        title,
-        company,
-        description,
-        external_url: primaryApplyUrl,
-        apply_email: applyEmail,
-        posted_at: now.toISOString(),
-      },
-      now,
-    )
-    const unreadFields: OffPortalUnreadField[] = []
-    if (title === OFF_PORTAL_TITLE_PLACEHOLDER) unreadFields.push('title')
-    if (company === OFF_PORTAL_COMPANY_PLACEHOLDER) unreadFields.push('company')
-    if (!locationInfo.found) unreadFields.push('location')
-    return {
+    return buildJob(base, {
       title,
       company,
       location,
+      locationFound: locationInfo.found,
       description,
-      sourceType,
-      sourceGroupId,
-      publicationFingerprint: buildPublicationFingerprint({
-        title,
-        company,
-        applyUrl: primaryApplyUrl,
-        applyEmail,
-        description,
-      }),
       applyUrl: primaryApplyUrl,
       applyEmail,
       whatsappUrl,
-      formProvider,
-      channel,
-      safety,
-      unreadFields,
-      warnings: primaryIsLinkedIn ? [LINKEDIN_MANUAL_APPLY_WARNING] : [],
-    }
+    })
   })
+  const ai: AiMergeContext = {
+    rawText,
+    base,
+    description: rawText.trim(),
+    company,
+    location,
+    locationFound: locationInfo.found,
+    applyUrl: primaryApplyUrl,
+    applyEmail,
+    whatsappUrl,
+  }
 
   // LinkedIn yang bukan tautan lamaran utama (mis. postingan LinkedIn sebagai sumber) tetap diberi peringatan sekali di tingkat hasil.
   if (!primaryIsLinkedIn && (acceptedUrls.some((u) => isLinkedInUrl(u)) || socialPosts.some((p) => p.platform === 'linkedin_post'))) {
@@ -281,14 +384,159 @@ export function parseOffPortalPosting(input: OffPortalParseInput, now: Date = ne
   }
 
   return {
-    sourceGroupId,
-    sourceType,
-    acceptedUrls,
-    rejectedUrls,
-    jobs,
-    socialPosts,
-    needsCaption: false,
-    warnings,
+    result: {
+      sourceGroupId,
+      sourceType,
+      acceptedUrls,
+      rejectedUrls,
+      jobs,
+      socialPosts,
+      needsCaption: false,
+      warnings,
+    },
+    ai,
+  }
+}
+
+export function parseOffPortalPosting(input: OffPortalParseInput, now: Date = new Date()): OffPortalParseResult {
+  return analyzeOffPortalPosting(input, now).result
+}
+
+// ───────────────────────────────────────────────────────────── cadangan AI
+
+export interface OffPortalAiOptions {
+  /** Pemanggil AI. Kosong atau null: hasil aturan dikembalikan tanpa percobaan AI. */
+  extract?: OffPortalAiExtractor | null
+  userId?: string
+  /** Batas total satu pemanggilan AI (ms). Bawaan 15 detik. */
+  timeoutMs?: number
+  /** Penulis log (satu baris, tanpa isi lowongan). Bawaan: console.warn. */
+  log?: (line: string) => void
+}
+
+function mostCommon(values: Array<string | null>): string | null {
+  const counts = new Map<string, number>()
+  for (const v of values) if (v) counts.set(v, (counts.get(v) ?? 0) + 1)
+  let best: string | null = null
+  let bestCount = 0
+  for (const [v, c] of counts) {
+    if (c > bestCount) {
+      best = v
+      bestCount = c
+    }
+  }
+  return best
+}
+
+/**
+ * Gabungkan kandidat AI (sudah divalidasi) ke hasil aturan. AI hanya mengisi yang kosong:
+ *   - Aturan tidak menemukan satu pun posisi (kosong atau semua nilai bawaan): kandidat dibangun dari AI. Perusahaan dan lokasi
+ *     yang sudah terbaca aturan tetap dipakai; tautan lamaran dari AI (yang tertulis di teks) didahulukan atas tebakan pertama aturan.
+ *   - Aturan menemukan posisi: posisi tidak berubah. Hanya perusahaan yang kosong dan lokasi yang belum terbaca diisi dari AI.
+ */
+function mergeAiCandidates(result: OffPortalParseResult, ctx: AiMergeContext, candidates: OffPortalAiCandidate[]): OffPortalParseResult {
+  const rulesHaveTitle = result.jobs.some((j) => j.title !== OFF_PORTAL_TITLE_PLACEHOLDER)
+  let jobs: ParsedOffPortalJob[]
+
+  if (!rulesHaveTitle) {
+    jobs = candidates.map((c) => {
+      const aiFields: OffPortalAiField[] = ['title']
+      let company = ctx.company
+      if (company === OFF_PORTAL_COMPANY_PLACEHOLDER && c.company) {
+        company = c.company
+        aiFields.push('company')
+      }
+      let location = ctx.location
+      let locationFound = ctx.locationFound
+      if (!locationFound && c.location) {
+        location = c.location
+        locationFound = true
+        aiFields.push('location')
+      }
+      const applyUrl = c.applyUrl ?? ctx.applyUrl
+      if (c.applyUrl && c.applyUrl !== ctx.applyUrl) aiFields.push('applyUrl')
+      const applyEmail = ctx.applyEmail ?? c.applyEmail
+      if (!ctx.applyEmail && c.applyEmail) aiFields.push('applyEmail')
+      return buildJob(ctx.base, {
+        title: c.title,
+        company,
+        location,
+        locationFound,
+        description: ctx.description || `${c.title} — ${company}`,
+        applyUrl,
+        applyEmail,
+        whatsappUrl: ctx.whatsappUrl,
+        extraction: 'ai',
+        aiFields,
+      })
+    })
+  } else {
+    const aiCompany = mostCommon(candidates.map((c) => c.company))
+    const aiLocation = mostCommon(candidates.map((c) => c.location))
+    jobs = result.jobs.map((job) => {
+      const aiFields: OffPortalAiField[] = []
+      let company = job.company
+      if (company === OFF_PORTAL_COMPANY_PLACEHOLDER && aiCompany) {
+        company = aiCompany
+        aiFields.push('company')
+      }
+      let location = job.location
+      let locationFound = !job.unreadFields.includes('location')
+      if (!locationFound && aiLocation) {
+        location = aiLocation
+        locationFound = true
+        aiFields.push('location')
+      }
+      if (aiFields.length === 0) return job
+      return buildJob(ctx.base, {
+        title: job.title,
+        company,
+        location,
+        locationFound,
+        description: job.description,
+        applyUrl: job.applyUrl,
+        applyEmail: job.applyEmail,
+        whatsappUrl: job.whatsappUrl,
+        extraction: 'ai',
+        aiFields,
+      })
+    })
+  }
+
+  if (!jobs.some((j) => j.extraction === 'ai')) return result
+  return { ...result, jobs, warnings: [...result.warnings, OFF_PORTAL_AI_RESULT_WARNING] }
+}
+
+/**
+ * Parser aturan, lalu cadangan AI bila aturan gagal membaca lowongan yang jelas ada di teks (lihat `offPortalAiTriggers`).
+ * Tidak pernah melempar karena AI: batas laju, kunci habis, JSON rusak, jawaban tidak sah, atau lewat 15 detik semuanya
+ * mengembalikan hasil aturan apa adanya. Hasil aturan yang sudah lengkap tidak memanggil AI dan tidak ditimpa.
+ */
+export async function parseOffPortalPostingWithAi(
+  input: OffPortalParseInput,
+  now: Date = new Date(),
+  ai: OffPortalAiOptions = {},
+): Promise<OffPortalParseResult> {
+  const { result, ai: ctx } = analyzeOffPortalPosting(input, now)
+  if (!ai.extract || !ctx) return result
+  const reasons = offPortalAiTriggers(result.jobs, ctx.rawText)
+  if (reasons.length === 0) return result
+
+  try {
+    const raw = await withOffPortalAiTimeout(
+      Promise.resolve().then(() => ai.extract!({ rawText: ctx.rawText, userId: ai.userId, reasons })),
+      ai.timeoutMs ?? OFF_PORTAL_AI_TIMEOUT_MS,
+    )
+    if (raw === null || raw === undefined) return result
+    const candidates = normalizeOffPortalAiOutput(raw, ctx.rawText)
+    if (candidates.length === 0) return result
+    return mergeAiCandidates(result, ctx, candidates)
+  } catch (e) {
+    // Pesan galat bisa memuat potongan isi permintaan; hanya nama galatnya yang dicatat.
+    const line = `[off-portal-ai] gagal (${(e as Error)?.name ?? 'Error'}), memakai parser aturan`
+    if (ai.log) ai.log(line)
+    else console.warn(line)
+    return result
   }
 }
 

@@ -515,7 +515,7 @@ function leadingCapitalizedName(chunk: string): string | null {
   return validCompanyName(name) ? name : null
 }
 
-function validCompanyName(name: string): boolean {
+export function validCompanyName(name: string): boolean {
   if (name.length < 2 || name.length > 60) return false
   if (URL_OR_EMAIL_RE.test(name)) return false
   if (wordCount(name) > 6) return false

@@ -7,9 +7,10 @@ import { backfillState, isBackfillAdmin, runBackfill, selectBackfillTargets } fr
 import {
   MAX_OFF_PORTAL_QR_URLS,
   MAX_OFF_PORTAL_TEXT_CHARS,
-  parseOffPortalPosting,
+  parseOffPortalPostingWithAi,
   type OffPortalSourceType,
 } from '../../services/off-portal-ingest.service.js'
+import { createOffPortalAiExtractor, type OffPortalAiExtractor } from '../../services/off-portal-ai.service.js'
 import {
   decodePosterImageBase64,
   ocrPosterImage,
@@ -46,6 +47,11 @@ export interface JobRouteOptions extends FastifyPluginOptions {
   qrDecoder?: (buffer: Buffer, mimeType: PosterImageMime, opts?: QrDecodeOptions) => Promise<QrDecodeResult>
   /** Hanya tes yang mengisinya. Produksi memakai aiGuardService (dimuat klien Supabase saat dipakai). */
   guard?: Pick<AiGuardService, 'checkActionRateLimit'>
+  /**
+   * Cadangan AI parser off-portal. Kosong: pemanggil produksi (batas laju ai-guard + rantai model yang sama dengan fitur lain;
+   * dilewati bila kunci model atau klien database tidak terpasang). null: AI dimatikan. Hanya tes yang mengisinya (tanpa jaringan).
+   */
+  offPortalAi?: OffPortalAiExtractor | null
 }
 
 /** id lowongan: huruf, angka, '-' dan '_' saja. Selain itu pasti bukan lowongan (404), tanpa menyentuh DB. */
@@ -54,6 +60,7 @@ const validId = (id: unknown): id is string => typeof id === 'string' && /^[A-Za
 export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
   const now = opts.now ?? Date.now
   const guard = opts.guard ?? aiGuardService
+  const offPortalAi = opts.offPortalAi === undefined ? createOffPortalAiExtractor({ guard }) : opts.offPortalAi
   // Dimuat di dalam handler, bukan di atas, supaya meng-import file ini (di tes) tidak menyalakan server.
   const getDb = async (): Promise<SupabaseClient> => opts.db ?? ((await import('../index.js')).supabase as SupabaseClient)
 
@@ -271,7 +278,7 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
       }
     }
 
-    const parsed = parseOffPortalPosting(
+    const parsed = await parseOffPortalPostingWithAi(
       {
         rawText: combinedText,
         sourceUrl,
@@ -281,6 +288,7 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
         locationHint: typeof body.locationHint === 'string' ? body.locationHint : undefined,
       },
       new Date(now()),
+      { extract: offPortalAi, userId, log: (line) => request.log.warn(line) },
     )
 
     return {
