@@ -89,6 +89,11 @@ export interface SanitizedExtControl {
   inputMode?: ExtInputMode
   /** Teks galat validasi yang menempel pada kontrol ini dari halaman (sudah disanitasi). */
   errorText?: string
+  /** Konteks bagian/grup tempat kontrol berada (`U2-02`), opsional untuk kompatibilitas mundur. */
+  sectionHeading?: string
+  groupHeading?: string
+  helperText?: string
+  repeaterIndex?: number
 }
 
 /** Konteks halaman tambahan dari ekstensi. Semua teks dibatasi dan dibingkai sebagai data tidak tepercaya. */
@@ -149,6 +154,8 @@ export interface ExtPendingQuestion {
   options?: string[]
   /** Alasan kolom ini ditanyakan bila bukan sekadar belum terjawab. Daftar tertutup `EXT_QUESTION_REASONS`. */
   reason?: ExtQuestionReason
+  /** Ringkasan konteks grup/bagian/teks bantuan untuk ditampilkan di UI agar pertanyaan tidak telanjang (`U2-02`). */
+  context?: string
 }
 
 /**
@@ -316,6 +323,13 @@ export function sanitizeExtensionControls(rawControls: unknown): SanitizedExtCon
     }
 
     seenIds.add(controlId)
+    const sectionHeading = cleanLine(rec.sectionHeading, 160)
+    const groupHeading = cleanLine(rec.groupHeading, 160)
+    const helperText = cleanLine(rec.helperText, EXT_MAX_PAGE_TEXT)
+    const repeaterIndex =
+      typeof rec.repeaterIndex === 'number' && Number.isInteger(rec.repeaterIndex) && rec.repeaterIndex >= 1 && rec.repeaterIndex <= 50
+        ? rec.repeaterIndex
+        : undefined
     out.push({
       controlId,
       kind,
@@ -331,6 +345,10 @@ export function sanitizeExtensionControls(rawControls: unknown): SanitizedExtCon
       ...sanitizeControlState(rec, kind),
       ...sanitizeControlHints(rec, kind),
       ...(cleanLine(rec.errorText, EXT_MAX_PAGE_TEXT) ? { errorText: cleanLine(rec.errorText, EXT_MAX_PAGE_TEXT) } : {}),
+      ...(sectionHeading ? { sectionHeading } : {}),
+      ...(groupHeading ? { groupHeading } : {}),
+      ...(helperText ? { helperText } : {}),
+      ...(repeaterIndex !== undefined ? { repeaterIndex } : {}),
     })
   }
   return out
@@ -1263,19 +1281,47 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       plannedControlIds.add(c.controlId)
     }
 
+    const isNoLike = (raw: string): boolean => {
+      const n = raw.trim().toLowerCase().replace(/[.!\s]+$/, '')
+      return ['no', 'tidak', 'tdk', 'enggak', 'gak', 'false', 'n', 'belum', 'tidak setuju'].includes(n)
+    }
+    const controlContextText = (c: SanitizedExtControl, labelText: string): string => {
+      const parts: string[] = []
+      const labelKey = questionKey(labelText)
+      const pushUnique = (text?: string) => {
+        if (!text) return
+        const k = questionKey(text)
+        if (!k || k === labelKey) return
+        if (parts.some((p) => questionKey(p) === k)) return
+        parts.push(text)
+      }
+      pushUnique(c.sectionHeading)
+      pushUnique(c.groupHeading)
+      if (c.repeaterIndex !== undefined) {
+        if (parts.length > 0) parts[parts.length - 1] = `${parts[parts.length - 1]} #${c.repeaterIndex}`
+        else parts.push(`Bagian #${c.repeaterIndex}`)
+      }
+      pushUnique(c.helperText)
+      return parts.join(' · ').slice(0, 260).trim()
+    }
+
     // 0. Sakelar "belum punya pengalaman kerja" (JobStreet: "Saya baru masuk dunia kerja"). Uji live 26 November 2026:
     //    pengguna tanpa riwayat kerja dimintai "Posisi pekerjaan" dan "Nama perusahaan" yang tidak bisa dijawab jujur.
     //    Tanpa riwayat kerja (tabel kosong dan `experience_years` bukan angka positif), sakelar dicentang lebih dulu dan
     //    kolom pengalaman di halaman yang sama tidak diisi atau ditanyakan, karena halaman menyembunyikannya sesudah
-    //    sakelar menyala. Dengan riwayat kerja, sakelar tidak pernah dicentang, termasuk oleh AI.
+    //    sakelar menyala. Dengan riwayat kerja, sakelar tidak pernah dicentang — dan bila bawaan situs menyala, dimatikan.
     const workHistory = noWorkExperienceState(workRows, profile)
     const freshToggles = fillable.filter((c) => c.kind === 'checkbox' && isNoWorkExperienceToggle(c))
     if (workHistory !== 'unknown') {
       for (const c of freshToggles) {
         plannedControlIds.add(c.controlId)
-        if (workHistory === 'none' && c.checked !== true && c.currentValue !== 'true') {
+        const isChecked = c.checked === true || c.currentValue === 'true'
+        if (workHistory === 'none' && !isChecked) {
           plannedControlIds.delete(c.controlId)
           addAction(c, true, 'fact')
+        } else if (workHistory === 'has' && isChecked) {
+          plannedControlIds.delete(c.controlId)
+          addAction(c, false, 'fact')
         }
       }
       if (workHistory === 'none' && freshToggles.length > 0) {
@@ -1300,7 +1346,9 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       const saved = k ? savedMap.get(k) : undefined
       if (!saved) continue
       if (c.kind === 'checkbox') {
+        const isChecked = c.checked === true || c.currentValue === 'true'
         if (isYesLike(saved)) addAction(c, true, 'saved')
+        else if (isNoLike(saved) && isChecked) addAction(c, false, 'saved')
         continue
       }
       const matched = c.kind === 'select' || c.kind === 'radio' ? matchOption(saved, c.options) : saved.slice(0, 2000)
@@ -1340,6 +1388,11 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
         controlId: c.controlId,
         kind: c.kind,
         label: controlQuestionLabel(c),
+        ...(c.sectionHeading ? { sectionHeading: c.sectionHeading } : {}),
+        ...(c.groupHeading ? { groupHeading: c.groupHeading } : {}),
+        ...(c.helperText ? { helperText: c.helperText } : {}),
+        ...(c.repeaterIndex !== undefined ? { repeaterIndex: c.repeaterIndex } : {}),
+        ...(c.checked !== undefined ? { checked: c.checked } : {}),
         ...(c.placeholder ? { placeholder: c.placeholder } : {}),
         ...(c.options.length ? { options: c.options } : {}),
         ...(isFreeTextSearch(c) ? { searchable: true } : {}),
@@ -1422,7 +1475,12 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
 
             if (c.kind === 'checkbox') {
               if (isGuardedCheckbox(c)) continue
-              if (a.value === true || (typeof a.value === 'string' && isYesLike(a.value))) addAction(c, true, 'ai')
+              const isChecked = c.checked === true || c.currentValue === 'true'
+              if (a.value === true || (typeof a.value === 'string' && isYesLike(a.value))) {
+                addAction(c, true, 'ai')
+              } else if ((a.value === false || (typeof a.value === 'string' && isNoLike(a.value))) && isChecked) {
+                addAction(c, false, 'ai')
+              }
               continue
             }
 
@@ -1475,12 +1533,21 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
         label = `Kolom wajib tanpa label ${++unlabeled}`
         reason = reason ?? 'no_label'
       }
-      const k = questionKey(label)
-      if (!k || seenKeys.has(k)) continue
+      const baseKey = questionKey(label)
+      if (!baseKey) continue
+      const context = controlContextText(c, label)
+      let k = baseKey
+      if (seenKeys.has(k)) {
+        // U2-02: dua kontrol berlabel sama di bagian/grup/repeater berbeda tidak saling menelan.
+        const disambigSource = [c.sectionHeading, c.groupHeading, c.repeaterIndex !== undefined ? `${c.repeaterIndex}` : '', label].filter(Boolean).join(' ')
+        const contextualKey = disambigSource ? questionKey(disambigSource) : ''
+        if (!contextualKey || seenKeys.has(contextualKey)) continue
+        k = contextualKey
+      }
       seenKeys.add(k)
       questionCandidates.push(
         secret
-          ? { key: k, label, kind: 'secret_skip', required: c.required }
+          ? { key: k, label, kind: 'secret_skip', required: c.required, ...(context ? { context } : {}) }
           : {
               key: k,
               label,
@@ -1488,6 +1555,7 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
               required: c.required,
               ...(c.options.length ? { options: c.options } : {}),
               ...(reason ? { reason } : {}),
+              ...(context ? { context } : {}),
             }
       )
     }
