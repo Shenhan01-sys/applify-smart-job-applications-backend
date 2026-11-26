@@ -46,6 +46,18 @@ function isLocalOrigin(origin: string): boolean {
 }
 
 /**
+ * Apakah dokumentasi Swagger `/docs` boleh dipublikasikan? (BS-08)
+ * Di produksi (`NODE_ENV=production`), `/docs` mati secara bawaan kecuali `ENABLE_API_DOCS=true`.
+ * Di pengembangan/uji, `/docs` aktif kecuali `ENABLE_API_DOCS=false`.
+ */
+export function shouldEnableApiDocs(env: Env = process.env): boolean {
+  const flag = (env.ENABLE_API_DOCS ?? '').trim().toLowerCase()
+  if (flag === 'true') return true
+  if (flag === 'false') return false
+  return (env.NODE_ENV ?? '').trim().toLowerCase() !== 'production'
+}
+
+/**
  * Peringatan konfigurasi untuk produksi. Setiap butir menyebut NAMA variabel, tidak pernah nilainya.
  * Di luar NODE_ENV=production daftar ini kosong, karena bawaan lokal memang dipakai di sana.
  */

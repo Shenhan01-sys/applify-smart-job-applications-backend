@@ -24,7 +24,7 @@ import { llmKeysRoutes } from './routes/llm-keys.js'
 import { extensionRoutes } from './routes/extension.js'
 import { authMiddleware } from './middleware/auth.js'
 import { sessionKeyProblem } from '../services/session-crypto.js'
-import { deployConfigWarnings, parseAllowedOrigins } from '../services/deploy-config.js'
+import { deployConfigWarnings, parseAllowedOrigins, shouldEnableApiDocs } from '../services/deploy-config.js'
 import { buildCorsOptions } from '../services/cors-options.js'
 import { installEmptyJsonBodyGuard } from '../services/empty-json-body.js'
 import { requestLogSerializers } from '../services/log-redact.js'
@@ -62,25 +62,28 @@ const allowedOrigins = parseAllowedOrigins(process.env.FRONTEND_URL)
 
 await app.register(cors, buildCorsOptions(allowedOrigins))
 
-await app.register(swagger, {
-  openapi: {
-    info: {
-      title: 'Applify Automation API',
-      description: 'API for Applify job automation platform',
-      version: '1.0.0',
-    },
-    // URL relatif: "Try it out" di /docs menembak host yang sama dengan halaman docs (lokal maupun Railway).
-    servers: [
-      {
-        url: '/',
+const apiDocsEnabled = shouldEnableApiDocs(process.env)
+if (apiDocsEnabled) {
+  await app.register(swagger, {
+    openapi: {
+      info: {
+        title: 'Applify Automation API',
+        description: 'API for Applify job automation platform',
+        version: '1.0.0',
       },
-    ],
-  },
-})
+      // URL relatif: "Try it out" di /docs menembak host yang sama dengan halaman docs (lokal maupun Railway).
+      servers: [
+        {
+          url: '/',
+        },
+      ],
+    },
+  })
 
-await app.register(swaggerUi, {
-  routePrefix: '/docs',
-})
+  await app.register(swaggerUi, {
+    routePrefix: '/docs',
+  })
+}
 
 // Health check
 app.get('/health', async () => {
@@ -123,7 +126,7 @@ const start = async () => {
   try {
     const port = Number(process.env.PORT) || 4000
     await app.listen({ port, host: '0.0.0.0' })
-    app.log.info(`Server listening on 0.0.0.0:${port} (health: /health, docs: /docs)`)
+    app.log.info(`Server listening on 0.0.0.0:${port} (health: /health${apiDocsEnabled ? ', docs: /docs' : ', docs: disabled'})`)
     app.log.info(`CORS origins: ${allowedOrigins.join(', ')}`)
     for (const w of deployConfigWarnings()) app.log.warn(`[config] ${w}`)
     // Kunci enkripsi sesi platform: tanpa kunci yang sah (tidak ada kunci bawaan) rute sesi menjawab 503.
