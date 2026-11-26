@@ -50,14 +50,18 @@ export const DEFAULT_FREE_MODELS = `${NUMES_MODELS},gemini:gemini-3.5-flash-lite
 export const DEFAULT_PRO_MODELS = `${NUMES_MODELS},gemini:gemini-4-hydrogen,gemini:gemini-4-argon,anthropic:claude-sonnet-5-5,anthropic:claude-haiku-5-5`
 
 /** Batas waktu satu panggilan (ms). Gemini 4 pernah menggantung 90 detik, jadi sengaja pendek. */
-export const PREMIUM_CALL_TIMEOUT_MS = Number(process.env.AI_PREMIUM_TIMEOUT_MS || 25_000)
+export const positiveEnvMs = (raw: string | undefined, fallback: number): number => {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+export const PREMIUM_CALL_TIMEOUT_MS = positiveEnvMs(process.env.AI_PREMIUM_TIMEOUT_MS, 25_000)
 
 /**
  * Batas waktu satu percobaan Numes (ms), terpisah dari PREMIUM_CALL_TIMEOUT_MS: model gratis Numes yang lambat tidak
  * ditunggu lebih lama dari ini (bawaan 12 detik, env NUMES_TIMEOUT_MS). Seluruh entri Numes dalam satu permintaan juga
  * berbagi NumesBudget (paling banyak 40% sisa waktu atau 15 detik) supaya Gemini tetap kebagian waktu.
  */
-export const NUMES_CALL_TIMEOUT_MS = Number(process.env.NUMES_TIMEOUT_MS) > 0 ? Number(process.env.NUMES_TIMEOUT_MS) : DEFAULT_NUMES_CALL_TIMEOUT_MS
+export const NUMES_CALL_TIMEOUT_MS = positiveEnvMs(process.env.NUMES_TIMEOUT_MS, DEFAULT_NUMES_CALL_TIMEOUT_MS)
 
 export interface PremiumKeys {
   gemini?: string

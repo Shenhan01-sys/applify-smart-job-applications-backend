@@ -1,5 +1,5 @@
 import { aiPipelineService } from './ai-pipeline.service.js'
-import { LinkedInImportError, OCR_UNAVAILABLE_MESSAGE, PDF_MIN_TEXT_CHARS, PDF_NO_TEXT_MESSAGE, assertPdfUpload, extractPdfPages, findSparsePages, isGarbledPdfText, meaningfulChars } from './linkedin-pdf.js'
+import { LinkedInImportError, OCR_NOT_CONFIGURED_MESSAGE, OCR_UNAVAILABLE_MESSAGE, PDF_MIN_TEXT_CHARS, PDF_NO_TEXT_MESSAGE, assertPdfUpload, extractPdfPages, findSparsePages, isGarbledPdfText, meaningfulChars } from './linkedin-pdf.js'
 import { ocrPdfPages, ocrPdfSelectedPages, type OcrOptions } from './pdf-ocr.js'
 import {
   assemblePreview,
@@ -110,8 +110,11 @@ export class LinkedInImportService {
       if (!(e instanceof LinkedInImportError) || e.code !== 'pdf_no_text') throw e
       // PDF berupa gambar (misalnya CV Canva yang diratakan): baca teksnya dengan OCR.
       const ocr = await (this.deps.ocrPages ?? ocrPdfPages)(buffer, ocrOpts)
-      // null: layanan OCR tidak tersedia atau gagal (kuota, timeout). Jangan suruh pengguna mengunduh ulang CV-nya.
-      if (ocr === null) throw new LinkedInImportError(503, 'ocr_unavailable', OCR_UNAVAILABLE_MESSAGE)
+      // null: layanan OCR tidak tersedia atau gagal (tanpa kunci, kuota, timeout). Jangan suruh pengguna mengunduh ulang CV-nya.
+      if (ocr === null) {
+        const missingKey = !this.deps.ocrPages && !(process.env.GEMINI_API_KEY ?? '').trim()
+        throw new LinkedInImportError(503, 'ocr_unavailable', missingKey ? OCR_NOT_CONFIGURED_MESSAGE : OCR_UNAVAILABLE_MESSAGE)
+      }
       if (ocr.join('').replace(/\s+/g, '').length < PDF_MIN_TEXT_CHARS) {
         throw new LinkedInImportError(422, 'pdf_no_text', PDF_NO_TEXT_MESSAGE)
       }

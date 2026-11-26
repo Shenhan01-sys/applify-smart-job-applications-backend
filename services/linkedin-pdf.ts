@@ -16,6 +16,8 @@ export const PDF_MIN_TEXT_CHARS = 80
  * Hanya dipakai bila halaman lain di berkas yang sama punya teks; PDF yang seluruhnya tipis tetap lewat PDF_MIN_TEXT_CHARS.
  */
 export const PDF_MIN_PAGE_CHARS = 20
+export const OCR_NOT_CONFIGURED_MESSAGE =
+  'PDF ini berupa gambar, tetapi layanan pembaca teks gambar (OCR) belum diaktifkan di server ini. Unduh ulang CV dari Canva sebagai PDF Standar tanpa opsi Ratakan PDF, atau isi profil secara manual.'
 export const OCR_UNAVAILABLE_MESSAGE =
   'PDF ini berupa gambar, dan pembaca teks gambar (OCR) sedang tidak tersedia. Coba lagi beberapa menit lagi. Bila tetap gagal, unduh ulang CV dari Canva sebagai PDF Standar tanpa opsi Ratakan PDF.'
 export const PDF_NO_TEXT_MESSAGE =
