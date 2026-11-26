@@ -27,6 +27,7 @@ import { ACHIEVEMENT_GROUNDING_RULE, achievementPromptSection, answerCandidateIn
 import { letterStructureRules } from './letter-rules.js'
 import { escapeUntrusted, inlineUntrusted } from './prompt-isolation.js'
 import { EMAIL_TOKEN, PHONE_TOKEN, contactPromptValue, fillContactTokens, maskContact } from './contact-tokens.js'
+import { classifyPersonalFact } from './personal-fact-extras.js'
 
 const getOpenRouterKey = () => process.env.OPENROUTER_API_KEY
 const getGroqKey = () => process.env.GROQ_API_KEY
@@ -175,6 +176,18 @@ export class OutputRejectedError extends Error {
   readonly code = 'output_rejected'
   constructor(readonly reasons: string[], attempts: number) {
     super(`AI output rejected by quality checks after ${attempts} attempt(s): ${[...new Set(reasons)].join(', ')}. Nothing was saved.`)
+  }
+}
+
+/**
+ * Pertanyaan formulir yang hanya bisa dijawab pengguna sendiri (kewarganegaraan, izin kerja, kerabat pejabat, dari mana
+ * lowongan ditemukan, ...): model tidak dipanggil. Pemanggil menandainya "Perlu dicek" dan menyerahkannya ke pengguna.
+ */
+export class PersonalFactQuestionError extends Error {
+  readonly code = 'personal_fact_question'
+  constructor(readonly category: string, readonly reason: string) {
+    super(`Pertanyaan fakta pribadi (${category}) tidak dijawab AI: ${reason}`)
+    this.name = 'PersonalFactQuestionError'
   }
 }
 
@@ -737,6 +750,10 @@ ${escapeUntrusted(original)}
 
   async generateAnswer(params: AnswerQuestionParams): Promise<string> {
     const { question, questionType, options, jobDescription, userProfile } = params
+
+    // Fakta pribadi tidak pernah ditulis model, apa pun jalur pemanggilnya (POST /api/ai/answer, FormAutofillService).
+    const personal = classifyPersonalFact(question, options)
+    if (personal) throw new PersonalFactQuestionError(personal.category, personal.reason)
 
     // Penghargaan dan publikasi hanya untuk pertanyaan teks panjang. Pilihan, radio, kotak centang, dan teks pendek
     // tidak mendapat daftarnya; profil tanpa kunci `achievements` tidak berubah sama sekali.

@@ -72,14 +72,23 @@ test('FormAutofillService visa: tanpa opsi padanan kosong dengan keyakinan 0, bu
   assert.equal(free.value, 'no') // teks bebas dipakai apa adanya
 })
 
-test('FormAutofillService demografi: opsi tak cocok tidak jatuh ke opsi pertama; "Decline" hanya bila ada opsi yang jelas', async () => {
+test('FormAutofillService demografi: opsi tak cocok tidak jatuh ke opsi pertama; "Decline" tidak lagi dipilih sendiri', async () => {
   const gender = await formAutofillService.fillField(select('Gender', ['Male', 'Female', "I don't wish to answer"]), ctx())
   assert.equal(gender.value, '') // dulu: "Male" (opsi pertama)
   assert.equal(gender.confidence, 0)
 
+  // Dulu tanpa data tersimpan agen memilih "Decline to self-identify". Demografi adalah fakta pribadi (27 November 2026):
+  // tanpa data tersimpan pengguna jawabannya kosong dan wajib dicek, pengguna yang memilih.
   const declined = await formAutofillService.fillField(select('Gender', ['Male', 'Female', 'Decline to self-identify']), ctx())
-  assert.equal(declined.value, 'Decline to self-identify')
-  assert.equal(declined.confidence, 0.9)
+  assert.equal(declined.value, '')
+  assert.equal(declined.confidence, 0)
+  assert.equal(declined.needsReview, true)
+  assert.equal(declined.personalFact?.category, 'demographics')
+
+  // Data tersimpan pengguna tetap dipakai, termasuk bila isinya memang "Decline".
+  const declinedSaved = await formAutofillService.fillField(select('Gender', ['Male', 'Female', 'Decline to self-identify']), ctx({ gender: 'Decline' }))
+  assert.equal(declinedSaved.value, 'Decline to self-identify')
+  assert.equal(declinedSaved.confidence, 0.9)
 
   const saved = await formAutofillService.fillField(select('Veteran status', ['I am a veteran', 'Not a veteran']), ctx({ veteran_status: 'Not a veteran' }))
   assert.equal(saved.value, 'Not a veteran')
@@ -190,7 +199,7 @@ test('planner: nilai AI untuk select/radio tidak memakai pencocokan "mengandung"
     controls: [
       { controlId: 'c1', kind: 'select', label: 'Are you open to relocation?', options: ['Yes', 'No'], required: true },
       { controlId: 'c2', kind: 'radio', label: 'Preferred shift', groupLabel: 'Preferred shift', options: ['Day', 'Night'], required: true },
-      { controlId: 'c3', kind: 'select', label: 'Notice period', options: ['Immediately', '1 month', '2 months'], required: true },
+      { controlId: 'c3', kind: 'select', label: 'Preferred contract length', options: ['Immediately', '1 month', '2 months'], required: true },
     ],
     aiActions: [
       { controlId: 'c1', value: 'Yes, definitely' }, // dulu cocok ke "Yes" lewat "mengandung"

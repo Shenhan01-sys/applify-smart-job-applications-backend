@@ -124,14 +124,20 @@ test('FormAutofillService: Non-citizen tidak pernah dijawab Yes; data kosong tid
   assert.equal(empty.confidence, 0)
 })
 
-test('FormAutofillService: "eligible to work in the United States/this country" tidak lagi jatuh ke aturan negara bagian atau negara; "Country of citizenship" tetap aturan negara', async () => {
+test('FormAutofillService: "eligible to work in the United States/this country" tidak lagi jatuh ke aturan negara bagian atau negara; "Country of citizenship" tidak dijawab dari negara domisili', async () => {
   const base = { ...ctx('US Citizen', US), userSettings: { ...settings('US Citizen'), state: 'Jawa Tengah', country: 'Indonesia' } }
   const eligibleUs = await fill('Are you eligible to work in the United States?', base, ['Yes', 'No'])
   assert.equal(eligibleUs.value, 'Yes') // dulu: nama provinsi karena label memuat "state"
   const eligibleCountry = await fill('Are you eligible to work in this country?', base, ['Yes', 'No'])
   assert.equal(eligibleCountry.value, 'Yes') // dulu: "Indonesia" karena label memuat "country"
+  // Dulu dijawab dengan negara domisili ("Indonesia"). Kewarganegaraan adalah fakta pribadi (27 November 2026): negara
+  // domisili bukan kewarganegaraan, jadi pertanyaan ini kosong dan wajib dicek.
   const countryOfCitizenship = await fill('Country of citizenship', base)
-  assert.equal(countryOfCitizenship.value, 'Indonesia') // perilaku lama tidak berubah
+  assert.equal(countryOfCitizenship.value, '')
+  assert.equal(countryOfCitizenship.confidence, 0)
+  assert.equal(countryOfCitizenship.needsReview, true)
+  // Pertanyaan negara biasa tetap memakai aturan negara.
+  assert.equal((await fill('Country', base)).value, 'Indonesia')
 })
 
 test('approval-answers: lokasi lowongan dari tabel jobs sampai ke FormContext.jobLocation', async () => {

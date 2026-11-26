@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyPluginOptions } from 'fastify'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { formAutofillService, type FormField } from '../../services/form-autofill.service.js'
 import { AiAccessError, aiGuardService, type AiGuardService } from '../../services/ai-guard.service.js'
+import { classifyPersonalFact } from '../../services/personal-fact-extras.js'
 
 /** Batas pengamanan POST /api/ai/fill-form (BS-02): cegah amplifikasi ratusan panggilan LLM per permintaan. */
 export const MAX_FILL_FORM_FIELDS = 40
@@ -195,6 +196,13 @@ export async function aiRoutes(
   // Generate answer for application question
   app.post('/answer', async (request, reply) => {
     const { question, questionType, options, jobDescription, userProfile } = request.body as any
+
+    // Fakta pribadi (kewarganegaraan, izin kerja, kerabat pejabat, dari mana lowongan ditemukan, ...) tidak dijawab AI:
+    // jawaban kosong, ditandai "Perlu dicek" supaya pengguna yang menjawab. Model tidak dipanggil.
+    const personal = classifyPersonalFact(question, options)
+    if (personal) {
+      return { success: true, answer: '', needsReview: true, personalFact: personal }
+    }
 
     try {
       const answer = await aiPipelineService.generateAnswer({

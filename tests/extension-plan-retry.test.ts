@@ -98,7 +98,7 @@ test('perencana: jawaban tersimpan yang tidak ada di pilihan tidak dipakai menta
 test('perencana: keluaran model yang hampir sama dipetakan ke satu pilihan (normalisasi dan awalan unik)', async () => {
   const { res } = await plan(
     [
-      { controlId: 'a', kind: 'select', role: 'combobox', label: 'Authorized to work?', options: ['Yes', 'No'], required: true },
+      { controlId: 'a', kind: 'select', role: 'combobox', label: 'Comfortable with a take-home test?', options: ['Yes', 'No'], required: true },
       { controlId: 'b', kind: 'select', role: 'combobox', label: 'Home country', options: ['Indonesia (ID)', 'Singapore (SG)'], required: true },
       { controlId: 'c', kind: 'select', role: 'combobox', label: 'Work mode', options: ['Remote', 'On-site'], required: true },
     ],
@@ -118,21 +118,21 @@ test('perencana: keluaran model yang hampir sama dipetakan ke satu pilihan (norm
 test('perencana: nilai di luar pilihan, ambigu, atau lebih panjang dari pilihan dibiarkan kosong dan menjadi pertanyaan', async () => {
   const { res } = await plan(
     [
-      { controlId: 'a', kind: 'select', role: 'combobox', label: 'Gender', options: ['Male', 'Female', 'Prefer not to say'], required: true },
+      { controlId: 'a', kind: 'select', role: 'combobox', label: 'Preferred editor', options: ['Vim', 'Emacs', 'No preference'], required: true },
       { controlId: 'b', kind: 'select', role: 'combobox', label: 'Degree', options: ['Bachelor of Arts', 'Bachelor of Science', 'Master'], required: true },
       { controlId: 'c', kind: 'select', role: 'combobox', label: 'Level', options: ['Senior', 'Junior'], required: true },
       { controlId: 'd', kind: 'select', role: 'combobox', label: 'Mood', options: ['Happy', 'Sad'], required: false },
     ],
     {
       aiText: aiActions(
-        { controlId: 'a', value: 'male' }, // persis (huruf kecil) -> Male, bukan Female
+        { controlId: 'a', value: 'vim' }, // persis (huruf kecil) -> Vim, bukan Emacs
         { controlId: 'b', value: 'Bachelor' }, // dua pilihan berawalan: ambigu
         { controlId: 'c', value: 'Senior Engineer' }, // lebih panjang dari pilihan: tidak ditebak
         { controlId: 'd', value: 'Mars' } // tidak ada
       ),
     }
   )
-  assert.equal(valueOf(res, 'a'), 'Male')
+  assert.equal(valueOf(res, 'a'), 'Vim')
   for (const id of ['b', 'c', 'd']) assert.equal(valueOf(res, id), undefined, id)
   const byLabel = new Map(res.pendingQuestions.map((q) => [q.label, q]))
   assert.deepEqual(byLabel.get('Degree')?.options, ['Bachelor of Arts', 'Bachelor of Science', 'Master'])
