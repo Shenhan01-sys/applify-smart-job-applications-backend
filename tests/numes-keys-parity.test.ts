@@ -1,15 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { matchOptionStrict } from '../services/option-match.js'
 
-test('J5-07: numes-keys.ts identik byte-for-byte antara backend, worker, dan Edge Function', () => {
+const workerUrl = new URL('../../worker/src/lib/numes-keys.ts', import.meta.url)
+const edgeUrl = new URL('../../applify-smart-job-applications/supabase/functions/_shared/numes-keys.ts', import.meta.url)
+// Repo saudara hanya ada pada tata letak monorepo/worktree; pada checkout backend sendirian (CI, Railway) tes dilewati.
+const siblingsPresent = existsSync(workerUrl) && existsSync(edgeUrl)
+
+test('J5-07: numes-keys.ts identik byte-for-byte antara backend, worker, dan Edge Function', { skip: !siblingsPresent && 'repo worker/frontend tidak ada di sebelah backend' }, () => {
   const backendCopy = readFileSync(new URL('../services/numes-keys.ts', import.meta.url), 'utf8')
-  const workerCopy = readFileSync(new URL('../../worker/src/lib/numes-keys.ts', import.meta.url), 'utf8')
-  const edgeCopy = readFileSync(
-    new URL('../../applify-smart-job-applications/supabase/functions/_shared/numes-keys.ts', import.meta.url),
-    'utf8'
-  )
+  const workerCopy = readFileSync(workerUrl, 'utf8')
+  const edgeCopy = readFileSync(edgeUrl, 'utf8')
   assert.equal(workerCopy, backendCopy, 'worker/src/lib/numes-keys.ts menyimpang dari backend')
   assert.equal(edgeCopy, backendCopy, 'supabase/functions/_shared/numes-keys.ts menyimpang dari backend')
 })

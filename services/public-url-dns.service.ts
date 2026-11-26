@@ -108,13 +108,19 @@ export async function verifyPublicUrlDns(
   const timeoutMs = opts.timeoutMs ?? 4_000
 
   let records: DnsAddressRecord[]
+  // Pewaktu dibersihkan setelah balapan selesai: tanpa ini setiap cek menahan event loop hingga timeoutMs.
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
     records = await Promise.race([
       lookupFn(host),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('dns_timeout')), timeoutMs)),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('dns_timeout')), timeoutMs)
+      }),
     ])
   } catch {
     return { ok: false, reason: 'dns_lookup_failed', addresses: [] }
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 
   const addresses = (Array.isArray(records) ? records : [])
