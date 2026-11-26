@@ -203,6 +203,16 @@ export function isWhatsAppUrl(rawUrl: unknown): boolean {
   return hostMatchesDomain(new URL(safe).hostname, WHATSAPP_HOSTS)
 }
 
+/** True untuk formulir Google Forms publik (termasuk /u/N/forms/ dan shortlink forms.gle). */
+export function isGoogleFormUrl(rawUrl: unknown): boolean {
+  const safe = sanitizeHttpUrl(rawUrl)
+  if (!safe) return false
+  const u = new URL(safe)
+  const host = u.hostname.toLowerCase().replace(/^www\./, '')
+  if (host === 'forms.gle') return true
+  return host === 'docs.google.com' && /^\/(?:u\/\d+\/)?forms\//i.test(u.pathname)
+}
+
 export function extractUrlsFromText(text: string): string[] {
   if (!text) return []
   const matches = text.match(/https?:\/\/[^\s<>"'\])}`]+/gi) ?? []
@@ -355,6 +365,24 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
       extensionSupported: false,
       manualOnly: true,
       reason: 'Lamaran lewat tautan WhatsApp hanya dikirim manual langsung oleh pelamar (tidak dijalankan oleh agen maupun ekstensi).',
+    }
+  }
+
+  // Google Forms dijalankan worker terlebih dahulu (formulir publik) dan mendukung handoff ke Ekstensi Browser
+  // bila formulir meminta login Google, unggah berkas, CAPTCHA, atau ada pertanyaan wajib tanpa jawaban.
+  if (isGoogleFormUrl(primaryUrl)) {
+    return {
+      channel: 'external_web',
+      platform: 'google_forms',
+      applyUrl: primaryUrl,
+      resolvedApplyUrl: null,
+      applyEmail: null,
+      autoWorkerSupported: true,
+      emailApplySupported: false,
+      extensionSupported: true,
+      manualOnly: false,
+      reason:
+        'Formulir Google Form publik. Agen server mengisinya terlebih dahulu setelah disetujui, dan beralih ke Ekstensi Browser bila formulir meminta login Google, unggah berkas, CAPTCHA, atau pertanyaan wajib tambahan.',
     }
   }
 
