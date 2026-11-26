@@ -12,6 +12,20 @@
 
 export const DEFAULT_MONTHLY_QUOTA = 10
 
+/**
+ * Kuota draf AI bulanan per paket (keputusan 26 November 2026): Free 10, Pro 100. Salinan konstanta di
+ * applify-smart-job-applications/supabase/functions/_shared/quota.ts. Batas yang berlaku adalah kolom
+ * `subscriptions.monthly_quota`, diisi dari paket oleh trigger di
+ * database/migrations/DRAFT_2026-11-26_pro_monthly_quota_100.sql. Konstanta ini bukan penegak batas.
+ */
+export const FREE_MONTHLY_QUOTA = 10
+export const PRO_MONTHLY_QUOTA = 100
+
+/** Kuota draf bulanan bawaan sebuah paket. Paket selain "pro" (termasuk kosong) dianggap Free. */
+export function monthlyQuotaForTier(tier: unknown): number {
+  return typeof tier === 'string' && tier.trim().toLowerCase() === 'pro' ? PRO_MONTHLY_QUOTA : FREE_MONTHLY_QUOTA
+}
+
 export interface QuotaSummary {
   /** Allowed drafts per month (subscriptions.daily_apply_quota is the column the database functions use). */
   quota: number
