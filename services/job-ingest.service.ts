@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { RankedJob } from './job-aggregation.service.js'
 import { salaryOfPosting, toDbSalary } from './salary.js'
 import { isPublicHttpUrl } from './apply-channel.js'
+import { verifyPublicUrlDns, type DnsLookupFn } from './public-url-dns.service.js'
 
 /**
  * Job Ingest Service — menyimpan hasil agregasi ke tabel `jobs` (Supabase).
@@ -54,6 +55,22 @@ export function publicUrlsOnly(job: RankedJob): RankedJob | null {
   const url = isPublicHttpUrl(job.url) ? job.url : ''
   if ((present(job.apply_url) || present(job.url)) && !applyUrl && !url) return null
   return { ...job, apply_url: applyUrl, url }
+}
+
+/**
+ * Validasi asinkron anti-DNS-rebinding untuk URL lowongan sebelum disimpan/diakses (47.3 P1-06).
+ * Menolak lowongan yang host-nya beresolusi ke IP privat/loopback/metadata.
+ */
+export async function publicUrlsNoDnsRebind(
+  job: RankedJob,
+  opts: { lookup?: DnsLookupFn } = {}
+): Promise<RankedJob | null> {
+  const base = publicUrlsOnly(job)
+  if (!base) return null
+  const primary = base.apply_url || base.url
+  if (!primary) return base
+  const check = await verifyPublicUrlDns(primary, opts)
+  return check.ok ? base : null
 }
 
 /** Nilai match_score yang sah (bulat 0-100) atau null. Nilai dari luar tidak dipercaya begitu saja. */
