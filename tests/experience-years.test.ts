@@ -271,4 +271,21 @@ test('loadWorkExperiences: mengambil notes & employment_type serta fallback kolo
   assert.equal(dbBase.selectedCols.length, 3)
   assert.equal(dbBase.selectedCols[2], 'start_date, end_date, is_current')
   assert.equal(ansBase.find((a) => a.question === 'Total pengalaman kerja (tahun)')?.answer, '1')
+
+  // 4) Cache deteksi kolom: panggilan kedua pada instance db yang sama tidak mengulang query notes yang gagal 42703
+  await prepareApprovalAnswers(dbNoNotes, { userId: 'u-2', jobTitle: 'Backend', company: 'PT Uji' }, deterministicFiller)
+  assert.equal(dbNoNotes.selectedCols.length, 3, 'panggilan kedua hanya 1 kueri tanpa mengulang 42703 pada notes')
+  assert.ok(!dbNoNotes.selectedCols[2]?.includes('notes'))
+  assert.ok(dbNoNotes.selectedCols[2]?.includes('employment_type'))
+
+  // 5) DRAFT_2026-11-26_work_experiences_notes.sql memuat pre-check, add column if not exists notes text, & post-check
+  const { readFileSync } = await import('node:fs')
+  const { resolve } = await import('node:path')
+  const sqlNotes = readFileSync(
+    resolve(import.meta.dirname, '../../database/migrations/DRAFT_2026-11-26_work_experiences_notes.sql'),
+    'utf8'
+  )
+  assert.match(sqlNotes, /ALTER TABLE public\.work_experiences[\s\S]*ADD COLUMN IF NOT EXISTS notes text/i)
+  const matches = sqlNotes.match(/FROM information_schema\.columns/gi) ?? []
+  assert.equal(matches.length, 2, 'harus memiliki pre-check dan post-check information_schema.columns')
 })
