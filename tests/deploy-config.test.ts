@@ -175,6 +175,13 @@ test('Dockerfile: config/job-boards.json ikut image, path Chromium benar, PORT d
   assert.match(d, /process\.env\.PORT/)
 })
 
+test('Dockerfile: pdf-parse-worker.mjs ikut image karena tsc tidak menyalin .mjs ke dist (gel7 P2-6)', () => {
+  const d = noComments(read('Dockerfile'))
+  // linkedin-pdf.ts mencari ../../services/pdf-parse-worker.mjs dari dist/services, yaitu /app/services di image.
+  assert.match(d, /COPY [^\n]*services\/pdf-parse-worker\.mjs \.\/services\/pdf-parse-worker\.mjs/)
+  assert.match(read('services/linkedin-pdf.ts'), /\.\.\/\.\.\/services\/pdf-parse-worker\.mjs/)
+})
+
 test('.dockerignore membuang .env, node_modules, dist, .git (F8b)', () => {
   const lines = read('.dockerignore')
     .split('\n')

@@ -37,6 +37,9 @@ ENV NODE_ENV=production \
 
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
+# Worker thread parse PDF (services/linkedin-pdf.ts, resolveWorkerScriptUrl). tsc tidak menyalin .mjs ke dist,
+# dan kode mencarinya di ../../services dari dist/services. Tanpa berkas ini parse PDF diam-diam turun ke thread utama.
+COPY --chown=node:node services/pdf-parse-worker.mjs ./services/pdf-parse-worker.mjs
 COPY --chown=node:node package.json ./
 # Daftar papan lowongan dibaca saat jalan (services/mcp-registry.ts). Tanpa berkas ini daftarnya diam-diam kosong.
 COPY --chown=node:node config ./config
