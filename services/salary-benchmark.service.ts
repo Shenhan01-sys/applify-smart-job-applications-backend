@@ -112,9 +112,18 @@ export async function salaryBenchmark(
       .or(keywords.map((k) => `title.ilike.%${k}%`).join(','))
       .limit(QUERY_LIMIT)
 
-  let peerRes = await queryPeers(`${basePeerCols}, visibility, created_by`)
-  if (peerRes.error && isMissingVisibilityColumnError(peerRes.error)) {
-    peerRes = await queryPeers(basePeerCols)
+  let peerRes: { data: any; error: any }
+  try {
+    peerRes = await queryPeers(`${basePeerCols}, visibility, created_by`)
+    if (peerRes.error && isMissingVisibilityColumnError(peerRes.error)) {
+      peerRes = await queryPeers(basePeerCols)
+    }
+  } catch (err) {
+    if (isMissingVisibilityColumnError(err)) {
+      peerRes = await queryPeers(basePeerCols)
+    } else {
+      throw err
+    }
   }
   const { data: rawPeers, error } = peerRes
   if (error) throw new Error(error.message)

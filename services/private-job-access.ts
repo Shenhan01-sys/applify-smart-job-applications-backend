@@ -42,14 +42,21 @@ export async function selectJobWithVisibility(
   jobId: string,
   baseCols: string
 ): Promise<{ data: Record<string, any> | null; error: any }> {
-  const first = await db
-    .from('jobs')
-    .select(`${baseCols}, visibility, created_by`)
-    .eq('id', jobId)
-    .maybeSingle()
+  try {
+    const first = await db
+      .from('jobs')
+      .select(`${baseCols}, visibility, created_by`)
+      .eq('id', jobId)
+      .maybeSingle()
 
-  if (first?.error && isMissingVisibilityColumnError(first.error)) {
-    return db.from('jobs').select(baseCols).eq('id', jobId).maybeSingle()
+    if (first?.error && isMissingVisibilityColumnError(first.error)) {
+      return db.from('jobs').select(baseCols).eq('id', jobId).maybeSingle()
+    }
+    return first
+  } catch (err) {
+    if (isMissingVisibilityColumnError(err)) {
+      return db.from('jobs').select(baseCols).eq('id', jobId).maybeSingle()
+    }
+    throw err
   }
-  return first
 }

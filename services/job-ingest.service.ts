@@ -167,11 +167,17 @@ export async function ingestJobs(supabase: SupabaseClient, jobs: RankedJob[]): P
   const lookup = async (url: string): Promise<Existing[]> => {
     for (;;) {
       const cols = hasVisibility ? `${LOOKUP_COLS[level]}, visibility` : LOOKUP_COLS[level]
-      const { data, error } = await supabase
-        .from('jobs')
-        .select(cols)
-        .eq('external_url', url)
-        .limit(hasVisibility ? 10 : 1)
+      let data: any = null
+      let error: any = null
+      try {
+        ;({ data, error } = await supabase
+          .from('jobs')
+          .select(cols)
+          .eq('external_url', url)
+          .limit(hasVisibility ? 10 : 1))
+      } catch (err: any) {
+        error = err
+      }
       if (error && COLUMN_ERROR.test(error.message ?? '')) {
         if (hasVisibility && /visibility/i.test(error.message ?? '')) {
           // Skema pra-migrasi tanpa kolom visibility: jatuh ke kueri tanpa kolom itu.
