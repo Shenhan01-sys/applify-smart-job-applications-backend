@@ -20,6 +20,7 @@ import {
   verifyWhatsappVerificationOtp,
 } from '../../services/notification-dispatcher.service.js'
 import { notificationsEnabled } from '../../services/notifications-switch.js'
+import { listInAppNotifications, markInAppNotificationsRead } from '../../services/in-app-notifications.service.js'
 import type { GuardDb } from '../../services/queue-guard.js'
 
 /** Minimum gap between two Telegram test messages from the same user. */
@@ -53,6 +54,34 @@ export async function notificationRoutes(
       notificationsEnabled: notificationsEnabled(env),
       whatsappKapso: whatsapp.isConfigured(),
       email: Boolean((env.RESEND_API_KEY ?? '').trim() && (env.NOTIFY_FROM_EMAIL ?? '').trim()),
+    }
+  })
+
+  // Pusat notifikasi in-app (U5-P1-01): aman sebelum migrasi (`migrationPending: true`), semua tulis lewat backend.
+  app.get('/in-app', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+    const rawLimit = Number((request.query as { limit?: unknown } | undefined)?.limit)
+    try {
+      return await listInAppNotifications(await getDb(), userId, Number.isFinite(rawLimit) ? rawLimit : 20)
+    } catch {
+      return reply.status(500).send({ error: 'Gagal memuat notifikasi', code: 'in_app_notifications_failed' })
+    }
+  })
+
+  app.post('/in-app/read', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) return reply.status(401).send({ error: 'Unauthorized' })
+    const body = (request.body ?? {}) as { ids?: unknown[]; all?: unknown }
+    try {
+      return await markInAppNotificationsRead(
+        await getDb(),
+        userId,
+        { ids: Array.isArray(body.ids) ? body.ids : undefined, all: body.all === true },
+        now()
+      )
+    } catch {
+      return reply.status(500).send({ error: 'Gagal memperbarui status notifikasi', code: 'in_app_notifications_failed' })
     }
   })
 

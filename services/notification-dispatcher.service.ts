@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import type { GuardDb } from './queue-guard.js'
 import { KapsoWhatsAppService, kapsoWhatsAppService, normalizeWhatsAppPhone } from './kapso-whatsapp.service.js'
 import { networkErrorCode, notificationsEnabled, notifyTimeoutSignal } from './notifications-switch.js'
+import { createInAppNotification } from './in-app-notifications.service.js'
 
 /**
  * Dispatcher notifikasi multi-kanal per-user (WhatsApp via Kapso, Email transaksional).
@@ -513,9 +514,21 @@ export class NotificationDispatcherService {
       event: NotifyEventKey
       title: string
       plainMessage: string
+      href?: string
+      skipInApp?: boolean
       now?: Date
     }
   ): Promise<{ deliveredChannels: string[] }> {
+    if (!args.skipInApp) {
+      await createInAppNotification(db, {
+        userId: args.userId,
+        event: args.event,
+        title: args.title,
+        body: args.plainMessage,
+        href: args.href,
+        now: args.now,
+      })
+    }
     if (!notificationsEnabled(this.env)) return { deliveredChannels: [] }
 
     const settings = await getUserNotificationSettings(db, args.userId)
