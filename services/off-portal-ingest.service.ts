@@ -12,15 +12,20 @@ import {
 } from './apply-channel.js'
 import { assessJobSafety, type JobSafetyReport } from './job-safety.service.js'
 import {
+  MAX_OFF_PORTAL_CANDIDATES,
   MAX_OFF_PORTAL_ROLES,
   OFF_PORTAL_COMPANY_PLACEHOLDER,
   OFF_PORTAL_LOCATION_DEFAULT,
   OFF_PORTAL_TITLE_PLACEHOLDER,
   extractApplyKeyUrls,
+  extractBlockCompany,
   extractCompanyName,
   extractLocationValue,
   extractRoleTitles,
   splitCaptionLines,
+  splitCompanyBlocks,
+  type CaptionLine,
+  type CompanyBlock,
 } from './off-portal-extract.js'
 import {
   OFF_PORTAL_AI_TIMEOUT_MS,
@@ -40,6 +45,10 @@ import {
  *   - Tidak pernah mengambil isi URL. Instagram, X, Facebook, dan LinkedIn meminta login, jadi captionnya harus ditempel pengguna.
  *   - Mendukung poster multi-role: satu unggahan menghasilkan 1..N kandidat lowongan dengan `source_group_id` sama
  *     dan `publication_fingerprint` deterministik per (peran + perusahaan + kontak/URL).
+ *   - Mendukung tempelan multi-perusahaan (utas X "1. @akun - roles: ... - apply: ..."): tiap butir bernomor dibaca sebagai
+ *     kelompok sendiri dengan perusahaan, posisi, lokasi, tautan, dan deskripsinya sendiri. Kandidat tidak pernah mewarisi
+ *     tautan, email, atau perusahaan dari butir lain. Batas 50 kandidat per tempelan (`MAX_OFF_PORTAL_CANDIDATES`);
+ *     kelebihannya dilaporkan di `warnings` beserta jumlah aslinya.
  *   - Memvalidasi setiap URL (sumber, teks, QR) lewat `isPublicHttpUrl` agar URL privat/IP/javascript: ditolak.
  *   - Tautan postingan media sosial tidak pernah dijadikan tautan lamaran. Tautan LinkedIn diberi peringatan lamar manual.
  *   - Menyertakan deteksi kontak WhatsApp (`wa.me` / `api.whatsapp.com`), formulir eksternal (Google Form/Typeform/Tally),
@@ -111,7 +120,7 @@ export interface OffPortalParseResult {
 
 export const MAX_OFF_PORTAL_TEXT_CHARS = 12_000
 export const MAX_OFF_PORTAL_QR_URLS = 10
-export { MAX_OFF_PORTAL_ROLES, extractRoleTitles }
+export { MAX_OFF_PORTAL_CANDIDATES, MAX_OFF_PORTAL_ROLES, extractRoleTitles }
 
 export const LINKEDIN_MANUAL_APPLY_WARNING =
   'Lowongan LinkedIn wajib dilamar manual di LinkedIn. Applify tidak mengisi atau mengirim lamaran di LinkedIn, jadi simpan lowongannya lalu lamar sendiri lewat tautannya.'
@@ -257,6 +266,61 @@ function buildJob(base: JobBase, s: JobSpec): ParsedOffPortalJob {
   }
 }
 
+/** Tautan lamaran dari satu blok perusahaan: hanya URL di blok itu (kunci "apply:" dulu), publik, dan bukan postingan sosial. */
+function blockApplyUrls(lines: CaptionLine[], blockText: string): string[] {
+  const out: string[] = []
+  for (const u of [...extractApplyKeyUrls(lines), ...extractUrlsFromText(blockText)]) {
+    if (!out.includes(u) && isPublicHttpUrl(u) && !detectSocialPostPlatform(u)) out.push(u)
+  }
+  return out
+}
+
+/**
+ * Kandidat dari tempelan multi-perusahaan. Setiap blok dibaca sendiri: perusahaan (nama tanpa @), posisi, lokasi, tautan
+ * lamaran, email, dan deskripsi hanya dari teks blok itu. Blok tanpa tautan atau email tidak meminjam milik blok lain;
+ * kanalnya dibiarkan kosong supaya pengguna melihatnya apa adanya. `locationHint` hanya mengisi blok tanpa lokasi.
+ */
+function jobsFromCompanyBlocks(blocks: CompanyBlock[], base: JobBase, locationHint: string | undefined, warnings: string[]): ParsedOffPortalJob[] {
+  const hint = locationHint?.trim() ? locationHint.trim().slice(0, 120) : ''
+  const jobs: ParsedOffPortalJob[] = []
+  let total = 0
+  let lastCompany = 0
+  blocks.forEach((block, index) => {
+    const lines = splitCaptionLines(block.text)
+    const urls = blockApplyUrls(lines, block.text)
+    const whatsappUrl = urls.find(isWhatsAppUrl) ?? null
+    const applyUrl = urls.find((u) => !isWhatsAppUrl(u)) ?? urls[0] ?? null
+    const applyEmail = extractApplyEmail(block.text)
+    const company = extractBlockCompany(lines, applyUrl).name
+    const loc = extractLocationValue(lines, block.text)
+    const location = loc.found || !hint ? loc.value : hint
+    const titles = extractRoleTitles(block.text, MAX_OFF_PORTAL_CANDIDATES)
+    total += titles.length
+    for (const title of titles) {
+      if (jobs.length >= MAX_OFF_PORTAL_CANDIDATES) break
+      jobs.push(
+        buildJob(base, {
+          title,
+          company,
+          location,
+          locationFound: loc.found || Boolean(hint),
+          description: block.text,
+          applyUrl,
+          applyEmail,
+          whatsappUrl,
+        }),
+      )
+      lastCompany = index + 1
+    }
+  })
+  if (total > jobs.length) {
+    warnings.push(
+      `Caption memuat ${total} lowongan dari ${blocks.length} perusahaan. Yang ditampilkan ${jobs.length} pertama (sampai perusahaan ke-${lastCompany}). Tempel sisanya sebagai caption terpisah.`,
+    )
+  }
+  return jobs
+}
+
 /** Konteks parser aturan yang dipakai cadangan AI untuk membangun ulang kandidat. Null untuk tempelan multi-perusahaan. */
 interface AiMergeContext {
   rawText: string
@@ -343,39 +407,50 @@ function analyzeOffPortalPosting(input: OffPortalParseInput, now: Date): Analysi
     warnings.push(`Tautan postingan ${labels} dipakai sebagai sumber saja, bukan tautan lamaran. Tautan lamaran diambil dari isi caption.`)
   }
 
-  const whatsappUrl = applyCandidates.find(isWhatsAppUrl) ?? null
-  const primaryApplyUrl = applyCandidates.find((u) => !isWhatsAppUrl(u)) ?? applyCandidates[0] ?? null
-  const applyEmail = extractApplyEmail(rawText)
-  const companyInfo = extractCompanyName(lines, { hint: input.companyHint, applyUrl: primaryApplyUrl })
-  const company = companyInfo.name
-  const locationInfo = extractLocationValue(lines, rawText, input.locationHint)
-  const location = locationInfo.value
-  const roleTitles = extractRoleTitles(rawText)
-  const primaryIsLinkedIn = isLinkedInUrl(primaryApplyUrl)
+  const blocks = splitCompanyBlocks(rawText)
+  let jobs: ParsedOffPortalJob[]
+  let primaryIsLinkedIn = false
+  let ai: AiMergeContext | null = null
 
-  const jobs = roleTitles.map((title) => {
-    const description = rawText.trim() || `${title} — ${company}`
-    return buildJob(base, {
-      title,
+  if (blocks) {
+    // Tempelan multi-perusahaan: tiap blok berdiri sendiri. Cadangan AI tidak dipakai di sini, karena AI bisa salah menempelkan
+    // posisi atau tautan ke perusahaan lain, dan kesalahan seperti itu lebih buruk daripada bidang yang ditandai "belum terbaca".
+    jobs = jobsFromCompanyBlocks(blocks, base, input.locationHint, warnings)
+  } else {
+    const whatsappUrl = applyCandidates.find(isWhatsAppUrl) ?? null
+    const primaryApplyUrl = applyCandidates.find((u) => !isWhatsAppUrl(u)) ?? applyCandidates[0] ?? null
+    const applyEmail = extractApplyEmail(rawText)
+    const companyInfo = extractCompanyName(lines, { hint: input.companyHint, applyUrl: primaryApplyUrl })
+    const company = companyInfo.name
+    const locationInfo = extractLocationValue(lines, rawText, input.locationHint)
+    const location = locationInfo.value
+    const roleTitles = extractRoleTitles(rawText)
+    primaryIsLinkedIn = isLinkedInUrl(primaryApplyUrl)
+
+    jobs = roleTitles.map((title) => {
+      const description = rawText.trim() || `${title} — ${company}`
+      return buildJob(base, {
+        title,
+        company,
+        location,
+        locationFound: locationInfo.found,
+        description,
+        applyUrl: primaryApplyUrl,
+        applyEmail,
+        whatsappUrl,
+      })
+    })
+    ai = {
+      rawText,
+      base,
+      description: rawText.trim(),
       company,
       location,
       locationFound: locationInfo.found,
-      description,
       applyUrl: primaryApplyUrl,
       applyEmail,
       whatsappUrl,
-    })
-  })
-  const ai: AiMergeContext = {
-    rawText,
-    base,
-    description: rawText.trim(),
-    company,
-    location,
-    locationFound: locationInfo.found,
-    applyUrl: primaryApplyUrl,
-    applyEmail,
-    whatsappUrl,
+    }
   }
 
   // LinkedIn yang bukan tautan lamaran utama (mis. postingan LinkedIn sebagai sumber) tetap diberi peringatan sekali di tingkat hasil.

@@ -13,6 +13,9 @@ import { detectSocialPostPlatform, extractUrlsFromText, hostMatchesDomain, sanit
  *   - Header promosi ("LOWONGAN KERJA", "WE'RE HIRING!", "OPEN RECRUITMENT", "DIBUTUHKAN SEGERA") bukan posisi dan bukan
  *     perusahaan; posisi diambil dari baris sesudahnya. Label dalam kurung ("(FIKTIF)", "(Hybrid)") dibuang dari nama perusahaan.
  *   - Awalan badan usaha PT/CV, "Perusahaan:", "Company:", serta "Remote" dan nama kota sebagai cadangan lokasi.
+ *   - Tempelan multi-perusahaan ("1. @akun - roles: ... - apply: ...", "2. @akun2 - ..."): `splitCompanyBlocks` memecahnya per
+ *     butir bernomor supaya tiap perusahaan dibaca sendiri dan tidak ada posisi atau tautan yang tertempel ke perusahaan lain.
+ *     Tautan tanpa skema di nilai "apply:" ("kast.xyz/en/careers") dibaca sebagai https.
  *
  * Tidak ada pemanggilan jaringan atau AI. Bila sebuah bidang tidak terbaca, nilai bawaan dikembalikan dan pemanggil
  * mencatatnya di `unreadFields` agar pengguna tahu perlu memeriksa.
@@ -21,7 +24,16 @@ import { detectSocialPostPlatform, extractUrlsFromText, hostMatchesDomain, sanit
 export const OFF_PORTAL_TITLE_PLACEHOLDER = 'Lowongan Off-Portal'
 export const OFF_PORTAL_COMPANY_PLACEHOLDER = 'Perusahaan (Off-Portal)'
 export const OFF_PORTAL_LOCATION_DEFAULT = 'Indonesia'
+/** Batas posisi dari satu lowongan (satu perusahaan). Juga batas keluaran cadangan AI. */
 export const MAX_OFF_PORTAL_ROLES = 10
+/**
+ * Batas kandidat dari satu tempelan yang memuat banyak perusahaan bernomor ("1. @akun - roles: ..."). Satu utas bisa
+ * memuat puluhan perusahaan dengan beberapa posisi masing-masing (contoh E2E 27 Nov: 23 perusahaan, 100+ posisi), jadi
+ * 10 terlalu kecil. 50 dipilih karena (1) pratinjau dan simpan harus muat dalam satu permintaan, (2) batas lowongan
+ * pribadi per pengguna 200 tetap menjaga tabel, dan (3) tiap kandidat membawa deskripsi sebesar blok perusahaannya
+ * saja, bukan seluruh utas. Kelebihan tidak dibuang diam-diam: pemanggil menambahkan peringatan berisi jumlah aslinya.
+ */
+export const MAX_OFF_PORTAL_CANDIDATES = 50
 
 export type ExtractedCompanySource = 'hint' | 'label' | 'handle' | 'phrase' | 'url' | 'fallback'
 
@@ -367,15 +379,18 @@ interface RoleSection {
   items: string[]
 }
 
-/** Ekstrak 1..N nama posisi dari poster/caption (kunci "roles:", header + daftar, atau kalimat umum). */
-export function extractRoleTitles(text: string): string[] {
+/**
+ * Ekstrak 1..N nama posisi dari poster/caption (kunci "roles:", header + daftar, atau kalimat umum).
+ * `max` membatasi jumlah posisi (bawaan satu lowongan); blok perusahaan pada tempelan multi-perusahaan memberi batas yang lebih besar.
+ */
+export function extractRoleTitles(text: string, max: number = MAX_OFF_PORTAL_ROLES): string[] {
   if (!text.trim()) return [OFF_PORTAL_TITLE_PLACEHOLDER]
   const lines = splitCaptionLines(text)
   const roles: string[] = []
   const push = (list: string[]): boolean => {
     for (const r of list) {
       roles.push(r)
-      if (roles.length >= MAX_OFF_PORTAL_ROLES) return true
+      if (roles.length >= max) return true
     }
     return false
   }
@@ -458,12 +473,12 @@ export function extractRoleTitles(text: string): string[] {
   }
   flush()
   const fromHeaders = [...new Set(roles)]
-  if (fromHeaders.length > 0) return fromHeaders.slice(0, MAX_OFF_PORTAL_ROLES)
+  if (fromHeaders.length > 0) return fromHeaders.slice(0, max)
 
   // 2. Kalimat umum: "X is hiring a Backend Engineer", "membuka lowongan Data Analyst", "mencari Staff Admin".
   for (const line of lines) {
     const found = rolesFromPhrase(line.text)
-    if (found.length > 0) return [...new Set(found)].slice(0, MAX_OFF_PORTAL_ROLES)
+    if (found.length > 0) return [...new Set(found)].slice(0, max)
   }
 
   // 3. Cadangan: baris pertama yang masuk akal sebagai judul (bukan nama perusahaan, akun, kunci lain, atau ajakan).
@@ -699,6 +714,97 @@ export function extractCompanyName(lines: CaptionLine[], opts: { hint?: string; 
   const fromUrl = companyFromUrl(opts.applyUrl)
   if (fromUrl) return { name: fromUrl, source: 'url' }
   return { name: OFF_PORTAL_COMPANY_PLACEHOLDER, source: 'fallback' }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tempelan multi-perusahaan: satu perusahaan per butir bernomor
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Satu perusahaan dalam tempelan yang memuat banyak perusahaan, mis. utas X
+ * "1. @wirexapp - roles: A, B - location: ... - apply: ..." / "2. @KASTxyz - roles: ...". `text` berisi butir bernomornya
+ * beserta baris lanjutan ("roles:", "location:", "apply:" di baris berikutnya), tanpa baris pembuka atau penutup tempelan.
+ * Setiap blok dibaca sendiri-sendiri, jadi posisi, lokasi, dan tautan satu perusahaan tidak pernah tertempel ke perusahaan lain.
+ */
+export interface CompanyBlock {
+  text: string
+}
+
+const NUMBERED_LINE_RE = /^\s*\d{1,3}\s*[.)]\s+(\S.*)$/
+// Beberapa butir "N. @akun" yang tertempel dalam satu baris dipisah dulu. Hanya bentuk "@akun": nama biasa tidak aman dipecah tanpa baris baru.
+const INLINE_BLOCK_BREAK_RE = /\s+(?=\d{1,3}\s*[.)]\s+@[A-Za-z0-9_]{2,30}(?!\w))/g
+const ROLE_KEY_INLINE_RE =
+  /^(.{2,60}?)\s+[-–—|•·]\s+(?:roles?|open\s+roles?|positions?|open\s+positions?|posisi|jabatan|job\s+titles?|hiring\s+for|openings?|vacanc(?:y|ies))\s*[:：]/i
+
+/** 'handle': "N. @akun ..." atau "N. Nama / @akun ...". 'named': "N. Nama - roles: ..." atau "N. Nama" yang disusul baris kunci. */
+function companyHeaderKind(line: string): 'handle' | 'named' | null {
+  const m = NUMBERED_LINE_RE.exec(line)
+  if (!m) return null
+  const content = m[1].trim()
+  if (HANDLE_LINE_RE.test(content)) return 'handle'
+  const inline = ROLE_KEY_INLINE_RE.exec(content)
+  if (inline) return validCompanyName(tidy(stripParentheticals(inline[1]))) ? 'named' : null
+  if (KEY_VALUE_RE.test(content) || URL_OR_EMAIL_RE.test(content) || wordCount(content) > 6) return null
+  return validCompanyName(tidy(stripParentheticals(content))) ? 'named' : null
+}
+
+/**
+ * Pecah tempelan menjadi blok perusahaan, atau null bila bukan tempelan multi-perusahaan (kurang dari dua blok, atau tidak
+ * ada satu pun blok yang memuat kunci posisi). Daftar posisi bernomor biasa ("1. Admin", "2. Kasir") tidak pernah
+ * dianggap blok perusahaan: butir bernama tanpa akun hanya sah bila blok-nya memuat "roles:" / "posisi:" sendiri.
+ */
+export function splitCompanyBlocks(text: string): CompanyBlock[] | null {
+  const lines = text
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .flatMap((l) => l.replace(INLINE_BLOCK_BREAK_RE, '\n').split('\n'))
+  const kinds = lines.map(companyHeaderKind)
+  if (kinds.filter(Boolean).length < 2) return null
+
+  const blocks: Array<{ kind: 'handle' | 'named'; lines: string[] }> = []
+  let current: { kind: 'handle' | 'named'; lines: string[] } | null = null
+  let afterBlank = false
+  lines.forEach((line, i) => {
+    const kind = kinds[i]
+    if (kind) {
+      current = { kind, lines: [line] }
+      blocks.push(current)
+      afterBlank = false
+      return
+    }
+    if (!current) return // pembuka tempelan ("23 CRYPTO CARD PROJECTS...") bukan bagian blok mana pun
+    if (!line.trim()) {
+      afterBlank = true
+      return
+    }
+    // Teks bebas sesudah baris kosong (penutup, ajakan mengikuti akun) bukan lanjutan blok.
+    if (afterBlank && !splitCaptionLines(line).some((l) => l.kv)) {
+      current = null
+      return
+    }
+    current.lines.push(line)
+  })
+
+  const hasRoleKey = (b: { lines: string[] }): boolean =>
+    splitCaptionLines(b.lines.join('\n')).some((l) => l.kv?.group === 'role' && l.kv.value.length > 0)
+  const valid = blocks.filter((b) => b.kind === 'handle' || hasRoleKey(b))
+  if (valid.length < 2 || !valid.some(hasRoleKey)) return null
+  return valid.map((b) => ({ text: b.lines.join('\n').trim() }))
+}
+
+/**
+ * Perusahaan satu blok. Akun atau kalimat di dalam blok didahulukan; nama pada baris butir ("3. Kraken - roles: ...")
+ * dipakai sebelum nama yang ditebak dari domain tautan, supaya "N. Perusahaan" tanpa akun tetap punya perusahaannya sendiri.
+ */
+export function extractBlockCompany(lines: CaptionLine[], applyUrl: string | null): ExtractedCompany {
+  const found = extractCompanyName(lines, { applyUrl })
+  if (found.source === 'label' || found.source === 'handle' || found.source === 'phrase') return found
+  const head = lines[0]
+  if (head && !head.kv) {
+    const name = tidy(stripParentheticals(head.text))
+    if (validCompanyName(name)) return { name, source: 'label' }
+  }
+  return found
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

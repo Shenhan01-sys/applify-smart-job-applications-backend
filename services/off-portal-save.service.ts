@@ -3,7 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { isPublicHttpUrl, isSocialPostUrl } from './apply-channel.js'
 import { isValidApplyEmail } from './email-address.js'
 import {
-  MAX_OFF_PORTAL_ROLES,
+  MAX_OFF_PORTAL_CANDIDATES,
   MAX_OFF_PORTAL_TEXT_CHARS,
   buildPublicationFingerprint,
   type OffPortalSourceType,
@@ -147,7 +147,8 @@ export async function savePrivateOffPortalJobs(
     }
   }
 
-  const items = (rawItems as SaveOffPortalJobItemInput[]).slice(0, MAX_OFF_PORTAL_ROLES)
+  // Sama dengan batas pratinjau (MAX_OFF_PORTAL_CANDIDATES): kandidat yang ditampilkan parse harus bisa disimpan semuanya.
+  const items = (rawItems as SaveOffPortalJobItemInput[]).slice(0, MAX_OFF_PORTAL_CANDIDATES)
 
   // Batas per pengguna. Gagal menghitung tidak menghalangi simpan (batas ini perlindungan, bukan syarat benar-salah).
   const countRes: any = await db
