@@ -146,7 +146,7 @@ test('api/index.ts memasang jobRoutes di /api/jobs di dalam blok yang memakai au
   assert.doesNotMatch(publicPart, /jobRoutes/)
 })
 
-test('api/routes/jobs.ts: enam rute (enrich, pembanding, channel, backfill, status backfill, off-portal/parse), semuanya menolak tanpa user.id dan memakai klien service-role lewat import dinamis', () => {
+test('api/routes/jobs.ts: tujuh rute (enrich, pembanding, channel, backfill, status backfill, off-portal/parse, off-portal/save), semuanya menolak tanpa user.id dan memakai klien service-role lewat import dinamis', () => {
   const src = readFileSync(new URL('../api/routes/jobs.ts', import.meta.url), 'utf8')
   assert.match(src, /app\.post\('\/:id\/enrich'/)
   assert.match(src, /app\.get\('\/:id\/salary-benchmark'/)
@@ -154,8 +154,9 @@ test('api/routes/jobs.ts: enam rute (enrich, pembanding, channel, backfill, stat
   assert.match(src, /app\.post\('\/backfill'/)
   assert.match(src, /app\.get\('\/backfill\/status'/)
   assert.match(src, /app\.post\('\/off-portal\/parse'/)
-  assert.equal((src.match(/\(request as any\)\.user\?\.id/g) ?? []).length, 6)
-  assert.equal((src.match(/status\(401\)/g) ?? []).length, 6)
+  assert.match(src, /app\.post\('\/off-portal\/save'/)
+  assert.equal((src.match(/\(request as any\)\.user\?\.id/g) ?? []).length, 7)
+  assert.equal((src.match(/status\(401\)/g) ?? []).length, 7)
   assert.match(src, /await import\('\.\.\/index\.js'\)/)
   assert.doesNotMatch(src.split('\n').filter((l) => /^import /.test(l)).join('\n'), /\.\.\/index\.js/)
 })
