@@ -62,7 +62,24 @@ test('BS-P2-04: salinan domainManifest.generated.ts di worker, frontend, dan eks
     for (const d of [...backendManifest.KNOWN_ATS_DOMAINS, ...backendManifest.EXTENSION_LOGIN_PORTAL_DOMAINS]) {
       expectedPerms.push(`https://${d}/*`, `https://*.${d}/*`)
     }
-    assert.deepEqual(manifest.optional_host_permissions, [...new Set(expectedPerms)])
+    // Ekstensi lama memakai optional_host_permissions, ekstensi sekarang memakai host_permissions (tanpa tanya izin per
+    // situs). Tes menerima keduanya: setiap domain ATS dan portal login wajib terdaftar, dan satu-satunya tambahan yang
+    // boleh ada hanya origin API (entri pertama host_permissions) dan Google Form publik berbasis path.
+    const declared: string[] = [...(manifest.host_permissions ?? []), ...(manifest.optional_host_permissions ?? [])]
+    const declaredSet = new Set(declared)
+    const expectedSet = new Set(expectedPerms)
+    for (const p of expectedSet) {
+      assert.equal(declaredSet.has(p), true, `Manifest ekstensi tidak memuat izin host ${p}`)
+    }
+    const allowedExtras = new Set<string>(['https://docs.google.com/forms/*'])
+    if (typeof manifest.host_permissions?.[0] === 'string') allowedExtras.add(manifest.host_permissions[0])
+    for (const p of declaredSet) {
+      if (expectedSet.has(p)) continue
+      assert.equal(allowedExtras.has(p), true, `Manifest ekstensi memuat izin host di luar daftar ATS dan portal login: ${p}`)
+    }
+    for (const h of externalAuthHosts) {
+      assert.equal(declaredSet.has(`https://${h}/*`) || declaredSet.has(`https://*.${h}/*`), false, `Host auth eksternal ${h} tidak boleh ada di manifest ekstensi`)
+    }
   }
 })
 
