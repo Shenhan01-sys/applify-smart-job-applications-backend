@@ -105,8 +105,12 @@ test('DRAFT_2026-11-26_db_hardening_and_rls_sync.sql non-destruktif, idempoten, 
     assert.ok(run.includes(internalTable), `harus mengunci ${internalTable}`)
   }
   assert.match(run, /UPDATE storage\.buckets[\s\S]*?SET public = false[\s\S]*?agent-screenshots/i)
+  assert.match(run, /SELECT[\s\S]*?FROM pg_policies[\s\S]*?subscriptions[\s\S]*?approval_requests[\s\S]*?DROP POLICY/i)
   assert.match(run, /claim_automation_jobs/i)
-  assert.match(run, /consume_monthly_apply/i)
+  assert.match(run, /consume_monthly_apply\(uuid\)/i)
+  assert.match(run, /consume_ai_rate_slot\(uuid,text,integer,integer,text\)/i)
+  assert.match(run, /check_daily_apply_quota_atomic\(uuid,timestamptz\)/i)
+  assert.match(run, /register_notification_otp_attempt\(uuid,integer\)/i)
 })
 
 test('evaluateTwoSessionRls: menolak hasil kosong tanpa baris sendiri, kebocoran lintas pengguna, dan eskalasi RLS', () => {
