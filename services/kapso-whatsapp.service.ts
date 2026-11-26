@@ -151,6 +151,75 @@ export function verifyKapsoWebhookRequest(
   return true
 }
 
+/** Batas usia maksimum timestamp webhook Kapso (detik) untuk mencegah replay paket lama (BS-05.2). */
+export const KAPSO_WEBHOOK_MAX_SKEW_SEC = 300
+
+function parseWebhookTimestampMs(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return raw > 1e12 ? raw : raw * 1000
+  }
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  if (/^\d{10,13}$/.test(trimmed)) {
+    const n = Number(trimmed)
+    return trimmed.length >= 13 ? n : n * 1000
+  }
+  const parsed = Date.parse(trimmed)
+  return Number.isNaN(parsed) ? null : parsed
+}
+
+/**
+ * Validasi kesegaran timestamp webhook Kapso bila header timestamp (`X-Webhook-Timestamp` / `X-Kapso-Timestamp`)
+ * atau timestamp pesan tersedia (BS-05.2). Header yang rusak atau di luar jendela 5 menit ditolak.
+ */
+export function verifyKapsoWebhookTimestamp(
+  headers: Record<string, unknown>,
+  now: Date = new Date(),
+  maxSkewSec: number = KAPSO_WEBHOOK_MAX_SKEW_SEC
+): { ok: true } | { ok: false; reason: 'invalid_timestamp' | 'timestamp_expired' } {
+  const raw =
+    headerLookup(headers, 'x-webhook-timestamp') ??
+    headerLookup(headers, 'x-kapso-timestamp')
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return { ok: true }
+  }
+  const tsMs = parseWebhookTimestampMs(raw)
+  if (tsMs === null) return { ok: false, reason: 'invalid_timestamp' }
+  const diffSec = (now.getTime() - tsMs) / 1000
+  // Tolak paket yang lebih tua dari maxSkewSec atau lebih dari 60 detik di masa depan.
+  if (diffSec > maxSkewSec || diffSec < -60) {
+    return { ok: false, reason: 'timestamp_expired' }
+  }
+  return { ok: true }
+}
+
+/**
+ * Identitas pengiriman unik untuk deduplikasi anti-replay webhook Kapso (BS-05.2):
+ * utamakan `X-Webhook-Id` / `X-Delivery-Id` / `message.id` dari payload, atau hash SHA-256 rawBody.
+ */
+export function extractKapsoWebhookDeliveryId(
+  rawBody: Buffer,
+  headers: Record<string, unknown>,
+  payload: unknown
+): string {
+  const hdr =
+    headerLookup(headers, 'x-webhook-id') ??
+    headerLookup(headers, 'x-delivery-id') ??
+    headerLookup(headers, 'x-kapso-delivery-id')
+  if (typeof hdr === 'string' && hdr.trim()) {
+    return `hdr:${hdr.trim().slice(0, 180)}`
+  }
+  if (payload && typeof payload === 'object') {
+    const root = payload as Record<string, any>
+    const directId = typeof root?.message?.id === 'string' ? root.message.id.trim() : ''
+    if (directId) return `msg:${directId.slice(0, 180)}`
+    const metaMsgId = root?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.id
+    if (typeof metaMsgId === 'string' && metaMsgId.trim()) return `meta:${metaMsgId.trim().slice(0, 180)}`
+  }
+  return `sha256:${crypto.createHash('sha256').update(rawBody).digest('hex')}`
+}
+
 /**
  * Ekstrak daftar nomor pengirim pesan inbound (`whatsapp.message.received` Kapso native batch/unbuffered
  * maupun webhook Meta Cloud API `entry[].changes[].value.messages[]`). Event outbound/status dilewati.

@@ -4,9 +4,12 @@ import { notificationsService } from '../../services/notifications.service.js'
 import { notifyApplicationStatus } from '../../services/application-status.service.js'
 import {
   extractInboundWebhookPhones,
+  extractKapsoWebhookDeliveryId,
   kapsoWhatsAppService,
   verifyKapsoWebhookRequest,
+  verifyKapsoWebhookTimestamp,
 } from '../../services/kapso-whatsapp.service.js'
+import { consumeReplayToken } from '../../services/replay-guard.service.js'
 import {
   getUserNotificationSettings,
   notificationDispatcher,
@@ -209,6 +212,7 @@ export async function whatsappWebhookRoutes(app: FastifyInstance, opts: Notifica
   const getDb = async (): Promise<GuardDb> => opts.db ?? ((await import('../index.js')).supabase as unknown as GuardDb)
   const env = opts.env ?? process.env
   const now = opts.now ?? (() => new Date())
+  const seenDeliveries = new Map<string, number>()
 
   app.addContentTypeParser('application/json', { parseAs: 'buffer', bodyLimit: MAX_KAPSO_WEBHOOK_BYTES }, (_req, body, done) => {
     const raw = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''), 'utf8')
@@ -232,6 +236,12 @@ export async function whatsappWebhookRoutes(app: FastifyInstance, opts: Notifica
       return reply.status(401).send({ error: 'Invalid webhook signature' })
     }
 
+    const nowDate = now()
+    const tsCheck = verifyKapsoWebhookTimestamp(request.headers as Record<string, unknown>, nowDate)
+    if (!tsCheck.ok && 'reason' in tsCheck) {
+      return reply.status(401).send({ error: 'Stale or invalid webhook timestamp', code: tsCheck.reason })
+    }
+
     let payload: unknown = {}
     if (rawBuf.length > 0) {
       try {
@@ -241,11 +251,23 @@ export async function whatsappWebhookRoutes(app: FastifyInstance, opts: Notifica
       }
     }
 
-    const phones = extractInboundWebhookPhones(payload, request.headers['x-webhook-event']).slice(0, MAX_KAPSO_WEBHOOK_PHONES)
     const db = await getDb()
+    const deliveryId = extractKapsoWebhookDeliveryId(rawBuf, request.headers as Record<string, unknown>, payload)
+    const replay = await consumeReplayToken(db, {
+      scope: 'kapso_webhook',
+      tokenId: deliveryId,
+      expiresAtMs: nowDate.getTime() + 15 * 60 * 1000,
+      nowMs: nowDate.getTime(),
+      fallbackMap: seenDeliveries,
+    })
+    if (replay.duplicate) {
+      return { ok: true, updated: 0, duplicate: true }
+    }
+
+    const phones = extractInboundWebhookPhones(payload, request.headers['x-webhook-event']).slice(0, MAX_KAPSO_WEBHOOK_PHONES)
     let updated = 0
     for (const phone of phones) {
-      const res = await recordWhatsappInbound(db, phone, now())
+      const res = await recordWhatsappInbound(db, phone, nowDate)
       updated += res.updated
     }
     return { ok: true, updated }
