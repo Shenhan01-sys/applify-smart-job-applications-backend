@@ -36,6 +36,8 @@ export interface ChannelClassification {
   emailApplySupported: boolean
   extensionSupported: boolean
   manualOnly: boolean
+  /** E2E-07: True untuk ATS korporasi kompleks (Workday/iCIMS/Taleo/SuccessFactors) yang bersifat eksperimental di ekstensi. */
+  experimentalExtension?: boolean
   reason: string
 }
 
@@ -55,6 +57,24 @@ export { EXTENSION_LOGIN_PORTAL_DOMAINS, PUBLIC_ATS_DOMAINS }
  * lowongannya tidak boleh dikirim ke antrean `extension_apply`.
  */
 export const EXTENSION_HOST_DOMAINS: readonly string[] = [...EXTENSION_LOGIN_PORTAL_DOMAINS, ...KNOWN_ATS_DOMAINS]
+
+/**
+ * E2E-07: ATS korporasi multi-langkah / Shadow DOM tertutup yang tumpang tindih antara daftar ATS dikenal
+ * dan portal autentikasi di shared/domains.json. Tetap didukung ekstensi, namun diberi tanda eksperimental
+ * dan anjuran melamar manual bila formulir gagal diisi penuh.
+ */
+export const CORPORATE_COMPLEX_ATS_DOMAINS = [
+  'myworkdayjobs.com',
+  'workday.com',
+  'icims.com',
+  'taleo.net',
+  'successfactors.com',
+  'successfactors.eu',
+] as const
+
+export function isCorporateComplexAtsHost(hostname: string): boolean {
+  return Boolean(hostname) && hostMatchesDomain(hostname, CORPORATE_COMPLEX_ATS_DOMAINS)
+}
 
 export const AUTH_PORTAL_DOMAINS = [
   'linkedin.com',
@@ -338,6 +358,7 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
 
   if (isPortal) {
     const viaExtension = isExtensionUrl(primaryUrl)
+    const experimentalExtension = viaExtension && isCorporateComplexAtsHost(primaryHost)
     return {
       channel: 'auth_portal',
       platform: platform || primaryHost || 'portal',
@@ -348,9 +369,12 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
       emailApplySupported: false,
       extensionSupported: viaExtension,
       manualOnly: false,
-      reason: viaExtension
-        ? 'Portal membutuhkan sesi masuk akun pelamar; gunakan Ekstensi Browser Applify langsung di tab Chrome/Edge milikmu.'
-        : 'Portal membutuhkan sesi masuk akun pelamar dan belum didukung Ekstensi Browser Applify; lamar manual di situsnya.',
+      ...(experimentalExtension ? { experimentalExtension: true } : {}),
+      reason: experimentalExtension
+        ? 'Portal ATS korporasi kompleks ini bersifat eksperimental untuk Ekstensi Browser; melamar manual di situs perusahaan disarankan bila formulir multi-langkah gagal.'
+        : viaExtension
+          ? 'Portal membutuhkan sesi masuk akun pelamar; gunakan Ekstensi Browser Applify langsung di tab Chrome/Edge milikmu.'
+          : 'Portal membutuhkan sesi masuk akun pelamar dan belum didukung Ekstensi Browser Applify; lamar manual di situsnya.',
     }
   }
 
@@ -388,6 +412,7 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
   }
 
   const externalViaExtension = isExtensionUrl(primaryUrl)
+  const externalExperimental = externalViaExtension && isCorporateComplexAtsHost(primaryHost)
   return {
     channel: 'external_web',
     platform: platform || primaryHost || 'web',
@@ -398,11 +423,14 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
     emailApplySupported: false,
     extensionSupported: externalViaExtension,
     manualOnly: false,
+    ...(externalExperimental ? { experimentalExtension: true } : {}),
     reason: !primaryUrl
       ? 'Lowongan belum memiliki tautan lamaran eksternal.'
-      : externalViaExtension
-        ? 'Situs karier eksternal; gunakan Ekstensi Browser Applify agar tahan terhadap login/CAPTCHA, atau lamar manual.'
-        : 'Situs karier eksternal yang belum didukung Ekstensi Browser Applify; lamar manual di situsnya.',
+      : externalExperimental
+        ? 'ATS korporasi eksternal ini bersifat eksperimental untuk Ekstensi Browser; melamar manual di situs perusahaan disarankan bila formulir multi-langkah gagal.'
+        : externalViaExtension
+          ? 'Situs karier eksternal; gunakan Ekstensi Browser Applify agar tahan terhadap login/CAPTCHA, atau lamar manual.'
+          : 'Situs karier eksternal yang belum didukung Ekstensi Browser Applify; lamar manual di situsnya.',
   }
 }
 

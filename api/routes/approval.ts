@@ -132,6 +132,9 @@ export async function approvalRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
+    if (!request.body || typeof request.body !== 'object') {
+      return reply.status(400).send({ error: 'ID lowongan wajib diisi', code: 'job_id_required' })
+    }
     const {
       job_id,
       application_id,
@@ -140,18 +143,21 @@ export async function approvalRoutes(
       platform,
       answers,
     } = request.body as any
+    const cleanJobId = typeof job_id === 'string' ? job_id.trim() : ''
+    if (!cleanJobId) {
+      return reply.status(400).send({ error: 'ID lowongan wajib diisi', code: 'job_id_required' })
+    }
+
     const supabase = await getDb()
 
     // Prioritas tinggi Gelombang 5: periksa kepemilikan lowongan privat lewat service role
     // (404 untuk lowongan privat milik pengguna lain; tetap aman sebelum kolom visibility & created_by ada).
-    if (typeof job_id === 'string' && job_id.trim()) {
-      const { data: jobRow, error: jobErr } = await selectJobWithVisibility(supabase, job_id.trim(), 'id')
-      if (jobErr) {
-        return failServer(request, reply, jobErr)
-      }
-      if (!jobRow || !isJobAccessibleToUser(jobRow, userId)) {
-        return reply.status(404).send({ error: 'Job not found' })
-      }
+    const { data: jobRow, error: jobErr } = await selectJobWithVisibility(supabase, cleanJobId, 'id')
+    if (jobErr) {
+      return failServer(request, reply, jobErr)
+    }
+    if (!jobRow || !isJobAccessibleToUser(jobRow, userId)) {
+      return reply.status(404).send({ error: 'Job not found' })
     }
 
     // F-21: bila klien mengirim application_id, pastikan baris ai_applications itu memang milik pengguna ini.
@@ -172,9 +178,36 @@ export async function approvalRoutes(
       ownedApplicationId = appRow.id
     }
 
+    // E2E-05: idempotensi persetujuan tertunda di server per (user_id, job_id) agar tab ganda tidak membuat dua antrean.
+    const nowIso = new Date().toISOString()
+    const approvalLookup = supabase.from('approval_requests')
+    if (approvalLookup && typeof approvalLookup.select === 'function') {
+      const pendingQuery = approvalLookup
+        .select('*')
+        .eq('user_id', userId)
+        .eq('job_id', cleanJobId)
+        .eq('status', 'pending')
+      const activeQuery =
+        typeof pendingQuery?.gt === 'function' ? pendingQuery.gt('expires_at', nowIso) : pendingQuery
+      const orderedQuery =
+        typeof activeQuery?.order === 'function'
+          ? activeQuery.order('created_at', { ascending: false })
+          : activeQuery
+      const limitedQuery = typeof orderedQuery?.limit === 'function' ? orderedQuery.limit(1) : orderedQuery
+      const existingRes =
+        typeof limitedQuery?.maybeSingle === 'function' ? await limitedQuery.maybeSingle() : await limitedQuery
+      if (existingRes?.error) {
+        return failServer(request, reply, existingRes.error)
+      }
+      const existingRow = Array.isArray(existingRes?.data) ? existingRes.data[0] : existingRes?.data
+      if (existingRow && (!existingRow.expires_at || Date.parse(String(existingRow.expires_at)) > Date.now())) {
+        return existingRow
+      }
+    }
+
     // resume_url kiriman klien diabaikan. CV diambil dari profil pengguna (bucket privat `resumes`).
     const resume_url = await resumeUrlForUser(supabase as any, userId)
-    let cover_letter = (request.body as any).cover_letter as string | undefined
+    let cover_letter = (request.body as any)?.cover_letter as string | undefined
 
     // Surat tidak dikirim tetapi draf AI ada: pakai surat dari ai_applications milik pengguna ini.
     if (!(typeof cover_letter === 'string' && cover_letter.trim()) && ownedApplicationId) {
@@ -185,35 +218,40 @@ export async function approvalRoutes(
     // halaman Persetujuan sesudahnya (uji Binance 23 November 2026, persetujuan kedaluwarsa sebelum diklik).
     const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS).toISOString()
 
-    // Jawaban formulir beserta skor keyakinan datang dari jalur pengisian yang nyata (FormAutofillService),
-    // dihitung di server dari Pengaturan Otomasi pengguna. `answers` kiriman klien hanya dipakai bila ada
-    // dan bentuknya benar; kalau tidak, server menyiapkannya sendiri (melewati batas laju AI).
-    const clientAnswers = sanitizeClientAnswers(answers)
-    let preparedAnswers = clientAnswers
-    if (clientAnswers.length === 0) {
-      try {
-        await guard.checkActionRateLimit(userId, 'ai_approval_prepare', '/api/approvals')
-      } catch (err: any) {
-        if (err instanceof AiAccessError) {
-          if (err.extra.retryAfterSec) reply.header('Retry-After', String(err.extra.retryAfterSec))
-          return reply.status(err.statusCode).send({ error: err.message, code: err.code })
-        }
-        return reply.status(503).send({ error: 'Batas laju AI gagal diperiksa' })
+    // E2E-05: batas laju selalu diperiksa di server meski klien mengirim `answers` siap pakai, dan jawaban dari klien
+    // selalu ditandai `needs_review: true` dengan keyakinan maksimal 0.5 agar skor keyakinan tidak bisa dipalsukan.
+    try {
+      await guard.checkActionRateLimit(userId, 'ai_approval_prepare', '/api/approvals')
+    } catch (err: any) {
+      if (err instanceof AiAccessError) {
+        if (err.extra.retryAfterSec) reply.header('Retry-After', String(err.extra.retryAfterSec))
+        return reply.status(err.statusCode).send({ error: err.message, code: err.code })
       }
-      preparedAnswers = await prepareApprovalAnswers(supabase, {
-        userId,
-        email: (request as any).user?.email,
-        jobId: job_id,
-        jobTitle: job_title,
-        company,
-      })
+      return reply.status(503).send({ error: 'Batas laju AI gagal diperiksa' })
     }
+
+    const clientAnswers = sanitizeClientAnswers(answers)
+    const preparedAnswers =
+      clientAnswers.length > 0
+        ? clientAnswers.map((a) => ({
+            ...a,
+            confidence: Math.min(a.confidence, 0.5),
+            needs_review: true,
+            source: 'default' as const,
+          }))
+        : await prepareApprovalAnswers(supabase, {
+            userId,
+            email: (request as any).user?.email,
+            jobId: cleanJobId,
+            jobTitle: job_title,
+            company,
+          })
 
     const { data, error } = await supabase
       .from('approval_requests')
       .insert({
         user_id: userId,
-        job_id,
+        job_id: cleanJobId,
         application_id: ownedApplicationId,
         job_title,
         company,
@@ -234,6 +272,70 @@ export async function approvalRoutes(
     // await sendTelegramApprovalNotification(userId, data[0])
 
     return data?.[0]
+  })
+
+  // E2E-04: sinkronkan sunting / tulis ulang surat lamaran dari AIApplyModal ke persetujuan yang masih tertunda.
+  app.patch('/:id/cover-letter', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' })
+    }
+
+    const { id } = request.params as { id: string }
+    const rawLetter = (request.body as any)?.cover_letter
+    const nextCoverLetter = typeof rawLetter === 'string' ? rawLetter.trim() : ''
+    if (!nextCoverLetter) {
+      return reply.status(400).send({ error: 'Surat lamaran tidak boleh kosong', code: 'invalid_cover_letter' })
+    }
+    if (nextCoverLetter.length > 25_000) {
+      return reply.status(400).send({ error: 'Surat lamaran terlalu panjang (maksimal 25.000 karakter)', code: 'cover_letter_too_long' })
+    }
+
+    const db = await getDb()
+    const { data: existing, error: fetchError } = await db
+      .from('approval_requests')
+      .select('id, status, expires_at, application_id')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .maybeSingle()
+
+    if (fetchError) {
+      return failServer(request, reply, fetchError)
+    }
+    if (!existing) {
+      return reply.status(404).send({ error: 'Approval request not found' })
+    }
+    if (existing.status !== 'pending') {
+      return reply.status(409).send({ error: 'Approval request was already processed', code: 'already_processed' })
+    }
+    if (existing.expires_at && new Date(existing.expires_at) < new Date()) {
+      return reply.status(410).send({ error: 'Approval request has expired', code: 'expired' })
+    }
+
+    const { data: updated, error: updateError } = await db
+      .from('approval_requests')
+      .update({ cover_letter: nextCoverLetter })
+      .eq('id', id)
+      .eq('user_id', userId)
+      .eq('status', 'pending')
+      .select('*')
+
+    if (updateError) {
+      return failServer(request, reply, updateError)
+    }
+    if (!updated || updated.length === 0) {
+      return reply.status(409).send({ error: 'Approval request was already processed', code: 'already_processed' })
+    }
+
+    if (existing.application_id) {
+      await db
+        .from('ai_applications')
+        .update({ cover_letter: nextCoverLetter })
+        .eq('id', existing.application_id)
+        .eq('user_id', userId)
+    }
+
+    return { success: true, approval: updated[0] }
   })
 
   // Approve application
