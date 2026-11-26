@@ -180,7 +180,7 @@ test('E2E-04: PATCH /api/approvals/:id/cover-letter menyinkronkan surat di pendi
   await app.close()
 })
 
-const U2 = '55555555-5555-4555-8555-555555555555'
+const U2 ='55555555-5555-4555-8555-555555555555'
 const APR2 = '66666666-6666-4666-8666-666666666666'
 
 /** Aplikasi uji: pengguna diambil dari header `x-test-user` (bawaan U1) agar satu db dipakai dua pengguna. */
@@ -273,4 +273,123 @@ test('E2E-05: idempotensi pending hanya berlaku per pengguna dan tidak mengembal
   assert.equal(u1.json().id, APR1)
   assert.equal(db.tables.approval_requests.length, 3)
   await app.close()
+})
+
+test('Gelombang 10 (1a/1b): error 23505 saat race insert POST /api/approvals membaca ulang baris pending dengan 200 & DRAFT SQL siap', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { resolve } = await import('node:path')
+  const winningRow = {
+    id: APR1,
+    user_id: U1,
+    job_id: J1,
+    application_id: A1,
+    job_title: 'Backend Engineer',
+    company: 'PT Test',
+    platform: 'greenhouse',
+    cover_letter: 'Surat pemenang dari tab pertama.',
+    answers: [],
+    status: 'pending',
+    expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    created_at: new Date().toISOString(),
+  }
+
+  let selectPhase = 0
+  const raceDb: any = {
+    from(table: string) {
+      if (table === 'jobs') {
+        const b: any = {
+          select() { return b },
+          eq() { return b },
+          maybeSingle: async () => ({ data: { id: J1, visibility: 'public', created_by: null }, error: null }),
+        }
+        return b
+      }
+      if (table === 'ai_applications') {
+        const b: any = {
+          select() { return b },
+          eq() { return b },
+          maybeSingle: async () => ({ data: { id: A1, cover_letter: 'Draf awal.' }, error: null }),
+        }
+        return b
+      }
+      if (table === 'approval_requests') {
+        let mode: 'select' | 'insert' = 'select'
+        const b: any = {
+          select() { return b },
+          eq() { return b },
+          gt() { return b },
+          order() { return b },
+          limit() { return b },
+          insert() {
+            mode = 'insert'
+            return {
+              select: async () => ({
+                data: null,
+                error: {
+                  code: '23505',
+                  message: 'duplicate key value violates unique constraint "approval_requests_one_pending_per_job"',
+                },
+              }),
+            }
+          },
+          maybeSingle: async () => {
+            if (mode === 'select') {
+              selectPhase += 1
+              // Panggilan pertama (pre-check) kosong seolah tab paralel belum commit; panggilan kedua (recovery 23505) mengembalikan baris pemenang.
+              return { data: selectPhase === 1 ? null : winningRow, error: null }
+            }
+            return { data: null, error: null }
+          },
+        }
+        return b
+      }
+      // Tabel pendukung jawaban formulir & resume
+      const empty: any = {
+        select() { return empty },
+        eq() { return empty },
+        order() { return empty },
+        limit: async () => ({ data: [], error: null }),
+        maybeSingle: async () => ({ data: null, error: null }),
+        then(resolveFn: any, rejectFn: any) { return Promise.resolve({ data: [], error: null }).then(resolveFn, rejectFn) },
+      }
+      return empty
+    },
+  }
+
+  const app = Fastify()
+  app.addHook('preHandler', async (req: any) => { req.user = { id: U1 } })
+  await app.register(approvalRoutes, {
+    prefix: '/api/approvals',
+    db: raceDb,
+    guard: { checkActionRateLimit: async () => {} },
+  })
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/approvals',
+    payload: {
+      job_id: J1,
+      application_id: A1,
+      job_title: 'Backend Engineer',
+      company: 'PT Test',
+      platform: 'greenhouse',
+      cover_letter: 'Surat dari tab kedua.',
+    },
+  })
+  assert.equal(res.statusCode, 200, 'race 23505 wajib membalas 200, bukan 500')
+  assert.equal(res.json().id, APR1)
+  assert.equal(selectPhase, 2)
+  await app.close()
+
+  const draftSql = readFileSync(
+    resolve(import.meta.dirname, '../../database/migrations/DRAFT_2026-11-26_approval_pending_unique.sql'),
+    'utf8'
+  )
+  assert.match(draftSql, /SELECT user_id, job_id, count\(\*\)/i)
+  assert.match(draftSql, /WHERE status = 'pending'/i)
+  assert.match(draftSql, /GROUP BY 1, 2/i)
+  assert.match(draftSql, /HAVING count\(\*\) > 1/i)
+  assert.match(draftSql, /CREATE UNIQUE INDEX IF NOT EXISTS approval_requests_one_pending_per_job/i)
+  assert.match(draftSql, /ON public\.approval_requests \(user_id, job_id\)/i)
+  assert.match(draftSql, /deploy terlebih dahulu/i)
 })

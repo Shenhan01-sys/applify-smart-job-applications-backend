@@ -58,6 +58,47 @@ export interface ApprovalRoutesOptions extends FastifyPluginOptions {
   guard?: Pick<AiGuardService, 'checkActionRateLimit'>
 }
 
+/** Baca baris pending terbaru untuk `(user_id, job_id)`. Secara default hanya mengembalikan yang belum kedaluwarsa. */
+async function findPendingApproval(
+  db: any,
+  userId: string,
+  jobId: string,
+  allowExpiredOnRace = false
+): Promise<{ data: any | null; error: any | null }> {
+  const approvalLookup = db.from('approval_requests')
+  if (!approvalLookup || typeof approvalLookup.select !== 'function') {
+    return { data: null, error: null }
+  }
+  const nowIso = new Date().toISOString()
+  const pendingQuery = approvalLookup
+    .select('*')
+    .eq('user_id', userId)
+    .eq('job_id', jobId)
+    .eq('status', 'pending')
+  const filteredQuery =
+    !allowExpiredOnRace && typeof pendingQuery?.gt === 'function' ? pendingQuery.gt('expires_at', nowIso) : pendingQuery
+  const orderedQuery =
+    typeof filteredQuery?.order === 'function'
+      ? filteredQuery.order('created_at', { ascending: false })
+      : filteredQuery
+  const limitedQuery = typeof orderedQuery?.limit === 'function' ? orderedQuery.limit(1) : orderedQuery
+  const res = typeof limitedQuery?.maybeSingle === 'function' ? await limitedQuery.maybeSingle() : await limitedQuery
+  if (res?.error) return { data: null, error: res.error }
+  const row = Array.isArray(res?.data) ? res.data[0] : res?.data
+  if (!row) return { data: null, error: null }
+  if (!allowExpiredOnRace && row.expires_at && Date.parse(String(row.expires_at)) <= Date.now()) {
+    return { data: null, error: null }
+  }
+  return { data: row, error: null }
+}
+
+function isUniqueViolationError(err: any): boolean {
+  if (!err) return false
+  const code = String(err.code ?? '')
+  const msg = String(err.message ?? '').toLowerCase()
+  return code === '23505' || msg.includes('duplicate key') || msg.includes('approval_requests_one_pending_per_job')
+}
+
 export async function approvalRoutes(
   app: FastifyInstance,
   opts: ApprovalRoutesOptions = {}
@@ -179,30 +220,12 @@ export async function approvalRoutes(
     }
 
     // E2E-05: idempotensi persetujuan tertunda di server per (user_id, job_id) agar tab ganda tidak membuat dua antrean.
-    const nowIso = new Date().toISOString()
-    const approvalLookup = supabase.from('approval_requests')
-    if (approvalLookup && typeof approvalLookup.select === 'function') {
-      const pendingQuery = approvalLookup
-        .select('*')
-        .eq('user_id', userId)
-        .eq('job_id', cleanJobId)
-        .eq('status', 'pending')
-      const activeQuery =
-        typeof pendingQuery?.gt === 'function' ? pendingQuery.gt('expires_at', nowIso) : pendingQuery
-      const orderedQuery =
-        typeof activeQuery?.order === 'function'
-          ? activeQuery.order('created_at', { ascending: false })
-          : activeQuery
-      const limitedQuery = typeof orderedQuery?.limit === 'function' ? orderedQuery.limit(1) : orderedQuery
-      const existingRes =
-        typeof limitedQuery?.maybeSingle === 'function' ? await limitedQuery.maybeSingle() : await limitedQuery
-      if (existingRes?.error) {
-        return failServer(request, reply, existingRes.error)
-      }
-      const existingRow = Array.isArray(existingRes?.data) ? existingRes.data[0] : existingRes?.data
-      if (existingRow && (!existingRow.expires_at || Date.parse(String(existingRow.expires_at)) > Date.now())) {
-        return existingRow
-      }
+    const { data: existingRow, error: existingErr } = await findPendingApproval(supabase, userId, cleanJobId, false)
+    if (existingErr) {
+      return failServer(request, reply, existingErr)
+    }
+    if (existingRow) {
+      return existingRow
     }
 
     // resume_url kiriman klien diabaikan. CV diambil dari profil pengguna (bucket privat `resumes`).
@@ -265,6 +288,14 @@ export async function approvalRoutes(
       .select()
 
     if (error) {
+      // Tutup race (indeks unik approval_requests_one_pending_per_job): tab/permintaan paralel yang kena 23505
+      // membaca ulang baris pending pemenang dan mengembalikannya dengan 200, bukan 500.
+      if (isUniqueViolationError(error)) {
+        const { data: raceRow, error: raceErr } = await findPendingApproval(supabase, userId, cleanJobId, true)
+        if (!raceErr && raceRow) {
+          return reply.status(200).send(raceRow)
+        }
+      }
       return failServer(request, reply, error)
     }
 
