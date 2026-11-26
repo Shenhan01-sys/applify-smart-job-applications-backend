@@ -58,12 +58,14 @@ export interface ApprovalRoutesOptions extends FastifyPluginOptions {
   guard?: Pick<AiGuardService, 'checkActionRateLimit'>
 }
 
-/** Baca baris pending terbaru untuk `(user_id, job_id)`. Secara default hanya mengembalikan yang belum kedaluwarsa. */
+/**
+ * Baca baris pending terbaru milik `userId` untuk `jobId`. Hanya mengembalikan yang belum kedaluwarsa: kedaluwarsa di
+ * sini lazy (status tetap `pending` sampai disentuh), jadi baris lama tidak boleh dikembalikan sebagai persetujuan aktif.
+ */
 async function findPendingApproval(
   db: any,
   userId: string,
-  jobId: string,
-  allowExpiredOnRace = false
+  jobId: string
 ): Promise<{ data: any | null; error: any | null }> {
   const approvalLookup = db.from('approval_requests')
   if (!approvalLookup || typeof approvalLookup.select !== 'function') {
@@ -75,8 +77,7 @@ async function findPendingApproval(
     .eq('user_id', userId)
     .eq('job_id', jobId)
     .eq('status', 'pending')
-  const filteredQuery =
-    !allowExpiredOnRace && typeof pendingQuery?.gt === 'function' ? pendingQuery.gt('expires_at', nowIso) : pendingQuery
+  const filteredQuery = typeof pendingQuery?.gt === 'function' ? pendingQuery.gt('expires_at', nowIso) : pendingQuery
   const orderedQuery =
     typeof filteredQuery?.order === 'function'
       ? filteredQuery.order('created_at', { ascending: false })
@@ -86,10 +87,26 @@ async function findPendingApproval(
   if (res?.error) return { data: null, error: res.error }
   const row = Array.isArray(res?.data) ? res.data[0] : res?.data
   if (!row) return { data: null, error: null }
-  if (!allowExpiredOnRace && row.expires_at && Date.parse(String(row.expires_at)) <= Date.now()) {
+  if (row.expires_at && Date.parse(String(row.expires_at)) <= Date.now()) {
     return { data: null, error: null }
   }
   return { data: row, error: null }
+}
+
+/**
+ * Tandai pending yang sudah kedaluwarsa milik `userId` untuk `jobId` sebagai `expired`. Indeks unik parsial
+ * (`status = 'pending'`) tidak tahu soal kedaluwarsa, jadi baris basi yang masih `pending` menahan slot dan
+ * memblokir persetujuan baru untuk lowongan yang sama sampai statusnya dilepas.
+ */
+async function expireStalePending(db: any, userId: string, jobId: string): Promise<{ error: any | null }> {
+  const res = await db
+    .from('approval_requests')
+    .update({ status: 'expired' })
+    .eq('user_id', userId)
+    .eq('job_id', jobId)
+    .eq('status', 'pending')
+    .lte('expires_at', new Date().toISOString())
+  return { error: res?.error ?? null }
 }
 
 function isUniqueViolationError(err: any): boolean {
@@ -220,7 +237,7 @@ export async function approvalRoutes(
     }
 
     // E2E-05: idempotensi persetujuan tertunda di server per (user_id, job_id) agar tab ganda tidak membuat dua antrean.
-    const { data: existingRow, error: existingErr } = await findPendingApproval(supabase, userId, cleanJobId, false)
+    const { data: existingRow, error: existingErr } = await findPendingApproval(supabase, userId, cleanJobId)
     if (existingErr) {
       return failServer(request, reply, existingErr)
     }
@@ -270,32 +287,51 @@ export async function approvalRoutes(
             company,
           })
 
-    const { data, error } = await supabase
-      .from('approval_requests')
-      .insert({
-        user_id: userId,
-        job_id: cleanJobId,
-        application_id: ownedApplicationId,
-        job_title,
-        company,
-        platform,
-        cover_letter,
-        answers: preparedAnswers,
-        resume_url,
-        status: 'pending',
-        expires_at: expiresAt,
-      })
-      .select()
+    const insertApproval = () =>
+      supabase
+        .from('approval_requests')
+        .insert({
+          user_id: userId,
+          job_id: cleanJobId,
+          application_id: ownedApplicationId,
+          job_title,
+          company,
+          platform,
+          cover_letter,
+          answers: preparedAnswers,
+          resume_url,
+          status: 'pending',
+          expires_at: expiresAt,
+        })
+        .select()
 
-    if (error) {
+    let { data, error } = await insertApproval()
+
+    if (error && isUniqueViolationError(error)) {
       // Tutup race (indeks unik approval_requests_one_pending_per_job): tab/permintaan paralel yang kena 23505
-      // membaca ulang baris pending pemenang dan mengembalikannya dengan 200, bukan 500.
-      if (isUniqueViolationError(error)) {
-        const { data: raceRow, error: raceErr } = await findPendingApproval(supabase, userId, cleanJobId, true)
-        if (!raceErr && raceRow) {
-          return reply.status(200).send(raceRow)
+      // membaca ulang baris pending pemenang milik pengguna ini (selalu terkunci user_id) dan mengembalikannya
+      // dengan 200, bukan 500.
+      const raced = await findPendingApproval(supabase, userId, cleanJobId)
+      if (!raced.error && raced.data) {
+        return reply.status(200).send(raced.data)
+      }
+      // Tidak ada pending aktif: slot indeks ditahan pending kedaluwarsa (status baru berubah saat disentuh).
+      // Lepaskan lalu coba sisipkan sekali lagi. Kalah race lagi pada percobaan ini tetap membaca ulang pemenangnya.
+      if (!raced.error) {
+        const swept = await expireStalePending(supabase, userId, cleanJobId)
+        if (!swept.error) {
+          ;({ data, error } = await insertApproval())
+          if (error && isUniqueViolationError(error)) {
+            const again = await findPendingApproval(supabase, userId, cleanJobId)
+            if (!again.error && again.data) {
+              return reply.status(200).send(again.data)
+            }
+          }
         }
       }
+    }
+
+    if (error) {
       return failServer(request, reply, error)
     }
 

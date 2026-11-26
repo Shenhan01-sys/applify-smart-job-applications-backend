@@ -393,3 +393,74 @@ test('Gelombang 10 (1a/1b): error 23505 saat race insert POST /api/approvals mem
   assert.match(draftSql, /ON public\.approval_requests \(user_id, job_id\)/i)
   assert.match(draftSql, /deploy terlebih dahulu/i)
 })
+
+/** FakeDb dengan indeks unik parsial `(user_id, job_id) where status = 'pending'`, tanpa memperhatikan kedaluwarsa (seperti di Postgres). */
+function withPendingUniqueIndex(db: FakeDb) {
+  return {
+    tables: db.tables,
+    from(table: string) {
+      const q: any = db.from(table)
+      if (table !== 'approval_requests') return q
+      const realInsert = q.insert.bind(q)
+      q.insert = (payload: any) => {
+        const clash = db.rows('approval_requests').some(
+          (r) => r.status === 'pending' && r.user_id === payload.user_id && r.job_id === payload.job_id
+        )
+        if (clash) {
+          return {
+            select: async () => ({
+              data: null,
+              error: { code: '23505', message: 'duplicate key value violates unique constraint "approval_requests_one_pending_per_job"' },
+            }),
+          }
+        }
+        return realInsert(payload)
+      }
+      return q
+    },
+  }
+}
+
+test('Gelombang 10: pending kedaluwarsa yang menahan indeks unik dilepas lalu persetujuan baru dibuat (bukan mengembalikan baris basi)', async () => {
+  const past = new Date(Date.now() - 3_600_000).toISOString()
+  const db = new FakeDb({
+    jobs: [{ id: J1, title: 'Backend Engineer', company: 'PT Test', visibility: 'public' }],
+    approval_requests: [{ id: APR1, user_id: U1, job_id: J1, status: 'pending', expires_at: past, cover_letter: 'Surat basi' }],
+  })
+  const app = await buildAsHeaderUser(withPendingUniqueIndex(db) as any)
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/approvals',
+    payload: { job_id: J1, job_title: 'Backend Engineer', company: 'PT Test', platform: 'greenhouse', cover_letter: 'Surat segar.' },
+  })
+  assert.equal(res.statusCode, 200)
+  const body = res.json()
+  assert.notEqual(body.id, APR1, 'tidak boleh mengembalikan baris kedaluwarsa')
+  assert.equal(body.status, 'pending')
+  assert.equal(body.cover_letter, 'Surat segar.')
+  assert.ok(Date.parse(body.expires_at) > Date.now())
+  const stale = db.rows('approval_requests').find((r) => r.id === APR1)!
+  assert.equal(stale.status, 'expired')
+  assert.equal(db.rows('approval_requests').filter((r) => r.status === 'pending').length, 1)
+  await app.close()
+})
+
+test('Gelombang 10: pemulihan 23505 tidak pernah mengembalikan baris pengguna lain', async () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString()
+  const db = new FakeDb({
+    jobs: [{ id: J1, title: 'Backend Engineer', company: 'PT Test', visibility: 'public' }],
+    approval_requests: [{ id: APR2, user_id: U2, job_id: J1, status: 'pending', expires_at: future, cover_letter: 'Rahasia milik U2' }],
+  })
+  // Paksa 23505 untuk U1 padahal U1 tidak punya baris pending (mis. bentrok lain): jawabannya galat, bukan baris U2.
+  db.failOn('approval_requests', 'insert', 'duplicate key value violates unique constraint', '23505')
+  const app = await buildAsHeaderUser(db)
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/approvals',
+    payload: { job_id: J1, job_title: 'Backend Engineer', company: 'PT Test', platform: 'greenhouse', cover_letter: 'Surat U1.' },
+  })
+  assert.equal(res.statusCode, 500)
+  assert.ok(!res.body.includes(APR2))
+  assert.ok(!res.body.includes('Rahasia milik U2'))
+  await app.close()
+})
