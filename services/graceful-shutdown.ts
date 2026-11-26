@@ -77,3 +77,32 @@ export function installGracefulShutdown(app: ShutdownApp, opts: GracefulShutdown
   }
   return shutdown
 }
+
+/**
+ * Penjaga error proses tak tertangani untuk backend (audit 48.5 H-08).
+ * Mencatat pesan ringkas (maks 400 karakter, tanpa objek error mentah) agar mudah dicari di log Railway,
+ * lalu keluar dengan kode 1 supaya orchestrator me-restart proses secara bersih.
+ */
+export function installProcessGuards(
+  log: { error(message: string): void },
+  proc: { on(event: string, listener: (err: unknown) => void): unknown; exit(code: number): unknown } = process as any
+): void {
+  const formatReason = (reason: unknown): string => {
+    if (reason instanceof Error) return `${reason.name}: ${reason.message}`.slice(0, 400)
+    try {
+      return String(reason).slice(0, 400)
+    } catch {
+      return 'unknown_fatal_error'
+    }
+  }
+  let exiting = false
+  const handle = (source: string) => (err: unknown) => {
+    log.error(`[backend] FATAL ${source}: ${formatReason(err)}`)
+    if (!exiting) {
+      exiting = true
+      proc.exit(1)
+    }
+  }
+  proc.on('unhandledRejection', handle('unhandledRejection'))
+  proc.on('uncaughtException', handle('uncaughtException'))
+}

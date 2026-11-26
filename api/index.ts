@@ -28,12 +28,14 @@ import { deployConfigWarnings, parseAllowedOrigins, shouldEnableApiDocs } from '
 import { buildCorsOptions } from '../services/cors-options.js'
 import { installEmptyJsonBodyGuard } from '../services/empty-json-body.js'
 import { requestLogSerializers } from '../services/log-redact.js'
-import { installGracefulShutdown } from '../services/graceful-shutdown.js'
+import { installGracefulShutdown, installProcessGuards } from '../services/graceful-shutdown.js'
+import { installSecurityHeaders, trustProxyFromEnv } from '../services/security-headers.js'
 
 // Produksi (Railway, Docker): log JSON polos ke stdout supaya mudah dibaca penampung log.
 // Lokal: pino-pretty berwarna.
 // serializers.req menyamarkan ?code=, ?state=, ?ticket=, dan ?token= di URL permintaan (H-01, services/log-redact.ts).
 const app = Fastify({
+  trustProxy: trustProxyFromEnv(process.env),
   logger:
     process.env.NODE_ENV === 'production'
       ? { serializers: requestLogSerializers }
@@ -49,6 +51,8 @@ const app = Fastify({
 })
 // POST/PUT JSON tanpa isi tidak lagi ditolak 400 (services/empty-json-body.ts).
 installEmptyJsonBodyGuard(app)
+// Header keamanan HTTP bawaan (BS-08.1, J5-18).
+installSecurityHeaders(app)
 
 // Supabase client
 export const supabase = createClient(
@@ -121,6 +125,8 @@ await app.register(internalNotificationRoutes, { prefix: '/api/internal/notifica
 
 // SIGTERM/SIGINT (redeploy, pm2 reload, docker stop): tunggu permintaan yang sedang jalan, lalu keluar (BS-08).
 installGracefulShutdown(app)
+// Catat unhandledRejection/uncaughtException terstruktur sebelum keluar (H-08).
+installProcessGuards(app.log)
 
 const start = async () => {
   try {

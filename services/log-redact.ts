@@ -48,14 +48,14 @@ export function redactUrlForLog(url: string): string {
   return `${path}?${query}`
 }
 
-/** Bentuk sama dengan serializer `req` bawaan Fastify 5, hanya `url`-nya disamarkan. */
+/** Bentuk sama dengan serializer `req` bawaan Fastify 5, dengan `url` dan `remoteAddress` (H-16) disamarkan. */
 export function serializeRequestForLog(req: any) {
   return {
     method: req.method,
     url: redactUrlForLog(req.url),
     version: req.headers && req.headers['accept-version'],
     host: req.host,
-    remoteAddress: req.ip,
+    remoteAddress: req.ip ? REDACTED : undefined,
     remotePort: req.socket ? req.socket.remotePort : undefined,
   }
 }

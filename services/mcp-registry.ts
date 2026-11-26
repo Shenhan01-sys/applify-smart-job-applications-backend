@@ -36,10 +36,14 @@ function loadBoards(): Record<string, BoardEntry[]> {
         out[k] = (v as any[]).map((e) => (typeof e === 'string' ? { slug: e } : e)).filter((e) => e?.slug)
       }
       return out
-    } catch {
+    } catch (err: any) {
+      if (p === process.env.JOB_BOARDS_CONFIG) {
+        console.warn(`[mcp-registry] gagal memuat JOB_BOARDS_CONFIG (${p}): ${String(err?.code ?? err?.message ?? 'error').slice(0, 120)}`)
+      }
       /* coba kandidat berikutnya */
     }
   }
+  console.warn('[mcp-registry] config/job-boards.json tidak ditemukan; daftar papan ATS kosong')
   return {}
 }
 
