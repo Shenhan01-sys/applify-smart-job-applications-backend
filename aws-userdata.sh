@@ -76,7 +76,8 @@ chown ubuntu:ubuntu /var/www/applify
 # Clone repository
 su - ubuntu -c 'cd /var/www/applify && git clone https://github.com/Shenhan01-sys/applify-smart-job-applications.git'
 
-# Setup environment file
+# Setup environment file (J5-03: batasi izin berkas rahasia hanya pemilik 0600)
+umask 077
 cat > /var/www/applify/applify-smart-job-applications/project/backend/.env << 'ENVEOF'
 # Database
 SUPABASE_URL=https://dreexbadvlxufkrvvwrq.supabase.co
@@ -102,6 +103,7 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 ENVEOF
 
 chown ubuntu:ubuntu /var/www/applify/applify-smart-job-applications/project/backend/.env
+chmod 600 /var/www/applify/applify-smart-job-applications/project/backend/.env
 
 # ============================================================
 # PHASE 3: INSTALL & BUILD

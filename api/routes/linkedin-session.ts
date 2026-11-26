@@ -30,7 +30,8 @@ export async function linkedinSessionRoutes(
       const status = await sessionManagerService.checkSession(userId, 'linkedin')
       return status
     } catch (error: any) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error).slice(0, 200) }, 'linkedin-session: status failed')
+      return reply.status(500).send({ error: 'Gagal memeriksa sesi LinkedIn' })
     }
   })
 
@@ -98,7 +99,8 @@ export async function linkedinSessionRoutes(
         session: result,
       }
     } catch (error: any) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error).slice(0, 200) }, 'linkedin-session: status failed')
+      return reply.status(500).send({ error: 'Gagal memeriksa sesi LinkedIn' })
     }
   })
 
@@ -124,7 +126,8 @@ export async function linkedinSessionRoutes(
       }
     } catch (error: any) {
       if (error instanceof SessionKeyConfigError) return replyConfigError(request, reply, error.message)
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error).slice(0, 200) }, 'linkedin-session: verify failed')
+      return reply.status(500).send({ error: 'Gagal memverifikasi sesi LinkedIn' })
     }
   })
 
@@ -162,7 +165,8 @@ export async function linkedinSessionRoutes(
         .eq('id', existing.id)
 
       if (error) {
-        return reply.status(500).send({ error: error.message })
+        request.log.error({ err: String(error.message ?? error).slice(0, 200) }, 'linkedin-session: refresh failed')
+        return reply.status(500).send({ error: 'Gagal memperbarui sesi LinkedIn' })
       }
 
       return {
@@ -171,7 +175,8 @@ export async function linkedinSessionRoutes(
         newExpiresAt: newExpiresAt.toISOString(),
       }
     } catch (error: any) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error).slice(0, 200) }, 'linkedin-session: status failed')
+      return reply.status(500).send({ error: 'Gagal memeriksa sesi LinkedIn' })
     }
   })
 }

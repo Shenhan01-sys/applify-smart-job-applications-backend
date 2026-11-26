@@ -37,11 +37,20 @@ export interface DeletionReport {
   files: Record<string, number>
   rows: Record<string, number>
   waitinglist: number
+  /** Tabel opsional (mis. migrasi DRAFT belum diterapkan) yang dilewati karena belum ada di DB (DB-09). */
+  skippedTables?: string[]
   /** Sesudah apply: sisa baris atau berkas yang masih ada (harus kosong). */
   leftovers: string[]
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+const isMissingTableError = (err: unknown): boolean => {
+  const e = err as { code?: unknown; message?: unknown } | null | undefined
+  const code = String(e?.code ?? '')
+  const msg = String(e?.message ?? err ?? '')
+  return code === '42P01' || code === 'PGRST205' || /does not exist|could not find the table|relation .* does not exist/i.test(msg)
+}
 
 /** Frasa yang harus diketik untuk mode hapus: "HAPUS-" + 8 karakter pertama user_id. */
 export const confirmationPhrase = (userId: string): string => `HAPUS-${userId.slice(0, 8)}`
@@ -54,10 +63,22 @@ async function inventory(client: DeletionClient, userId: string, email: string |
     files[bucket] = paths[bucket].length
   }
   const rows: Record<string, number> = { profiles: await client.countRows('profiles', 'id', userId) }
-  for (const table of USER_TABLES) rows[table] = await client.countRows(table, 'user_id', userId)
+  const skippedTables: string[] = []
+  for (const table of USER_TABLES) {
+    try {
+      rows[table] = await client.countRows(table, 'user_id', userId)
+    } catch (err) {
+      if (isMissingTableError(err)) {
+        rows[table] = 0
+        skippedTables.push(table)
+      } else {
+        throw err
+      }
+    }
+  }
   let waitinglist = await client.countRows('waitinglist', 'user_id', userId)
   if (email) waitinglist += await client.countRows('waitinglist', 'email', email)
-  return { files, paths, rows, waitinglist }
+  return { files, paths, rows, waitinglist, skippedTables }
 }
 
 export async function deleteParticipantData(
@@ -79,10 +100,12 @@ export async function deleteParticipantData(
     files: before.files,
     rows: before.rows,
     waitinglist: before.waitinglist,
+    ...(before.skippedTables.length > 0 ? { skippedTables: before.skippedTables } : {}),
     leftovers: [],
   }
   if (!apply) return report
 
+  const skippedSet = new Set(before.skippedTables)
   // Urutan: berkas dulu (tidak ikut CASCADE), lalu waitinglist (SET NULL), lalu akun auth (CASCADE ke tabel publik).
   for (const bucket of USER_BUCKETS) {
     const list = before.paths[bucket]
@@ -91,9 +114,14 @@ export async function deleteParticipantData(
   await client.deleteRows('waitinglist', 'user_id', userId)
   if (email) await client.deleteRows('waitinglist', 'email', email)
   if (email !== null) await client.deleteAuthUser(userId)
-  // Tabel tanpa CASCADE yang mungkin ditambahkan kemudian: dihapus langsung bila masih ada baris.
+  // Tabel tanpa CASCADE yang mungkin ditambahkan kemudian: dihapus langsung bila masih ada baris (lewati tabel DRAFT yang tidak ada).
   for (const table of USER_TABLES) {
-    if ((await client.countRows(table, 'user_id', userId)) > 0) await client.deleteRows(table, 'user_id', userId)
+    if (skippedSet.has(table)) continue
+    try {
+      if ((await client.countRows(table, 'user_id', userId)) > 0) await client.deleteRows(table, 'user_id', userId)
+    } catch (err) {
+      if (!isMissingTableError(err)) throw err
+    }
   }
   if ((await client.countRows('profiles', 'id', userId)) > 0) await client.deleteRows('profiles', 'id', userId)
 

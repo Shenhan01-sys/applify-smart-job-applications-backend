@@ -8,13 +8,37 @@ function getKey(): string {
   return process.env.OAUTH_TOKEN_ENCRYPTION_KEY || process.env.SESSION_ENCRYPTION_KEY || ''
 }
 
-function key32(): Buffer {
+function getPreviousKeys(): string[] {
+  const raw = process.env.OAUTH_TOKEN_ENCRYPTION_KEY_PREVIOUS || ''
+  return raw
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean)
+}
+
+function deriveKey32(secret: string): Buffer {
   // Derive a stable 32-byte key from the configured secret (sha256).
-  return crypto.createHash('sha256').update(getKey()).digest()
+  return crypto.createHash('sha256').update(secret).digest()
+}
+
+function key32(): Buffer {
+  return deriveKey32(getKey())
+}
+
+const MIN_GCM_BYTES = 28 // 12-byte IV + 16-byte GCM auth tag
+
+function decryptWithSecret(buf: Buffer, secret: string): string {
+  const iv = buf.subarray(0, 12)
+  const tag = buf.subarray(12, 28)
+  const enc = buf.subarray(28)
+  const decipher = crypto.createDecipheriv('aes-256-gcm', deriveKey32(secret), iv)
+  decipher.setAuthTag(tag)
+  const dec = Buffer.concat([decipher.update(enc), decipher.final()])
+  return dec.toString('utf8')
 }
 
 /**
- * AES-256-GCM encrypt a string. Returns a base64 string bundling iv + ciphertext + tag.
+ * AES-256-GCM encrypt a string. Returns a base64 string bundling iv + tag + ciphertext.
  * Decryptable by the matching worker helper (worker/src/lib/crypto.ts).
  */
 export function encrypt(plain: string): string {
@@ -27,15 +51,23 @@ export function encrypt(plain: string): string {
 }
 
 export function decrypt(b64: string): string {
-  if (!getKey()) throw new Error('OAUTH_TOKEN_ENCRYPTION_KEY (or SESSION_ENCRYPTION_KEY) is required to decrypt tokens')
+  const primary = getKey()
+  if (!primary) throw new Error('OAUTH_TOKEN_ENCRYPTION_KEY (or SESSION_ENCRYPTION_KEY) is required to decrypt tokens')
   const buf = Buffer.from(b64, 'base64')
-  const iv = buf.subarray(0, 12)
-  const tag = buf.subarray(12, 28)
-  const enc = buf.subarray(28)
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key32(), iv)
-  decipher.setAuthTag(tag)
-  const dec = Buffer.concat([decipher.update(enc), decipher.final()])
-  return dec.toString('utf8')
+  if (buf.length < MIN_GCM_BYTES) throw new Error('invalid encrypted token payload')
+  try {
+    return decryptWithSecret(buf, primary)
+  } catch (primaryErr) {
+    // BS-U4-05: dukungan rotasi kunci tanpa memutus sesi aktif melalui OAUTH_TOKEN_ENCRYPTION_KEY_PREVIOUS.
+    for (const fallback of getPreviousKeys()) {
+      try {
+        return decryptWithSecret(buf, fallback)
+      } catch {
+        // coba kunci cadangan berikutnya
+      }
+    }
+    throw primaryErr
+  }
 }
 
 /** Perbandingan string konstan waktu (mengembalikan false lebih dulu jika panjang UTF-8 berbeda). */
@@ -53,14 +85,14 @@ export function hashOAuthNonce(nonce: string): string {
 
 /** HMAC-sign a short JSON state payload (used for OAuth `state`). */
 export function signState(payload: object): string {
-  if (!getKey()) throw new Error('SESSION_ENCRYPTION_KEY is required to sign OAuth state')
+  if (!getKey()) throw new Error('OAUTH_TOKEN_ENCRYPTION_KEY (or SESSION_ENCRYPTION_KEY) is required to sign OAuth state')
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
   const sig = crypto.createHmac('sha256', getKey()).update(body).digest('base64url')
   return `${body}.${sig}`
 }
 
 export function verifyState<T = any>(state: string, maxAgeSec = 600): T {
-  if (!getKey()) throw new Error('SESSION_ENCRYPTION_KEY is required to verify OAuth state')
+  if (!getKey()) throw new Error('OAUTH_TOKEN_ENCRYPTION_KEY (or SESSION_ENCRYPTION_KEY) is required to verify OAuth state')
   if (typeof state !== 'string') throw new Error('malformed state')
   const parts = state.split('.')
   if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error('malformed state')

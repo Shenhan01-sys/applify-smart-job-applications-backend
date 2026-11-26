@@ -37,7 +37,7 @@ const COVER_HINT = /\bcover letter\b(?! (?:text|body|content))/
 const COVER_NAME = /cover\s*letter|surat\s+lamaran|motivation(?:al)?\s+letter|letter\s+of\s+motivation/
 
 const TRANSCRIPT_HINT = /\b(?:transcripts?|transkrip)\b(?! (?:url|link|site|website|text))/
-const TRANSCRIPT_NAME = /transcript|transkrip|academic\s+records?|grade\s+reports?|\bnilai\b/
+const TRANSCRIPT_NAME = /transcript|transkrip|academic\s+records?|grade\s+reports?|(?:rekap(?:itulasi)?|daftar|file|berkas)\s+nilai|kartu\s+hasil\s+studi|\bkhs\b/
 
 const PORTFOLIO_HINT = /\bporto?folio\b(?! (?:url|link|site|website|text))/
 const PORTFOLIO_NAME = /porto?folio|work\s+samples?/

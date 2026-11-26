@@ -237,16 +237,19 @@ export function cleanPdfText(pages: string[]): string {
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi
 const PHONE_LABEL_RE = /\((?:mobile|home|work|seluler|ponsel|rumah|kantor)\)\s*$/i
+// 47.1 P2-2: samarkan nomor ponsel Indonesia tanpa label (+62/62/08...) dan pola NIK 16 digit sebelum dikirim ke LLM.
+const ID_MOBILE_RE = /(?<!\d)(?:\+?62[\s.-]?|0)8\d(?:[\s.-]?\d){7,11}(?!\d)/g
+const NIK_16_RE = /(?<!\d)\d{16}(?!\d)/g
 
 /**
- * Teks yang dikirim ke model: tanpa alamat email dan tanpa baris nomor telepon (data kontak tidak dibutuhkan,
- * tautan LinkedIn diambil lewat kode). Meminimalkan data pribadi yang keluar dari server.
+ * Teks yang dikirim ke model: tanpa alamat email, nomor telepon (berlabel maupun nomor ponsel Indonesia tanpa label),
+ * dan nomor NIK 16 digit (data kontak/identitas tidak dibutuhkan). Meminimalkan data pribadi yang keluar dari server.
  */
 export function redactForModel(text: string): string {
   return text
     .split('\n')
     .filter((l) => !PHONE_LABEL_RE.test(l))
-    .map((l) => l.replace(EMAIL_RE, '[email]'))
+    .map((l) => l.replace(EMAIL_RE, '[email]').replace(NIK_16_RE, '[id]').replace(ID_MOBILE_RE, '[phone]'))
     .join('\n')
 }
 

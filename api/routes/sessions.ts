@@ -64,7 +64,8 @@ export async function sessionRoutes(
       .eq('user_id', userId)
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error.message ?? error).slice(0, 200) }, 'sessions: list failed')
+      return reply.status(500).send({ error: 'Gagal memuat sesi platform' })
     }
 
     return data
@@ -135,7 +136,8 @@ export async function sessionRoutes(
     }
 
     if (result.error) {
-      return reply.status(500).send({ error: result.error.message })
+      request.log.error({ err: String(result.error.message ?? result.error).slice(0, 200) }, 'sessions: save failed')
+      return reply.status(500).send({ error: 'Gagal menyimpan sesi platform' })
     }
 
     const row = result.data?.[0]
@@ -160,14 +162,20 @@ export async function sessionRoutes(
     }
 
     const supabase = await getDb()
+    // F-06: bersihkan ciphertext cookie saat sesi dinonaktifkan agar tidak tertinggal di DB.
     const { error } = await supabase
       .from('platform_sessions')
-      .update({ is_active: false })
+      .update({
+        is_active: false,
+        session_data: {},
+        updated_at: new Date().toISOString(),
+      })
       .eq('user_id', userId)
       .eq('platform', platform)
 
     if (error) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error.message ?? error).slice(0, 200) }, 'sessions: delete failed')
+      return reply.status(500).send({ error: 'Gagal menonaktifkan sesi platform' })
     }
 
     return { success: true }

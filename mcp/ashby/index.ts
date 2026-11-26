@@ -9,6 +9,25 @@ import { guessExperienceLevel, htmlToText, matchesKeywords, normalizeJobType, no
  *                  isRemote, workplaceType, employmentType, descriptionPlain,
  *                  descriptionHtml, publishedAt, jobUrl, applyUrl } ] }
  */
+export function extractAshbyCompensation(comp: any): { salary_min?: number; salary_max?: number; salary_currency?: string } {
+  if (!comp || typeof comp !== 'object') return {}
+  const comps: any[] = Array.isArray(comp.summaryComponents)
+    ? comp.summaryComponents
+    : Array.isArray(comp.compensationTiers?.[0]?.components)
+      ? comp.compensationTiers[0].components
+      : []
+  const salaryComp = comps.find((c) => /salary/i.test(String(c?.compensationType ?? ''))) ?? comps[0]
+  if (!salaryComp) return {}
+  const min = Number(salaryComp.minValue)
+  const max = Number(salaryComp.maxValue)
+  const currency = typeof salaryComp.currencyCode === 'string' && salaryComp.currencyCode.trim() ? salaryComp.currencyCode.trim().toUpperCase() : undefined
+  const out: { salary_min?: number; salary_max?: number; salary_currency?: string } = {}
+  if (Number.isFinite(min) && min > 0) out.salary_min = Math.round(min)
+  if (Number.isFinite(max) && max > 0) out.salary_max = Math.round(max)
+  if (currency && (out.salary_min || out.salary_max)) out.salary_currency = currency
+  return out
+}
+
 export function normalizeAshbyJob(job: any, board: string, companyName?: string): JobPosting | null {
   if (!job || typeof job !== 'object' || !job.title) return null
   const locs = [job.location, ...(Array.isArray(job.secondaryLocations) ? job.secondaryLocations.map((s: any) => s?.location) : [])]
@@ -17,6 +36,7 @@ export function normalizeAshbyJob(job: any, board: string, companyName?: string)
   if (country && !locs.some((l: string) => l.includes(country))) locs.push(country)
   const location = locs.join(', ') || (job.isRemote ? 'Remote' : 'Unknown')
   const description = job.descriptionPlain || htmlToText(job.descriptionHtml)
+  const salary = extractAshbyCompensation(job.compensation)
   return {
     id: String(job.id),
     title: String(job.title).trim(),
@@ -29,6 +49,7 @@ export function normalizeAshbyJob(job: any, board: string, companyName?: string)
     experience_level: guessExperienceLevel(job.title, description),
     job_type: normalizeJobType(job.employmentType),
     work_type: normalizeWorkType(job.workplaceType, job.isRemote === true && !job.workplaceType ? 'remote' : ''),
+    ...salary,
     platform: 'ashby',
     board,
     raw_data: { id: job.id, department: job.department ?? null },

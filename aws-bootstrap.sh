@@ -63,8 +63,9 @@ chown ubuntu:ubuntu /var/www/applify
 echo "📥 Cloning repository..."
 su - ubuntu -c 'cd /var/www/applify && git clone https://github.com/Shenhan01-sys/applify-smart-job-applications.git'
 
-# 12. Setup environment file template
+# 12. Setup environment file template (J5-03: batasi izin berkas rahasia hanya pemilik 0600)
 echo "📝 Creating environment template..."
+umask 077
 cat > /var/www/applify/applify-smart-job-applications/project/backend/.env << 'EOF'
 # Database
 SUPABASE_URL=https://your-project.supabase.co
@@ -90,6 +91,7 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 EOF
 
 chown ubuntu:ubuntu /var/www/applify/applify-smart-job-applications/project/backend/.env
+chmod 600 /var/www/applify/applify-smart-job-applications/project/backend/.env
 
 # 13. Install PM2 ecosystem (as ubuntu user)
 echo "📋 Setting up PM2..."
