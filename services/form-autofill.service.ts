@@ -92,7 +92,7 @@ export class FormAutofillService {
           needsReview: parsed.matched ? (settings.pause_at_failed_question ?? true) : true,
         }
       } catch (error) {
-        console.error('AI answer generation failed:', error)
+        console.error('AI answer generation failed:', String((error as any)?.message ?? error).slice(0, 120))
       }
     }
 

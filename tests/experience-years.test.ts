@@ -174,3 +174,19 @@ test('FormAutofillService: pertanyaan tahun pengalaman tanpa data = kosong dan k
     assert.equal(filled.confidence, 0.95, label)
   }
 })
+
+test('47.1 P2-5: excludeInternships menyaring magang dan conservativeYearOnly mencegah inflasi entri hanya-tahun', async () => {
+  const rows = [
+    { start_date: '2023-01-01', end_date: '2023-12-01', is_current: false, employment_type: 'internship', role_title: 'Software Engineer Intern' },
+    { start_date: '2024-01-01', end_date: '2025-12-01', is_current: false, employment_type: 'full-time', role_title: 'Backend Engineer', notes: ['Hanya tahun yang tercantum di PDF.'] },
+  ]
+  const res = deriveExperienceYears(rows, NOW, { excludeInternships: true, conservativeYearOnly: true })!
+  assert.equal(res.years, 1)
+  assert.equal(res.months, 12)
+  assert.equal(res.skipped, 1)
+
+  // Jika hanya punya magang, fallback tetap menghitungnya daripada memaksakan 0
+  const ans = await years([{ start_date: '2023-01-01', end_date: '2024-12-01', is_current: false, employment_type: 'internship', role_title: 'Magang Backend' }])
+  assert.equal(ans.answer, '2')
+  assert.equal(ans.needs_review, true)
+})

@@ -160,7 +160,8 @@ export function mergeProfileIntoSettings(
       merged.years_of_experience = String(yearsFromProfile)
       fromProfile.add('years_of_experience')
     } else {
-      const d = deriveExperienceYears(workExperiences, now)
+      const nonIntern = deriveExperienceYears(workExperiences, now, { excludeInternships: true, conservativeYearOnly: true })
+      const d = nonIntern && nonIntern.used > 0 ? nonIntern : deriveExperienceYears(workExperiences, now, { conservativeYearOnly: true })
       if (d && d.years > 0) {
         merged.years_of_experience = String(d.years)
         fromProfile.add('years_of_experience')
@@ -321,7 +322,16 @@ async function loadAchievementLines(db: AnswersDb, userId: string): Promise<stri
  */
 async function loadWorkExperiences(db: AnswersDb, userId: string): Promise<Array<Record<string, any>> | null> {
   try {
-    const { data, error } = await db.from('work_experiences').select('start_date, end_date, is_current').eq('user_id', userId).limit(100)
+    let { data, error } = await db
+      .from('work_experiences')
+      .select('start_date, end_date, is_current, employment_type, role_title')
+      .eq('user_id', userId)
+      .limit(100)
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || /employment_type|role_title/i.test(String(error.message ?? '')))) {
+      const fallback = await db.from('work_experiences').select('start_date, end_date, is_current').eq('user_id', userId).limit(100)
+      data = fallback.data
+      error = fallback.error
+    }
     return !error && Array.isArray(data) ? data : null
   } catch (e) {
     console.warn('[approval-answers] riwayat kerja tidak terbaca, tahun pengalaman tidak dihitung:', (e as Error)?.message)

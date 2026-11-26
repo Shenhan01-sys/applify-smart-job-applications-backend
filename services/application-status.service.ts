@@ -1,3 +1,5 @@
+import { createInAppNotification, defaultHrefForEvent } from './in-app-notifications.service.js'
+
 /**
  * Telegram notice for application status changes made from the frontend (marked as sent manually, moved on
  * the board, follow-up marked as done). The worker announces the changes it makes itself
@@ -84,6 +86,7 @@ export interface UserChannelDispatcher {
       event: 'ready' | 'submitted' | 'follow_up'
       title: string
       plainMessage: string
+      skipInApp?: boolean
     }
   ): Promise<{ deliveredChannels: string[] }>
 }
@@ -145,6 +148,21 @@ export async function notifyApplicationStatus(
   })
   const res = opts?.skipTelegram ? { ok: false, error: 'skipped' } : await notifier.sendTelegram(htmlMsg)
 
+  const plainBody = plainStatusText({
+    status,
+    title: job?.title,
+    company: job?.company,
+    followUpAt: app.follow_up_scheduled,
+  })
+  await createInAppNotification(db as any, {
+    userId: args.userId,
+    event: status,
+    title: `Applify: ${HEADLINE[status]}`,
+    body: plainBody,
+    href: defaultHrefForEvent(status),
+    metadata: { application_id: app.id, status },
+  })
+
   let userChannels: string[] = []
   if (opts?.dispatcher && (status === 'ready' || status === 'submitted' || status === 'follow_up')) {
     const out = await opts.dispatcher
@@ -152,7 +170,8 @@ export async function notifyApplicationStatus(
         userId: args.userId,
         event: status,
         title: `Applify: ${HEADLINE[status]}`,
-        plainMessage: plainStatusText({ status, title: job?.title, company: job?.company, followUpAt: app.follow_up_scheduled }),
+        plainMessage: plainBody,
+        skipInApp: true,
       })
       .catch(() => ({ deliveredChannels: [] }))
     userChannels = out.deliveredChannels

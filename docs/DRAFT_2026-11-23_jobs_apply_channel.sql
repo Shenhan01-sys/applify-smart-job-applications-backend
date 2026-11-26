@@ -1,11 +1,9 @@
--- DRAFT SQL MIGRATION (DO NOT APPLY DIRECTLY TO PRODUCTION WITHOUT INTEGRATION REVIEW)
--- Date: 2026-11-23
--- Feature: Stage 1 Split-Channel Job Classification Metadata
+-- USULAN MIGRASI (BELUM DIJALANKAN KE PRODUCTION)
+-- Promosi dari backend/docs/DRAFT_2026-11-23_jobs_apply_channel.sql (sesuai Catatan 16 section 4.5).
 --
--- Catatan koordinasi:
---   - Backend sudah bekerja tanpa kolom-kolom ini (fallback klasifikasi runtime dari external_url & description).
---   - Kolom-kolom ini bersifat opsional/additive agar backfill & query kanal di DB lebih cepat setelah direview
---     dan digabungkan oleh agent utama.
+-- Catatan:
+--   - Backend dan frontend sudah bekerja tanpa kolom ini via klasifikasi runtime (`apply-channel.ts`).
+--   - Jalankan hanya setelah review & persetujuan integrasi oleh agent utama / operator.
 
 ALTER TABLE public.jobs
   ADD COLUMN IF NOT EXISTS apply_channel TEXT
@@ -20,3 +18,7 @@ ALTER TABLE public.jobs
 CREATE INDEX IF NOT EXISTS idx_jobs_apply_channel
   ON public.jobs (apply_channel)
   WHERE apply_channel IS NOT NULL;
+
+-- Rollback:
+-- DROP INDEX IF EXISTS public.idx_jobs_apply_channel;
+-- ALTER TABLE public.jobs DROP COLUMN IF EXISTS apply_email, DROP COLUMN IF EXISTS resolved_apply_url, DROP COLUMN IF EXISTS apply_channel;

@@ -154,13 +154,31 @@ export async function approvalRoutes(
       }
     }
 
+    // F-21: bila klien mengirim application_id, pastikan baris ai_applications itu memang milik pengguna ini.
+    let ownedApplicationId: string | null = null
+    if (typeof application_id === 'string' && application_id.trim()) {
+      const candidateAppId = application_id.trim()
+      if (!isUuid(candidateAppId)) {
+        return reply.status(400).send({ error: 'ID lamaran tidak valid', code: 'invalid_application_id' })
+      }
+      const { data: appRow, error: appErr } = await supabase
+        .from('ai_applications')
+        .select('id')
+        .eq('id', candidateAppId)
+        .eq('user_id', userId)
+        .maybeSingle()
+      if (appErr) return failServer(request, reply, appErr)
+      if (!appRow) return reply.status(404).send({ error: 'Application not found' })
+      ownedApplicationId = appRow.id
+    }
+
     // resume_url kiriman klien diabaikan. CV diambil dari profil pengguna (bucket privat `resumes`).
     const resume_url = await resumeUrlForUser(supabase as any, userId)
     let cover_letter = (request.body as any).cover_letter as string | undefined
 
     // Surat tidak dikirim tetapi draf AI ada: pakai surat dari ai_applications milik pengguna ini.
-    if (!(typeof cover_letter === 'string' && cover_letter.trim()) && application_id) {
-      cover_letter = (await coverLetterFromApplication(supabase, userId, application_id)) ?? cover_letter
+    if (!(typeof cover_letter === 'string' && cover_letter.trim()) && ownedApplicationId) {
+      cover_letter = (await coverLetterFromApplication(supabase, userId, ownedApplicationId)) ?? cover_letter
     }
 
     // Masa berlaku persetujuan: 24 jam (APPROVAL_TTL_MS). Satu jam terlalu pendek: pengguna sering baru membuka
@@ -196,7 +214,7 @@ export async function approvalRoutes(
       .insert({
         user_id: userId,
         job_id,
-        application_id: application_id ?? null,
+        application_id: ownedApplicationId,
         job_title,
         company,
         platform,
@@ -241,12 +259,14 @@ export async function approvalRoutes(
       return reply.status(404).send({ error: 'Approval request not found or already processed' })
     }
 
-    // Check if expired
+    // Check if expired (F-20: kunci user_id + status='pending')
     if (new Date(requestData.expires_at) < new Date()) {
       await db
         .from('approval_requests')
         .update({ status: 'expired' })
         .eq('id', id)
+        .eq('user_id', userId)
+        .eq('status', 'pending')
 
       return reply.status(410).send({ error: 'Approval request has expired' })
     }
@@ -402,6 +422,8 @@ export async function approvalRoutes(
         .from('approval_requests')
         .update({ status: 'pending', reviewed_at: null })
         .eq('id', id)
+        .eq('user_id', userId)
+        .eq('status', 'approved')
       if (limitReached) {
         if (err.resetAt) reply.header('Retry-After', String(Math.max(1, Math.ceil((err.resetAt.getTime() - Date.now()) / 1000))))
         return reply.status(429).send({ error: err.message, code: err.code })
@@ -592,7 +614,11 @@ export async function approvalRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
-    const { limit = 50, offset = 0 } = request.query as any
+    const rawQuery = (request.query ?? {}) as { limit?: unknown; offset?: unknown }
+    const parsedLimit = Number(rawQuery.limit)
+    const parsedOffset = Number(rawQuery.offset)
+    const safeLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(100, Math.floor(parsedLimit)) : 50
+    const safeOffset = Number.isFinite(parsedOffset) && parsedOffset >= 0 ? Math.floor(parsedOffset) : 0
 
     const db = await getDb()
     const { data, error } = await db
@@ -604,7 +630,7 @@ export async function approvalRoutes(
       // nullsFirst:false 50 baris kedaluwarsa menutup semua persetujuan baru dari halaman pertama (E2E-02).
       .order('reviewed_at', { ascending: false, nullsFirst: false })
       .order('created_at', { ascending: false })
-      .range(Number(offset), Number(offset) + Number(limit) - 1)
+      .range(safeOffset, safeOffset + safeLimit - 1)
 
     if (error) {
       return failServer(request, reply, error)

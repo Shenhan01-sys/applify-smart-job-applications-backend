@@ -71,8 +71,9 @@ export class RateLimitService {
       .gte('created_at', oneHourAgo)
 
     if (error) {
-      console.error('Rate limit check failed:', error)
-      return { allowed: true, remaining: 0, resetAt: new Date(Date.now() + 3600000) }
+      // Gagal tertutup (47.6 F-09): galat DB tidak boleh meloloskan batas platform tanpa batas.
+      console.error('Rate limit check failed:', String((error as any)?.code ?? 'db_error'))
+      throw new Error('rate_limit_check_failed')
     }
 
     const used = count || 0
@@ -98,11 +99,15 @@ export class RateLimitService {
     const supabase = await this.db()
     // Tier lives in subscriptions.ai_model_tier (schema.sql); the old code read a non-existent `tier`
     // column, got an error it ignored, and so treated every user as free.
-    const { data: subscription } = await supabase
+    const { data: subscription, error: subError } = await supabase
       .from('subscriptions')
       .select('ai_model_tier')
       .eq('user_id', userId)
       .maybeSingle()
+    if (subError) {
+      console.error('Quota tier lookup failed:', String((subError as any)?.code ?? 'db_error'))
+      throw new Error('quota_check_failed')
+    }
 
     const tier: 'free' | 'pro' = subscription?.ai_model_tier === 'pro' ? 'pro' : 'free'
     const dailyLimit = DAILY_APPLY_LIMIT[tier]
@@ -120,8 +125,9 @@ export class RateLimitService {
       .gte('created_at', startOfDay.toISOString())
 
     if (error) {
-      console.error('Quota check failed:', error)
-      return { allowed: true, remaining: 0, used: 0, limit: dailyLimit, tier, resetsAt }
+      // Gagal tertutup (47.6 F-09): galat DB tidak boleh melaporkan kuota masih terbuka.
+      console.error('Quota check failed:', String((error as any)?.code ?? 'db_error'))
+      throw new Error('quota_check_failed')
     }
 
     const used = count || 0

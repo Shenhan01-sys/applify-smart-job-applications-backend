@@ -174,7 +174,7 @@ export class AutomationService {
         details,
       })
     } catch (error) {
-      console.error('Failed to log action:', error)
+      console.error('Failed to log action:', String((error as any)?.code ?? (error as any)?.message ?? 'db_error').slice(0, 120))
     }
   }
 }
