@@ -8,6 +8,9 @@ import { PRIVATE_JOBS_MIGRATION_FILE, savePrivateOffPortalJobs } from '../servic
 const TINY_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2dIAAAAASUVORK5CYII='
 
+/** Guard tiruan: izinkan semua (batas ai-guard diuji di off-portal-gel3-hardening.test.ts). */
+const allowGuard = { checkActionRateLimit: async () => {} }
+
 function makePrivateJobsFakeDb(opts: { migrationApplied: boolean }) {
   const rows: any[] = []
   let seq = 1
@@ -63,6 +66,7 @@ test('Gelombang 3 parse poster: menggabungkan OCR teks + QR URL ke parser off-po
   })
   await app.register(jobRoutes, {
     prefix: '/api/jobs',
+    guard: allowGuard,
     posterOcr: async () => ({
       status: 'ok',
       text: 'PT Sinar Karya\nWe Are Hiring:\n1. Frontend Engineer\n2. UI/UX Designer\nLokasi: Bandung',
@@ -116,6 +120,7 @@ test('Gelombang 3 parse poster tanpa OCR & tanpa QR: tidak error 500, kembalikan
   })
   await app.register(jobRoutes, {
     prefix: '/api/jobs',
+    guard: allowGuard,
     posterOcr: async () => ({ status: 'unavailable', text: '', truncated: false }),
     qrDecoder: async () => ({ rawTexts: [], urls: [], rejectedUrls: [], method: 'png_native' }),
   })

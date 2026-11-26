@@ -19,12 +19,19 @@ import {
 } from '../../services/poster-ocr.service.js'
 import { decodeQrUrlsFromImage, type QrDecodeOptions, type QrDecodeResult } from '../../services/qr-decoder.service.js'
 import { savePrivateOffPortalJobs } from '../../services/off-portal-save.service.js'
+import { AiAccessError, aiGuardService, type AiGuardService, type AiLimits } from '../../services/ai-guard.service.js'
 
 /** Batas POST /:id/enrich per pengguna: tiap permintaan bisa memicu satu fetch ke situs lowongan. */
 export const ENRICH_LIMIT_PER_MINUTE = 30
 export const ENRICH_WINDOW_MS = 60_000
 /** Batas body untuk POST /off-portal/parse (cukup untuk gambar poster 5 MB dalam base64 + caption). */
 export const OFF_PORTAL_PARSE_BODY_LIMIT = 8 * 1024 * 1024
+/**
+ * Unggahan gambar poster memicu OCR Gemini (berbayar) dan dekode QR (CPU). Batasnya lewat ai-guard, dengan action
+ * sendiri supaya tidak berbagi hitungan dengan 'ai_request'; tidak memeriksa atau memakai kuota draf bulanan.
+ */
+export const OFF_PORTAL_IMAGE_ACTION = 'off_portal_ocr'
+export const OFF_PORTAL_IMAGE_LIMITS: AiLimits = { perMinute: 3, perHour: 20 }
 
 export interface JobRouteOptions extends FastifyPluginOptions {
   /** Hanya tes yang mengisinya. Produksi memakai klien service-role dari api/index.ts (dimuat saat dipakai). */
@@ -37,6 +44,8 @@ export interface JobRouteOptions extends FastifyPluginOptions {
   posterOcr?: (buffer: Buffer, mimeType: PosterImageMime, opts?: PosterOcrOptions) => Promise<PosterOcrResult>
   /** Hanya tes yang mengisinya untuk dekode QR kustom. */
   qrDecoder?: (buffer: Buffer, mimeType: PosterImageMime, opts?: QrDecodeOptions) => Promise<QrDecodeResult>
+  /** Hanya tes yang mengisinya. Produksi memakai aiGuardService (dimuat klien Supabase saat dipakai). */
+  guard?: Pick<AiGuardService, 'checkActionRateLimit'>
 }
 
 /** id lowongan: huruf, angka, '-' dan '_' saja. Selain itu pasti bukan lowongan (404), tanpa menyentuh DB. */
@@ -44,6 +53,7 @@ const validId = (id: unknown): id is string => typeof id === 'string' && /^[A-Za
 
 export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
   const now = opts.now ?? Date.now
+  const guard = opts.guard ?? aiGuardService
   // Dimuat di dalam handler, bukan di atas, supaya meng-import file ini (di tes) tidak menyalakan server.
   const getDb = async (): Promise<SupabaseClient> => opts.db ?? ((await import('../index.js')).supabase as SupabaseClient)
 
@@ -173,11 +183,39 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
       if ('error' in decoded) {
         return reply.status(decoded.statusCode).send({ error: decoded.error, code: decoded.code })
       }
+      // Gambar yang sah sudah lolos pemeriksaan murah di atas; sekarang batas laju ai-guard sebelum OCR/QR dijalankan.
+      try {
+        await guard.checkActionRateLimit(
+          userId,
+          OFF_PORTAL_IMAGE_ACTION,
+          '/api/jobs/off-portal/parse',
+          OFF_PORTAL_IMAGE_LIMITS,
+          'Terlalu banyak unggahan poster',
+        )
+      } catch (error: any) {
+        if (error instanceof AiAccessError) {
+          if (error.extra.retryAfterSec) reply.header('Retry-After', String(error.extra.retryAfterSec))
+          return reply.status(error.statusCode).send({
+            error: error.message,
+            code: error.code,
+            ...(error.extra.retryAfterSec ? { retry_after_seconds: error.extra.retryAfterSec } : {}),
+          })
+        }
+        request.log.error({ err: String(error?.message ?? error) }, '[off-portal/parse] pemeriksaan batas unggahan poster gagal')
+        return reply.status(503).send({ error: 'Batas unggahan poster tidak dapat diperiksa sekarang. Coba lagi nanti.', code: 'rate_limit_check_failed' })
+      }
       const runOcr = opts.posterOcr ?? ocrPosterImage
       const runQr = opts.qrDecoder ?? decodeQrUrlsFromImage
+      const noQr: QrDecodeResult = { rawTexts: [], urls: [], rejectedUrls: [], method: 'none' }
       const [ocrRes, qrRes] = await Promise.all([
         runOcr(decoded.buffer, decoded.mimeType, { fetchImpl: opts.fetchImpl }),
-        runQr(decoded.buffer, decoded.mimeType),
+        // Dekoder QR tidak boleh menjatuhkan permintaan (gambar buatan): gagal berarti tidak ada QR.
+        Promise.resolve()
+          .then(() => runQr(decoded.buffer, decoded.mimeType))
+          .catch((err) => {
+            request.log.warn({ err: String(err?.message ?? err) }, '[off-portal/parse] dekode QR gagal')
+            return noQr
+          }),
       ])
 
       ocrMeta = {
@@ -266,7 +304,8 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
     try {
       const result = await savePrivateOffPortalJobs(await getDb(), userId, body.jobs, new Date(now()))
       if (!result.saved && !result.migrationRequired) {
-        return reply.status(400).send({ error: result.message, code: result.code ?? 'invalid_items' })
+        const status = result.code === 'private_jobs_limit_reached' ? 409 : 400
+        return reply.status(status).send({ error: result.message, code: result.code ?? 'invalid_items' })
       }
       return result
     } catch (error: any) {

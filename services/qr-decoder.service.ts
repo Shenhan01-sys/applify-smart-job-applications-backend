@@ -689,20 +689,35 @@ function verifyVerticalFinder(
   expectedUnit: number,
 ): { y: number; unit: number } | null {
   const ix = Math.round(cx)
-  let iy = Math.round(cy)
+  const iy = Math.round(cy)
   if (ix < 0 || ix >= w || iy < 0 || iy >= h || bin[iy * w + ix] !== 1) return null
+
+  // Satu run di kolom ini tidak mungkin lebih panjang dari beberapa modul. Dibatasi supaya gambar buatan
+  // (garis vertikal panjang) tidak membuat tiap kandidat menelusuri seluruh tinggi gambar.
+  const maxRun = Math.ceil(expectedUnit * 5) + 2
+  let y = iy
+  let overflow = false
+  const run = (step: 1 | -1, color: 0 | 1): number => {
+    let n = 0
+    while (y >= 0 && y < h && bin[y * w + ix] === color && n <= maxRun) {
+      n++
+      y += step
+    }
+    if (n > maxRun) overflow = true
+    return n
+  }
 
   const counts = [0, 0, 0, 0, 0]
   // Walk up from center black
-  let y = iy
-  while (y >= 0 && bin[y * w + ix] === 1) { counts[2]++; y-- }
-  while (y >= 0 && bin[y * w + ix] === 0) { counts[1]++; y-- }
-  while (y >= 0 && bin[y * w + ix] === 1) { counts[0]++; y-- }
+  counts[2] += run(-1, 1)
+  counts[1] += run(-1, 0)
+  counts[0] += run(-1, 1)
   // Walk down from center black
   y = iy + 1
-  while (y < h && bin[y * w + ix] === 1) { counts[2]++; y++ }
-  while (y < h && bin[y * w + ix] === 0) { counts[3]++; y++ }
-  while (y < h && bin[y * w + ix] === 1) { counts[4]++; y++ }
+  counts[2] += run(1, 1)
+  counts[3] += run(1, 0)
+  counts[4] += run(1, 1)
+  if (overflow) return null
 
   const unit = matchesFinderRatio(counts)
   if (unit <= 0) return null
@@ -737,11 +752,29 @@ function binarizeRegion(rgba: Uint8Array, imgW: number, rx: number, ry: number, 
   return bin
 }
 
-function findFinderCenters(bin: Uint8Array, w: number, h: number): FinderCenter[] {
+/** Batas kandidat pusat finder yang disimpan. Pola kotak-kotak buatan bisa menghasilkan ratusan ribu kecocokan. */
+const MAX_FINDER_CANDIDATES = 64
+/** Anggaran waktu pemindaian QR per gambar (ms). Poster asli selesai dalam puluhan milidetik. */
+export const QR_SCAN_BUDGET_MS = 1000
+
+/** Tambah kandidat; bila penuh, buang kandidat dengan hitungan terendah (finder asli terkumpul di banyak baris). */
+function addFinderCandidate(centers: FinderCenter[], cand: FinderCenter): void {
+  if (centers.length < MAX_FINDER_CANDIDATES) {
+    centers.push(cand)
+    return
+  }
+  let lowest = 0
+  for (let i = 1; i < centers.length; i++) if (centers[i].count < centers[lowest].count) lowest = i
+  if (centers[lowest].count <= cand.count) centers[lowest] = cand
+}
+
+function findFinderCenters(bin: Uint8Array, w: number, h: number, deadline: number): FinderCenter[] {
   const centers: FinderCenter[] = []
   const rowStep = h > 500 ? 2 : 1
 
   for (let y = 0; y < h; y += rowStep) {
+    // Cadangan terakhir: gambar buatan tidak boleh menahan proses lebih lama dari anggaran waktu.
+    if (Date.now() > deadline) break
     const counts = [0, 0, 0, 0, 0]
     let state = 0
     for (let x = 0; x < w; x++) {
@@ -770,7 +803,7 @@ function findFinderCenters(bin: Uint8Array, w: number, h: number): FinderCenter[
                     break
                   }
                 }
-                if (!merged) centers.push({ x: cx, y: v.y, moduleSize: mod, count: 1 })
+                if (!merged) addFinderCandidate(centers, { x: cx, y: v.y, moduleSize: mod, count: 1 })
               }
             }
             counts[0] = counts[2]
@@ -795,7 +828,7 @@ function findFinderCenters(bin: Uint8Array, w: number, h: number): FinderCenter[
         const v = verifyVerticalFinder(bin, w, h, cx, y, unit)
         if (v) {
           const mod = (unit + v.unit) / 2
-          centers.push({ x: cx, y: v.y, moduleSize: mod, count: 1 })
+          addFinderCandidate(centers, { x: cx, y: v.y, moduleSize: mod, count: 1 })
         }
       }
     }
@@ -890,9 +923,11 @@ export function decodeQrStringsFromRgba(image: RgbaImage): string[] {
   }
 
   const found = new Set<string>()
+  const deadline = Date.now() + QR_SCAN_BUDGET_MS
   for (const [rx, ry, rw, rh] of regions) {
+    if (Date.now() > deadline) break
     const bin = binarizeRegion(data, width, rx, ry, rw, rh)
-    const centers = findFinderCenters(bin, rw, rh)
+    const centers = findFinderCenters(bin, rw, rh, deadline)
     if (centers.length < 3) continue
     for (let i = 0; i < centers.length && i < 8; i++) {
       for (let j = i + 1; j < centers.length && j < 8; j++) {
@@ -916,9 +951,17 @@ export function decodeQrStringsFromRgba(image: RgbaImage): string[] {
 
 let activeQrBrowser = 0
 const qrBrowserQueue: Array<() => void> = []
+/** Antrean tunggu Chromium dibatasi: permintaan ke-(N+1) langsung dilewati (hasil QR kosong) alih-alih menumpuk gambar 5 MB di memori. */
+export const MAX_QR_BROWSER_WAITING = 2
+/** Batas waktu total satu dekode lewat Chromium (peluncuran + render + pembacaan piksel). */
+export const QR_BROWSER_TIMEOUT_MS = 20_000
+/** Batas dimensi gambar JPEG/WebP yang boleh dibuka Chromium (hindari gambar raksasa yang memboroskan memori). */
+export const MAX_QR_BROWSER_SIDE = 12_000
+export const MAX_QR_BROWSER_PIXELS = 50_000_000
 
-async function withQrBrowserSlot<T>(fn: () => Promise<T>): Promise<T> {
+async function withQrBrowserSlot<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   if (activeQrBrowser >= 1) {
+    if (qrBrowserQueue.length >= MAX_QR_BROWSER_WAITING) return fallback
     await new Promise<void>((resolve) => qrBrowserQueue.push(resolve))
   }
   activeQrBrowser++
@@ -931,17 +974,72 @@ async function withQrBrowserSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Baca lebar x tinggi dari header JPEG atau WebP tanpa mendekode piksel. null bila header tidak bisa dibaca
+ * (gambar seperti itu tidak dibuka di Chromium).
+ */
+export function peekImageDimensions(buf: Buffer, mimeType: PosterImageMime): { width: number; height: number } | null {
+  try {
+    if (mimeType === 'image/jpeg') {
+      let off = 2
+      while (off + 9 < buf.length) {
+        if (buf[off] !== 0xff) {
+          off++
+          continue
+        }
+        const marker = buf[off + 1]
+        if (marker === 0xff) {
+          off++
+          continue
+        }
+        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+          off += 2
+          continue
+        }
+        const len = buf.readUInt16BE(off + 2)
+        const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
+        if (isSof) return { height: buf.readUInt16BE(off + 5), width: buf.readUInt16BE(off + 7) }
+        if (len < 2) return null
+        off += 2 + len
+      }
+      return null
+    }
+    if (mimeType === 'image/webp') {
+      const kind = buf.subarray(12, 16).toString('ascii')
+      if (kind === 'VP8X' && buf.length >= 30) return { width: 1 + buf.readUIntLE(24, 3), height: 1 + buf.readUIntLE(27, 3) }
+      if (kind === 'VP8L' && buf.length >= 25 && buf[20] === 0x2f) {
+        const bits = buf.readUInt32LE(21)
+        return { width: 1 + (bits & 0x3fff), height: 1 + ((bits >>> 14) & 0x3fff) }
+      }
+      if (kind === 'VP8 ' && buf.length >= 30 && buf[23] === 0x9d && buf[24] === 0x01 && buf[25] === 0x2a) {
+        return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff }
+      }
+      return null
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+export function isBrowserDecodableSize(buf: Buffer, mimeType: PosterImageMime): boolean {
+  const dim = peekImageDimensions(buf, mimeType)
+  if (!dim || dim.width < 1 || dim.height < 1) return false
+  return dim.width <= MAX_QR_BROWSER_SIDE && dim.height <= MAX_QR_BROWSER_SIDE && dim.width * dim.height <= MAX_QR_BROWSER_PIXELS
+}
+
 async function decodeNonPngViaChromium(buffer: Buffer, mimeType: PosterImageMime): Promise<string[]> {
   if (process.env.QR_BROWSER_DECODER === 'false') return []
+  if (!isBrowserDecodableSize(buffer, mimeType)) return []
   return withQrBrowserSlot(async () => {
     let browser: any = null
     try {
       const { chromium } = await import('playwright')
-      browser = await chromium.launch(chromiumLaunchOptions({ headless: true }))
+      browser = await chromium.launch(chromiumLaunchOptions({ headless: true, timeout: QR_BROWSER_TIMEOUT_MS }))
       const context = await browser.newContext()
       const page = await context.newPage()
       const dataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`
-      const extracted = await page.evaluate(async (src: string) => {
+      const evaluation = page.evaluate(async (src: string) => {
         const img = new Image()
         img.src = src
         await new Promise<void>((resolve, reject) => {
@@ -971,6 +1069,18 @@ async function decodeNonPngViaChromium(buffer: Buffer, mimeType: PosterImageMime
         const imgData = ctx.getImageData(0, 0, w, h)
         return { barcodeTexts, width: w, height: h, rgba: Array.from(imgData.data) }
       }, dataUrl)
+      let timer: NodeJS.Timeout | undefined
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('qr browser timeout')), QR_BROWSER_TIMEOUT_MS)
+      })
+      let extracted: Awaited<typeof evaluation>
+      try {
+        extracted = await Promise.race([evaluation, timeout])
+      } finally {
+        if (timer) clearTimeout(timer)
+        // Bila batas waktu menang, browser ditutup di finally luar dan evaluasi yang tertinggal ditolak; jangan jadi unhandled.
+        evaluation.catch(() => {})
+      }
 
       const results = new Set<string>(extracted.barcodeTexts)
       if (extracted.width >= 21 && extracted.height >= 21 && extracted.rgba.length >= extracted.width * extracted.height * 4) {
@@ -991,7 +1101,7 @@ async function decodeNonPngViaChromium(buffer: Buffer, mimeType: PosterImageMime
         } catch {}
       }
     }
-  })
+  }, [])
 }
 
 export interface QrDecodeResult {

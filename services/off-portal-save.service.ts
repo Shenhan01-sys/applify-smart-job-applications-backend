@@ -20,6 +20,10 @@ import {
  *   - Idempoten per `(created_by, publication_fingerprint)`: klik simpan ulang mengembalikan baris lama (`alreadySaved: true`).
  */
 
+/** Batas lowongan privat per pengguna (mencegah tabel jobs dipenuhi satu akun). */
+export const MAX_PRIVATE_OFF_PORTAL_JOBS_PER_USER = 200
+export const PRIVATE_JOBS_LIMIT_MESSAGE = `Daftar lowongan pribadi sudah mencapai batas ${MAX_PRIVATE_OFF_PORTAL_JOBS_PER_USER}. Hapus lowongan yang tidak dipakai sebelum menyimpan yang baru.`
+
 export const PRIVATE_JOBS_MIGRATION_FILE = 'DRAFT_2026-11-26_private_offportal_jobs.sql'
 export const PRIVATE_JOBS_MIGRATION_MESSAGE =
   'Penyimpanan lowongan pribadi belum aktif di database karena migrasi DRAFT_2026-11-26_private_offportal_jobs.sql belum dijalankan. Pratinjau tetap bisa dibaca, tetapi lowongan belum disimpan ke daftar.'
@@ -64,7 +68,7 @@ export interface SavedOffPortalJobRow {
 export interface SaveOffPortalResult {
   saved: boolean
   migrationRequired: boolean
-  code?: 'private_jobs_migration_required' | 'invalid_items'
+  code?: 'private_jobs_migration_required' | 'private_jobs_limit_reached' | 'invalid_items'
   message: string
   insertedCount: number
   duplicateCount: number
@@ -144,6 +148,24 @@ export async function savePrivateOffPortalJobs(
   }
 
   const items = (rawItems as SaveOffPortalJobItemInput[]).slice(0, MAX_OFF_PORTAL_ROLES)
+
+  // Batas per pengguna. Gagal menghitung tidak menghalangi simpan (batas ini perlindungan, bukan syarat benar-salah).
+  const countRes: any = await db
+    .from('jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('created_by', userId)
+    .eq('visibility', 'private')
+  if (!countRes?.error && typeof countRes?.count === 'number' && countRes.count + items.length > MAX_PRIVATE_OFF_PORTAL_JOBS_PER_USER) {
+    return {
+      saved: false,
+      migrationRequired: false,
+      code: 'private_jobs_limit_reached',
+      message: PRIVATE_JOBS_LIMIT_MESSAGE,
+      insertedCount: 0,
+      duplicateCount: 0,
+      jobs: [],
+    }
+  }
   const fallbackGroupId = crypto.randomUUID()
   const savedRows: SavedOffPortalJobRow[] = []
   let insertedCount = 0
@@ -231,6 +253,21 @@ export async function savePrivateOffPortalJobs(
           insertedCount: 0,
           duplicateCount: 0,
           jobs: [],
+        }
+      }
+      // Dua permintaan simpan bersamaan untuk lowongan yang sama: indeks unik menang, baris yang sudah ada dipakai ulang.
+      if (String(insertRes.error.code ?? '') === '23505') {
+        const raced = await db
+          .from('jobs')
+          .select('*')
+          .eq('created_by', userId)
+          .eq('publication_fingerprint', publicationFingerprint)
+          .limit(1)
+        const row = Array.isArray(raced.data) ? raced.data[0] : null
+        if (!raced.error && row) {
+          duplicateCount++
+          savedRows.push({ ...(row as SavedOffPortalJobRow), alreadySaved: true })
+          continue
         }
       }
       throw new Error(`private job insert failed: ${insertRes.error.message}`)
