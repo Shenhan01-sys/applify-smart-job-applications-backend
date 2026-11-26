@@ -170,9 +170,9 @@ export async function aggregateJobs(params: AggregateParams): Promise<AggregateR
     stat.fetched = raw.length
     const kept = raw
       .filter((j) => matchesLocation(j.location, locFilter))
-      // Sumber 'board' sudah memfilter kata kunci di server (pencarian semantik portal),
-      // jadi filter ketat hanya untuk ATS yang mengembalikan seluruh isi papan.
-      .filter((j) => client.kind !== 'ats' || matchesKeywords(j, keywords))
+      // Sumber 'board' umumnya memfilter kata kunci di server, kecuali ATS (seluruh isi papan) dan Glints
+      // (fallback browser/pencarian Glints sering melonggarkan kata kunci — audit 47.3 P1-02).
+      .filter((j) => (client.kind !== 'ats' && platform !== 'glints') || matchesKeywords(j, keywords))
       .map((j) => {
         const legacy = relevanceScore(j, keywords, params.skills ?? [])
         const c1 = rankJobC1(j, {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Langfuse } from 'langfuse'
 
 // Nilai contoh dari .env.example ('pk-...', 'sk-...', 'your-...') dianggap belum diisi,
@@ -9,6 +10,82 @@ const langfuse = new Langfuse({
   secretKey: realKey(process.env.LANGFUSE_SECRET_KEY),
   baseUrl: process.env.LANGFUSE_BASE_URL || 'https://cloud.langfuse.com',
 })
+
+const SENSITIVE_META_KEY = /prompt|output|content|resume|cv|cover[_-]?letter|email|phone|whatsapp|address|salary|token|secret|password/i
+
+export interface RedactedLangfuseContent {
+  redacted: true
+  sha256: string
+  chars: number
+}
+
+/**
+ * Redaksi konten prompt/output AI sebelum dikirim ke Langfuse (47.5 U6-P2-11).
+ * Bawaan: hanya hash SHA-256 + panjang karakter (tidak pernah mengirim isi CV/surat/PII ke pihak ketiga).
+ * Konten mentah hanya dikirim bila `LANGFUSE_INCLUDE_CONTENT=true` diset eksplisit.
+ */
+export function redactLangfuseText(
+  text: string,
+  env: Record<string, string | undefined> = process.env
+): string | RedactedLangfuseContent {
+  const value = String(text ?? '')
+  if ((env.LANGFUSE_INCLUDE_CONTENT ?? '').trim().toLowerCase() === 'true') {
+    return value
+  }
+  return {
+    redacted: true,
+    sha256: createHash('sha256').update(value, 'utf8').digest('hex'),
+    chars: value.length,
+  }
+}
+
+export function sanitizeTraceMetadata(metadata: unknown): Record<string, unknown> {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return {}
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(metadata as Record<string, unknown>)) {
+    if (SENSITIVE_META_KEY.test(k)) continue
+    if (typeof v === 'string' && v.length > 200) {
+      out[k] = { redacted: true, chars: v.length }
+    } else {
+      out[k] = v
+    }
+  }
+  return out
+}
+
+export function buildGenerationTracePayload(
+  params: {
+    type: string
+    model: string
+    prompt: string
+    output: string
+    tokensUsed?: number
+    cost?: number
+    duration?: number
+    metadata?: unknown
+  },
+  env: Record<string, string | undefined> = process.env
+) {
+  return {
+    name: params.type,
+    model: params.model,
+    input: redactLangfuseText(params.prompt, env),
+    output: redactLangfuseText(params.output, env),
+    usage: params.tokensUsed
+      ? {
+          input: Math.floor(params.tokensUsed * 0.4),
+          output: Math.floor(params.tokensUsed * 0.6),
+          total: params.tokensUsed,
+        }
+      : undefined,
+    metadata: {
+      ...sanitizeTraceMetadata(params.metadata),
+      cost: params.cost,
+      duration: params.duration,
+      contentRedacted: (env.LANGFUSE_INCLUDE_CONTENT ?? '').trim().toLowerCase() !== 'true',
+    },
+  }
+}
 
 export class TracingService {
   /**
@@ -31,27 +108,11 @@ export class TracingService {
       metadata: {
         type: params.type,
         model: params.model,
-        ...params.metadata,
+        ...sanitizeTraceMetadata(params.metadata),
       },
     })
 
-    const generation = trace.generation({
-      name: params.type,
-      model: params.model,
-      input: params.prompt,
-      output: params.output,
-      usage: params.tokensUsed
-        ? {
-            input: Math.floor(params.tokensUsed * 0.4),
-            output: Math.floor(params.tokensUsed * 0.6),
-            total: params.tokensUsed,
-          }
-        : undefined,
-      metadata: {
-        cost: params.cost,
-        duration: params.duration,
-      },
-    })
+    const generation = trace.generation(buildGenerationTracePayload(params))
 
     await trace.update({})
 

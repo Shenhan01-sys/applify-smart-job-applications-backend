@@ -253,7 +253,7 @@ export async function approvalRoutes(
     // - `worker`: ATS publik atau cadangan bila klasifikasi tidak tersedia.
     let dispatchTarget: ApprovalDispatchTarget = 'worker'
     try {
-      const classified = await resolveApplyChannel(db, requestData.job_id)
+      const classified = await resolveApplyChannel(db, requestData.job_id, { userId })
       dispatchTarget = approvalDispatchTarget(classified)
     } catch {
       dispatchTarget = 'worker'

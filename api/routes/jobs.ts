@@ -85,7 +85,7 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
     }
 
     try {
-      const result = await enrichJob(await getDb(), id, { fetchImpl: opts.fetchImpl })
+      const result = await enrichJob(await getDb(), id, { fetchImpl: opts.fetchImpl, userId })
       if (result.status === 'not_found') return reply.status(404).send({ error: 'Job not found' })
       if (result.status === 'error') return reply.status(500).send({ error: result.reason })
       return { job: result.job, enriched: result.enriched, reason: result.reason }
@@ -127,7 +127,7 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
     if (!validId(id)) return reply.status(404).send({ error: 'Job not found' })
 
     try {
-      const result = await salaryBenchmark(await getDb(), id)
+      const result = await salaryBenchmark(await getDb(), id, { userId })
       if (!result) return reply.status(404).send({ error: 'Job not found' })
       return result
     } catch (error: any) {
@@ -322,7 +322,7 @@ export async function jobRoutes(app: FastifyInstance, opts: JobRouteOptions) {
     if (!validId(id)) return reply.status(404).send({ error: 'Job not found' })
 
     try {
-      const channel = await resolveApplyChannel(await getDb(), id)
+      const channel = await resolveApplyChannel(await getDb(), id, { userId })
       if (!channel) return reply.status(404).send({ error: 'Job not found' })
       return channel
     } catch (error: any) {

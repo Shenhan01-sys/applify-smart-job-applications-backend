@@ -11,6 +11,7 @@ import {
 } from '../../services/token-crypto.js'
 import { notificationsService } from '../../services/notifications.service.js'
 import { primaryFrontendUrl } from '../../services/deploy-config.js'
+import { consumeReplayToken } from '../../services/replay-guard.service.js'
 
 const getDbDefault = async (): Promise<any> => (await import('../index.js')).supabase
 
@@ -284,9 +285,16 @@ export async function oauthRoutes(app: FastifyInstance, opts: OAuthRoutesOptions
       return failRedirect(reply, 'invalid_state')
     }
     const now = Date.now()
-    for (const [jti, exp] of usedStartTickets) if (exp < now) usedStartTickets.delete(jti)
-    if (usedStartTickets.has(payload.jti)) return failRedirect(reply, 'invalid_state')
-    usedStartTickets.set(payload.jti, typeof payload.exp === 'number' ? payload.exp : now + OAUTH_START_TTL_SEC * 1000)
+    const expiresAtMs = typeof payload.exp === 'number' ? payload.exp : now + OAUTH_START_TTL_SEC * 1000
+    const db = opts.db ?? ((await import('../index.js').catch(() => null))?.supabase ?? null)
+    const replay = await consumeReplayToken(db, {
+      scope: 'oauth_start_ticket',
+      tokenId: payload.jti,
+      expiresAtMs,
+      nowMs: now,
+      fallbackMap: usedStartTickets,
+    })
+    if (replay.duplicate) return failRedirect(reply, 'invalid_state')
     return reply.redirect(startOAuthFlow(request, reply, payload.uid))
   })
 

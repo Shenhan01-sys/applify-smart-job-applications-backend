@@ -1,4 +1,5 @@
 import { isValidApplyEmail } from './email-address.js'
+import { isJobAccessibleToUser, selectJobWithVisibility } from './private-job-access.js'
 
 /**
  * Klasifikasi kanal lamaran untuk satu lowongan (`jobs` row).
@@ -203,6 +204,16 @@ export function isWhatsAppUrl(rawUrl: unknown): boolean {
   return hostMatchesDomain(new URL(safe).hostname, WHATSAPP_HOSTS)
 }
 
+/** True untuk formulir Google Forms publik (termasuk /u/N/forms/ dan shortlink forms.gle). */
+export function isGoogleFormUrl(rawUrl: unknown): boolean {
+  const safe = sanitizeHttpUrl(rawUrl)
+  if (!safe) return false
+  const u = new URL(safe)
+  const host = u.hostname.toLowerCase().replace(/^www\./, '')
+  if (host === 'forms.gle') return true
+  return host === 'docs.google.com' && /^\/(?:u\/\d+\/)?forms\//i.test(u.pathname)
+}
+
 export function extractUrlsFromText(text: string): string[] {
   if (!text) return []
   const matches = text.match(/https?:\/\/[^\s<>"'\])}`]+/gi) ?? []
@@ -358,6 +369,24 @@ export function classifyJobChannel(job: JobChannelInput): ChannelClassification 
     }
   }
 
+  // Google Forms dijalankan worker terlebih dahulu (formulir publik) dan mendukung handoff ke Ekstensi Browser
+  // bila formulir meminta login Google, unggah berkas, CAPTCHA, atau ada pertanyaan wajib tanpa jawaban.
+  if (isGoogleFormUrl(primaryUrl)) {
+    return {
+      channel: 'external_web',
+      platform: 'google_forms',
+      applyUrl: primaryUrl,
+      resolvedApplyUrl: null,
+      applyEmail: null,
+      autoWorkerSupported: true,
+      emailApplySupported: false,
+      extensionSupported: true,
+      manualOnly: false,
+      reason:
+        'Formulir Google Form publik. Agen server mengisinya terlebih dahulu setelah disetujui, dan beralih ke Ekstensi Browser bila formulir meminta login Google, unggah berkas, CAPTCHA, atau pertanyaan wajib tambahan.',
+    }
+  }
+
   const externalViaExtension = isExtensionUrl(primaryUrl)
   return {
     channel: 'external_web',
@@ -405,15 +434,22 @@ export function approvalDispatchTarget(c: ChannelClassification | null | undefin
 
 export async function resolveApplyChannel(
   db: { from(table: string): any },
-  jobId: string
+  jobId: string,
+  opts?: { userId?: string }
 ): Promise<ChannelClassification | null> {
-  const { data: job, error } = await db
-    .from('jobs')
-    .select('id, platform_source, title, company, external_url, description')
-    .eq('id', jobId)
-    .maybeSingle()
+  const { data: job, error } = await selectJobWithVisibility(
+    db,
+    jobId,
+    'id, platform_source, title, company, external_url, description'
+  )
 
-  if (error) throw new Error(`channel lookup failed: ${error.message}`)
+  if (error) {
+    if (error.code === '22P02') return null
+    throw new Error(`channel lookup failed: ${error.message}`)
+  }
   if (!job) return null
+  if (opts?.userId !== undefined && !isJobAccessibleToUser(job, opts.userId)) {
+    return null
+  }
   return classifyJobChannel(job)
 }

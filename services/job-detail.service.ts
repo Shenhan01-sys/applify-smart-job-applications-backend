@@ -34,9 +34,14 @@ export interface DetailResult {
   reason?: DetailFailure
 }
 
+import { verifyPublicUrlDns, type DnsLookupFn } from './public-url-dns.service.js'
+import { isJobAccessibleToUser } from './private-job-access.js'
+
 export interface FetchDetailOptions {
   timeoutMs?: number
   maxBytes?: number
+  /** Opsional: resolver DNS untuk uji anti-rebinding. Pada fetch produksi bawaan dicek otomatis. */
+  dnsLookup?: DnsLookupFn
 }
 
 /** Host yang boleh diambil, per platform. Platform di luar daftar ini tidak didukung. */
@@ -423,11 +428,19 @@ async function getPage(
   fetchImpl: typeof fetch,
   timeoutMs: number,
   maxBytes: number,
+  dnsLookup?: DnsLookupFn,
 ): Promise<{ ok: boolean; html?: string; reason?: DetailFailure }> {
   const signal = AbortSignal.timeout(timeoutMs)
   let url = start
   try {
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      // Cek DNS rebinding sebelum setiap hop HTTP pada fetch nyata (atau bila dnsLookup disuntikkan di tes).
+      if (dnsLookup || fetchImpl === fetch) {
+        const dnsCheck = await verifyPublicUrlDns(url.href, { lookup: dnsLookup, timeoutMs: Math.min(timeoutMs, 4_000) })
+        if (!dnsCheck.ok) {
+          return { ok: false, reason: dnsCheck.reason === 'private_ip_resolved' ? 'unsupported' : 'failed' }
+        }
+      }
       const res = await fetchImpl(url.href, {
         redirect: 'manual',
         signal,
@@ -481,7 +494,7 @@ export async function fetchJobDetailResult(
   }
   if (!isAllowed(p, u)) return { ok: false, reason: 'unsupported' }
 
-  const page = await getPage(p, u, fetchImpl, opts.timeoutMs ?? DETAIL_TIMEOUT_MS, opts.maxBytes ?? DETAIL_MAX_BYTES)
+  const page = await getPage(p, u, fetchImpl, opts.timeoutMs ?? DETAIL_TIMEOUT_MS, opts.maxBytes ?? DETAIL_MAX_BYTES, opts.dnsLookup)
   if (!page.ok) return { ok: false, reason: page.reason }
   if (isClosedJobPage(p, page.html)) return { ok: false, reason: 'gone' }
   const detail = parseJobPage(p, page.html)
@@ -524,6 +537,8 @@ export interface EnrichDeps {
   now?: () => Date
   timeoutMs?: number
   maxBytes?: number
+  /** Pemilik sesi pemanggil: bila diberikan, lowongan privat milik pengguna lain ditolak sebagai not_found (404). */
+  userId?: string
 }
 
 export interface EnrichResult {
@@ -565,6 +580,9 @@ export async function enrichJob(db: SupabaseClient, jobId: string, deps: EnrichD
     return fail('error', R.readFailed)
   }
   if (!row) return fail('not_found', R.jobNotFound)
+  if (deps.userId !== undefined && !isJobAccessibleToUser(row, deps.userId)) {
+    return fail('not_found', R.jobNotFound)
+  }
 
   const unchanged = (reason: string): EnrichResult => ({ job: row, enriched: false, reason, status: 'ok' })
   if (row.status === CLOSED_JOB_STATUS) return unchanged(R.closed)
