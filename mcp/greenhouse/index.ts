@@ -1,4 +1,5 @@
 import { BaseMCPClient, JobPosting, MCPResponse, SearchParams } from '../shared/types.js'
+import { getOrFetchBoardPayload } from '../shared/board-cache.js'
 import { guessExperienceLevel, htmlToText, jobTypeFromTitle, matchesKeywords, normalizeWorkType } from '../shared/utils.js'
 
 /**
@@ -61,7 +62,9 @@ export class GreenhouseMCPClient extends BaseMCPClient {
     const { company, keywords } = params
     if (!company) return { success: false, error: 'greenhouse: parameter company (slug papan) wajib diisi' }
     try {
-      const data = await this.fetch(`${this.baseUrl}/boards/${encodeURIComponent(company)}/jobs?content=true`)
+      const data = await getOrFetchBoardPayload(`greenhouse:${company}`, () =>
+        this.fetch(`${this.baseUrl}/boards/${encodeURIComponent(company)}/jobs?content=true`)
+      )
       const jobs = (Array.isArray(data?.jobs) ? data.jobs : [])
         .map((j: any) => normalizeGreenhouseJob(j, company, data?.name))
         .filter((j: JobPosting | null): j is JobPosting => !!j && matchesKeywords(j, keywords))

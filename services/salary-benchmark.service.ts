@@ -69,9 +69,40 @@ const midpoint = (r: { salary_min?: any; salary_max?: any }) => {
   return Number.isFinite(lo) && Number.isFinite(hi) ? (lo + hi) / 2 : NaN
 }
 
-const cityOf = (location: unknown): string | null => {
-  const c = String(location ?? '').split(',')[0].trim().toLowerCase()
-  return c || null
+const CITY_NORMALIZE_MAP: Record<string, string> = {
+  'jakarta selatan': 'jakarta',
+  'jakarta pusat': 'jakarta',
+  'jakarta barat': 'jakarta',
+  'jakarta timur': 'jakarta',
+  'jakarta utara': 'jakarta',
+  'dki jakarta': 'jakarta',
+  'south jakarta': 'jakarta',
+  'central jakarta': 'jakarta',
+  'west jakarta': 'jakarta',
+  'east jakarta': 'jakarta',
+  'north jakarta': 'jakarta',
+  jaksel: 'jakarta',
+  jakpus: 'jakarta',
+  jakbar: 'jakarta',
+  jaktim: 'jakarta',
+  jakut: 'jakarta',
+  jogja: 'yogyakarta',
+  yogya: 'yogyakarta',
+  'di yogyakarta': 'yogyakarta',
+  'daerah istimewa yogyakarta': 'yogyakarta',
+  sleman: 'yogyakarta',
+  bantul: 'yogyakarta',
+  sby: 'surabaya',
+  bdg: 'bandung',
+  smg: 'semarang',
+  solo: 'surakarta',
+}
+
+/** Normalisasi segmen kota pertama agar "Jakarta Selatan" / "Jaksel" cocok dengan "Jakarta" (47.3 P3-02). */
+export const cityOf = (location: unknown): string | null => {
+  const raw = String(location ?? '').split(',')[0].trim().toLowerCase().replace(/\s+/g, ' ')
+  if (!raw) return null
+  return CITY_NORMALIZE_MAP[raw] ?? raw
 }
 
 const round = (n: number) => Math.round(n)
@@ -108,7 +139,7 @@ export async function salaryBenchmark(
       .eq('status', 'active')
       .gt('salary_min', 0)
       .or('salary_currency.eq.IDR,salary_currency.is.null')
-      .or('salary_period.eq.month,salary_period.is.null')
+      .or('salary_period.eq.month,salary_period.eq.year,salary_period.is.null')
       .or(keywords.map((k) => `title.ilike.%${k}%`).join(','))
       .limit(QUERY_LIMIT)
 
@@ -139,9 +170,11 @@ export async function salaryBenchmark(
     if (typeof r.external_url !== 'string' || !r.external_url.startsWith('https://')) continue
     if (String(r.platform_source ?? '').toLowerCase() === 'httpbin') continue
     // Pengaman kedua di sisi aplikasi: filter DB bisa saja tidak ketat (mata uang/periode kosong dianggap rupiah/bulan).
+    // 47.3 P3-02: periode 'year' IDR dikonversi ke bulanan (÷ 12) agar ikut memperkaya sampel.
     if (r.salary_currency != null && String(r.salary_currency).toUpperCase() !== 'IDR') continue
-    if (r.salary_period != null && r.salary_period !== 'month') continue
-    const mid = midpoint(r)
+    if (r.salary_period != null && r.salary_period !== 'month' && r.salary_period !== 'year') continue
+    const rawMid = midpoint(r)
+    const mid = r.salary_period === 'year' ? rawMid / 12 : rawMid
     if (!(mid > 0)) continue
     const t = String(r.title ?? '').toLowerCase()
     const hits = keywords.filter((k) => t.includes(k)).length
