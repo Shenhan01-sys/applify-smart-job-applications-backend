@@ -28,8 +28,8 @@ export async function rateLimitRoutes(
           resets_at: userQuota.resetsAt,
         },
       }
-    } catch (error: any) {
-      return reply.status(500).send({ error: error.message })
+    } catch {
+      return reply.status(503).send({ error: 'Gagal memeriksa kuota lamaran harian', code: 'quota_check_failed' })
     }
   })
 
@@ -45,8 +45,8 @@ export async function rateLimitRoutes(
     try {
       const result = await rateLimitService.checkPlatformLimit(name, userId)
       return result
-    } catch (error: any) {
-      return reply.status(500).send({ error: error.message })
+    } catch {
+      return reply.status(503).send({ error: 'Gagal memeriksa batas platform', code: 'rate_limit_check_failed' })
     }
   })
 }
