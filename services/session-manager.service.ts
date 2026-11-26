@@ -87,7 +87,7 @@ export class SessionManagerService {
       // For now, return based on the decrypted session holding the LinkedIn login cookie
       return !!sessionData?.cookies?.li_at
     } catch (error) {
-      console.error('Session verification failed:', error)
+      console.error('Session verification failed:', String((error as any)?.message ?? error).slice(0, 120))
       return false
     }
   }
@@ -127,7 +127,7 @@ Alternatively, our team can help setup persistent browser profiles.`,
       .neq('expires_at', null)
 
     if (error) {
-      console.error('Failed to cleanup sessions:', error)
+      console.error('Failed to cleanup sessions:', String((error as any)?.code ?? (error as any)?.message ?? 'db_error').slice(0, 120))
       return 0
     }
 
