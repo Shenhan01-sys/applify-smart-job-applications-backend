@@ -316,32 +316,61 @@ async function loadAchievementLines(db: AnswersDb, userId: string): Promise<stri
   }
 }
 
+type WorkExpSchemaTier = 'full' | 'no_notes' | 'base'
+const WORK_EXP_SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000
+// Cache per instance db agar panggilan berikutnya tidak terus menembak query 42703 sementara tiap FakeDb test tetap terisolasi.
+const workExpTierByDb = new WeakMap<object, { tier: WorkExpSchemaTier; checkedAt: number }>()
+
+const WORK_EXP_SELECTS: Record<WorkExpSchemaTier, string> = {
+  full: 'start_date, end_date, is_current, employment_type, role_title, notes',
+  no_notes: 'start_date, end_date, is_current, employment_type, role_title',
+  base: 'start_date, end_date, is_current',
+}
+
+function isMissingWorkExpColError(error: any, colPattern: RegExp): boolean {
+  if (!error) return false
+  return error.code === '42703' || error.code === 'PGRST204' || colPattern.test(String(error.message ?? ''))
+}
+
+/** Reset cache deteksi kolom `work_experiences` (untuk pengujian atau setelah migrasi). */
+export function resetWorkExperienceSchemaCache(db?: object): void {
+  if (db) workExpTierByDb.delete(db)
+}
+
 /**
  * Periode kerja pengguna untuk menghitung tahun pengalaman. Gagal membaca = null (jawaban dibuat tanpa hitungan ini,
  * seperti sebelum fitur ini ada), jadi pengajuan persetujuan tidak tertahan.
+ * Hasil deteksi kolom di-cache per instance DB (TTL 5 menit) agar kolom yang belum dimigrasi tidak memicu 42703 berulang.
  */
 async function loadWorkExperiences(db: AnswersDb, userId: string): Promise<Array<Record<string, any>> | null> {
   try {
-    let { data, error } = await db
-      .from('work_experiences')
-      .select('start_date, end_date, is_current, employment_type, role_title, notes')
-      .eq('user_id', userId)
-      .limit(100)
-    if (error && (error.code === '42703' || error.code === 'PGRST204' || /notes|employment_type|role_title/i.test(String(error.message ?? '')))) {
-      const noNotes = await db
-        .from('work_experiences')
-        .select('start_date, end_date, is_current, employment_type, role_title')
-        .eq('user_id', userId)
-        .limit(100)
-      data = noNotes.data
-      error = noNotes.error
-      if (error && (error.code === '42703' || error.code === 'PGRST204' || /employment_type|role_title/i.test(String(error.message ?? '')))) {
-        const fallback = await db.from('work_experiences').select('start_date, end_date, is_current').eq('user_id', userId).limit(100)
-        data = fallback.data
-        error = fallback.error
+    const cached = typeof db === 'object' && db !== null ? workExpTierByDb.get(db) : undefined
+    const freshTier: WorkExpSchemaTier =
+      cached && Date.now() - cached.checkedAt < WORK_EXP_SCHEMA_CACHE_TTL_MS ? cached.tier : 'full'
+
+    const setTier = (tier: WorkExpSchemaTier) => {
+      if (typeof db === 'object' && db !== null) {
+        workExpTierByDb.set(db, { tier, checkedAt: Date.now() })
       }
     }
-    return !error && Array.isArray(data) ? data : null
+
+    const tiers: WorkExpSchemaTier[] =
+      freshTier === 'full' ? ['full', 'no_notes', 'base'] : freshTier === 'no_notes' ? ['no_notes', 'base'] : ['base']
+
+    for (let i = 0; i < tiers.length; i++) {
+      const tier = tiers[i]
+      const { data, error } = await db.from('work_experiences').select(WORK_EXP_SELECTS[tier]).eq('user_id', userId).limit(100)
+      if (!error) {
+        setTier(tier)
+        return Array.isArray(data) ? data : null
+      }
+      const pattern = tier === 'full' ? /notes|employment_type|role_title|does not exist|schema cache/i : /employment_type|role_title|does not exist|schema cache/i
+      if (!isMissingWorkExpColError(error, pattern) || i === tiers.length - 1) {
+        return null
+      }
+      setTier(tiers[i + 1])
+    }
+    return null
   } catch (e) {
     console.warn('[approval-answers] riwayat kerja tidak terbaca, tahun pengalaman tidak dihitung:', (e as Error)?.message)
     return null
