@@ -15,6 +15,7 @@ import { notificationsService } from '../../services/notifications.service.js'
 import { afterReplyFor, runAfterReplyTasks } from '../../services/after-reply.js'
 import { isUuid } from '../../services/uuid.js'
 import { ClaimRecoveryError, getClaimStatuses, resolveLockedClaim, type ClaimResolution } from '../../services/approval-claim-recovery.js'
+import { isJobAccessibleToUser, selectJobWithVisibility } from '../../services/private-job-access.js'
 
 /** Masa berlaku permintaan persetujuan sejak dibuat: 24 jam. */
 export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000
@@ -140,6 +141,19 @@ export async function approvalRoutes(
       answers,
     } = request.body as any
     const supabase = await getDb()
+
+    // Prioritas tinggi Gelombang 5: periksa kepemilikan lowongan privat lewat service role
+    // (404 untuk lowongan privat milik pengguna lain; tetap aman sebelum kolom visibility & created_by ada).
+    if (typeof job_id === 'string' && job_id.trim()) {
+      const { data: jobRow, error: jobErr } = await selectJobWithVisibility(supabase, job_id.trim(), 'id')
+      if (jobErr) {
+        return failServer(request, reply, jobErr)
+      }
+      if (!jobRow || !isJobAccessibleToUser(jobRow, userId)) {
+        return reply.status(404).send({ error: 'Job not found' })
+      }
+    }
+
     // resume_url kiriman klien diabaikan. CV diambil dari profil pengguna (bucket privat `resumes`).
     const resume_url = await resumeUrlForUser(supabase as any, userId)
     let cover_letter = (request.body as any).cover_letter as string | undefined
