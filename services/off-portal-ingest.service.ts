@@ -22,6 +22,7 @@ import {
   extractCompanyName,
   extractLocationValue,
   extractRoleTitles,
+  normalizeCopiedPostText,
   splitCaptionLines,
   splitCompanyBlocks,
   type CaptionLine,
@@ -340,7 +341,9 @@ interface Analysis {
 }
 
 function analyzeOffPortalPosting(input: OffPortalParseInput, now: Date): Analysis {
-  const rawText = typeof input.rawText === 'string' ? input.rawText.slice(0, MAX_OFF_PORTAL_TEXT_CHARS) : ''
+  // Salinan halaman web memecah teks di setiap mention dan tautan, dan membawa sisa antarmuka X. Dirapikan sekali di sini supaya
+  // semua pembacaan sesudahnya (blok perusahaan, tautan, lokasi, deskripsi, cadangan AI) melihat teks yang sama.
+  const rawText = normalizeCopiedPostText(typeof input.rawText === 'string' ? input.rawText.slice(0, MAX_OFF_PORTAL_TEXT_CHARS) : '')
   const sourceType: OffPortalSourceType =
     input.sourceType === 'off_portal_poster' || input.sourceType === 'off_portal_caption'
       ? input.sourceType

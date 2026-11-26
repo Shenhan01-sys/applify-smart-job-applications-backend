@@ -16,6 +16,9 @@ import { detectSocialPostPlatform, extractUrlsFromText, hostMatchesDomain, sanit
  *   - Tempelan multi-perusahaan ("1. @akun - roles: ... - apply: ...", "2. @akun2 - ..."): `splitCompanyBlocks` memecahnya per
  *     butir bernomor supaya tiap perusahaan dibaca sendiri dan tidak ada posisi atau tautan yang tertempel ke perusahaan lain.
  *     Tautan tanpa skema di nilai "apply:" ("kast.xyz/en/careers") dibaca sebagai https.
+ *   - Salinan halaman web X: mention dan tautan dirender sebagai elemen link, jadi "1. " / "@akun" dan "apply: " / "https://..."
+ *     terpecah per baris. `normalizeCopiedPostText` menyambungnya lebih dulu dan membuang sisa antarmuka (nama dan @akun
+ *     penulis di awal, "Show more", "Translate post", tanggal, hitungan views).
  *
  * Tidak ada pemanggilan jaringan atau AI. Bila sebuah bidang tidak terbaca, nilai bawaan dikembalikan dan pemanggil
  * mencatatnya di `unreadFields` agar pengguna tahu perlu memeriksa.
@@ -805,6 +808,184 @@ export function extractBlockCompany(lines: CaptionLine[], applyUrl: string | nul
     if (validCompanyName(name)) return { name, source: 'label' }
   }
   return found
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Normalisasi salinan halaman web (X): mention dan tautan dirender sebagai elemen link
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Menyalin caption dari halaman web X memecah teks di setiap mention dan tautan, karena keduanya dirender sebagai elemen
+ * link: "1. @wirexapp" menjadi "1. " / "@wirexapp" dan "apply: https://t.co/x" menjadi "apply: " / "https://t.co/x".
+ * Salinan juga membawa sisa antarmuka (nama tampilan dan @akun penulis di awal, "Show more", "Translate post", tanggal, hitungan
+ * views). Fungsi ini merapikan semuanya sebelum teks dibaca parser lain, supaya salinan terpecah, bentuk rapi, dan bentuk
+ * satu baris menghasilkan kandidat yang sama. Teks yang tidak mengandung pola-pola ini dikembalikan persis seperti aslinya.
+ */
+
+const X_MONTH =
+  '(?:jan(?:uary|uari)?|feb(?:ruary|ruari)?|mar(?:ch|et)?|apr(?:il)?|may|mei|jun(?:e|i)?|jul(?:y|i)?|aug(?:ust)?|agu(?:stus)?|agt|sep(?:t|tember)?|oct(?:ober)?|okt(?:ober)?|nov(?:ember)?|dec(?:ember)?|des(?:ember)?)\\.?'
+// Waktu posting: "2h", "45m", "now", "Nov 27", "Nov 27, 2026", "27 Nov 2026".
+const X_TIME = `(?:now|just\\s+now|baru\\s+saja|\\d{1,2}\\s?(?:s|m|h|d|w|min|mins|hr|hrs|jam|j|mnt|dtk|hari)|${X_MONTH}\\s+\\d{1,2}(?:,?\\s+\\d{4})?|\\d{1,2}\\s+${X_MONTH}(?:,?\\s+\\d{4})?)`
+const X_TIME_ONLY_RE = new RegExp(`^${X_TIME}$`, 'i')
+const X_DOT_MARKER_RE = new RegExp(`^[·•]\\s*(?:${X_TIME})?$`, 'i')
+const X_AUTHOR_INLINE_RE = new RegExp(`^(?:.{1,60}?\\s+)?@[A-Za-z0-9_]{1,30}\\s*[·•]\\s*${X_TIME}$`, 'i')
+const HANDLE_ONLY_RE = /^@[A-Za-z0-9_]{2,30}$/
+const BARE_NUMBER_LINE_RE = /^\d{1,3}\s*[.)]$/
+// Nilai tanpa kata lain: tautan lengkap, domain tanpa skema ("kast.xyz/en/careers"), atau email.
+const BARE_LINK_TOKEN_RE =
+  /^(?:https?:\/\/\S+|www\.\S+|[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:\/\S*)?|[\w.+-]+@[\w-]+\.[\w.-]+)$/i
+// Hitungan interaksi yang berdiri sendiri: "12", "1.2K", "3,456".
+const X_COUNT_RE = /^(?:\d{1,3}(?:[.,]\d{1,3})?\s?[KkMmBb]?|\d{1,3}(?:,\d{3})+)$/
+const X_STAT_WORDS = 'views?|reposts?|retweets?|quotes?|quote\\s+posts?|likes?|bookmarks?|repl(?:y|ies)|comments?|dilihat|tayangan|suka|balasan|kutipan'
+const X_STAT_LABEL_RE = new RegExp(`^(?:${X_STAT_WORDS})$`, 'i')
+const X_NOISE_LINE_RES: RegExp[] = [
+  // Tombol dan tautan antarmuka X (Inggris dan Indonesia).
+  /^(?:…|\.{3})?\s*(?:show\s+(?:more|less|original|this\s+thread|more\s+replies)|see\s+more|translate\s+(?:post|tweet)|translated\s+from\s+.+|post\s+your\s+reply|view\s+(?:post\s+)?(?:engagements|analytics)|read\s+\d[\d.,]*\s?[KkMm]?\s+repl(?:y|ies)|tampilkan\s+(?:selengkapnya|lebih\s+banyak|utas\s+ini)|lihat\s+(?:selengkapnya|terjemahan)|terjemahkan\s+(?:postingan|tweet)|diterjemahkan\s+dari\s+.+|lihat\s+interaksi\s+postingan)$/i,
+  /^(?:replying\s+to|membalas)\s+@.+$/i,
+  // "12.3K Views", "45 Likes".
+  new RegExp(`^\\d[\\d.,]*\\s?[KkMmBb]?\\s+(?:${X_STAT_WORDS})$`, 'i'),
+  // "5:03 PM · Nov 27, 2026 · 12.3K Views" dan "· 12.3K Views".
+  /^\d{1,2}:\d{2}(?:\s?[AaPp][Mm])?\s*[·•].+$/,
+  /^[·•]\s*\d[\d.,]*\s?[KkMmBb]?\s+(?:views?|dilihat|tayangan)$/i,
+]
+
+const isXNoiseLine = (t: string): boolean => X_NOISE_LINE_RES.some((re) => re.test(t))
+
+function isNameLikeLine(t: string): boolean {
+  return (
+    t.length <= 60 &&
+    !URL_OR_EMAIL_RE.test(t) &&
+    !LEADING_NUMBER_RE.test(t) &&
+    !BARE_NUMBER_LINE_RE.test(t) &&
+    !KEY_VALUE_RE.test(t.replace(LEADING_MARKER_RE, ''))
+  )
+}
+
+/**
+ * Jumlah baris di awal yang berupa kepala penulis hasil salinan: "Nama tampilan", "@akun", "·", "2h" (nama dan akun bisa satu
+ * baris). Hanya dibuang bila akun penulis disusul penanda "·" atau waktu, karena "Nama" lalu "@akun" lalu isi bisa saja
+ * lowongan perusahaan itu sendiri.
+ */
+function authorHeaderLength(lines: string[]): number {
+  const idx: number[] = []
+  for (let i = 0; i < lines.length && idx.length < 6; i++) if (lines[i].trim()) idx.push(i)
+  for (let k = 0; k < Math.min(idx.length, 3); k++) {
+    if (!idx.slice(0, k).every((i) => isNameLikeLine(lines[i].trim()))) return 0
+    const t = lines[idx[k]].trim()
+    if (X_AUTHOR_INLINE_RE.test(t)) return idx[k] + 1
+    if (!HANDLE_ONLY_RE.test(t) || k + 1 >= idx.length) continue
+    const marker = lines[idx[k + 1]].trim()
+    if (!X_DOT_MARKER_RE.test(marker)) continue
+    let end = idx[k + 1]
+    if (/^[·•]$/.test(marker) && k + 2 < idx.length && X_TIME_ONLY_RE.test(lines[idx[k + 2]].trim())) end = idx[k + 2]
+    return end + 1
+  }
+  return 0
+}
+
+/** Label kunci tanpa nilai ("apply: ") disusul baris nilainya? Mengembalikan kelompok kuncinya. */
+function emptyKeyLabelGroup(line: string): FieldGroup | null {
+  const m = KEY_VALUE_RE.exec(line.trim().replace(LEADING_NUMBER_RE, '').replace(LEADING_MARKER_RE, ''))
+  return m && !m[2].trim() ? groupOfKey(m[1]) : null
+}
+
+/** Baris yang sah menjadi sambungan judul butir "N." yang terputus: akun, atau nama perusahaan pendek tanpa kunci dan tautan. */
+function isHeaderContinuation(t: string): boolean {
+  if (!t || BARE_NUMBER_LINE_RE.test(t)) return false
+  if (HANDLE_LINE_RE.test(t)) return true
+  if (!isNameLikeLine(t) || LEADING_MARKER_RE.test(t.charAt(0)) || wordCount(t) > 6) return false
+  return validCompanyName(tidy(stripParentheticals(t)))
+}
+
+function isKeyValueLine(t: string): boolean {
+  return KEY_VALUE_RE.test(t.replace(LEADING_NUMBER_RE, '').replace(LEADING_MARKER_RE, ''))
+}
+
+/** Sambung baris yang terputus oleh elemen link: "N." + "@akun" / nama, dan "apply:" / "company:" kosong + nilainya. */
+function mergeBrokenLines(lines: string[]): string[] {
+  const out: string[] = []
+  const nextFilled = (from: number): number => {
+    let j = from
+    while (j < lines.length && !lines[j].trim()) j++
+    return j
+  }
+  let i = 0
+  while (i < lines.length) {
+    const t = lines[i].trim()
+    const j = nextFilled(i + 1)
+    const next = j < lines.length ? lines[j].trim() : ''
+    if (BARE_NUMBER_LINE_RE.test(t) && isHeaderContinuation(next)) {
+      out.push(`${t} ${next}`)
+      i = j + 1
+      // Baris kosong antara judul butir dan baris kuncinya hanya sisa tata letak halaman.
+      const k = nextFilled(i)
+      if (k < lines.length && isKeyValueLine(lines[k].trim())) i = k
+      continue
+    }
+    const group = emptyKeyLabelGroup(t)
+    if ((group === 'apply' && BARE_LINK_TOKEN_RE.test(next)) || (group === 'company' && next && (HANDLE_ONLY_RE.test(next) || isHeaderContinuation(next)))) {
+      out.push(`${t} ${next}`)
+      i = j + 1
+      continue
+    }
+    out.push(lines[i])
+    i++
+  }
+  return out
+}
+
+/**
+ * Rapikan teks salinan halaman web sebelum dibaca parser: buang kepala penulis dan sisa antarmuka X, lalu sambung judul butir
+ * dan nilai kunci yang terputus. Idempoten, dan mengembalikan `text` apa adanya bila tidak ada yang perlu dirapikan.
+ */
+export function normalizeCopiedPostText(text: string): string {
+  if (!text) return text
+  const unixText = text.replace(/\r\n?/g, '\n')
+  const cleaned = unixText.replace(/[​‌⁠﻿]/g, '').replace(/ /g, ' ')
+  let lines = cleaned.split('\n')
+
+  const head = authorHeaderLength(lines)
+  if (head > 0) lines = lines.slice(head)
+
+  // Ekor salinan: baris kosong, hitungan interaksi, dan sisa antarmuka. Hitungan polos ("12", "1.2K") hanya dibuang bila ekornya
+  // jelas milik X (ada baris antarmuka, atau dua hitungan berurutan), supaya angka di akhir caption biasa tidak ikut hilang.
+  let tail = lines.length
+  let counts = 0
+  let chrome = 0
+  while (tail > 0) {
+    const t = lines[tail - 1].trim()
+    if (!t) tail--
+    else if (X_COUNT_RE.test(t)) {
+      counts++
+      tail--
+    } else if (isXNoiseLine(t)) {
+      chrome++
+      tail--
+    } else if (X_STAT_LABEL_RE.test(t)) tail--
+    else break
+  }
+  if (chrome > 0 || counts >= 2) lines = lines.slice(0, tail)
+
+  const kept: string[] = []
+  for (const line of lines) {
+    const t = line.trim()
+    if (isXNoiseLine(t)) continue
+    if (X_STAT_LABEL_RE.test(t)) {
+      // "12.3K" lalu "Views" pada baris sendiri-sendiri: hitungan dan labelnya dibuang bersama.
+      let k = kept.length - 1
+      while (k >= 0 && !kept[k].trim()) k--
+      if (k >= 0 && X_COUNT_RE.test(kept[k].trim())) {
+        kept.length = k
+        continue
+      }
+    }
+    kept.push(line)
+  }
+
+  const merged = mergeBrokenLines(kept)
+  const result = merged.join('\n')
+  if (head === 0 && cleaned === unixText && result === cleaned) return text
+  return result.trim()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
