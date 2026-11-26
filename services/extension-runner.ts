@@ -5,6 +5,7 @@ import { cleanLine, isSecretLabel, sanitizePendingQuestions, sanitizeSecretSkips
 import { EXT_FILE_KINDS, type ExtFileKind } from './extension-file-targets.js'
 import { pageMatchesJob } from './page-host.js'
 import type { GuardDb } from './queue-guard.js'
+import { RESOLVED_UNSENT_REASONS } from './approval-shared.js'
 import { DAILY_APPLY_LIMIT, COUNTED_ACTIONS, startOfUtcDay } from './rate-limit.service.js'
 import { APPLICATION_STATUSES, notifyApplicationStatus, type ApplicationStatus } from './application-status.service.js'
 import { notificationDispatcher } from './notification-dispatcher.service.js'
@@ -209,6 +210,24 @@ export async function verifyExtensionApproval(
     return { ok: false, statusCode: 409, code: 'approval_already_used', error: 'Persetujuan ini sudah pernah dipakai untuk mengirim lamaran.' }
   }
 
+  // Pengguna sudah menutup persetujuan ini atau menggantinya dengan persetujuan baru ("Tutup" atau "Belum terkirim,
+  // ulangi" di halaman Persetujuan). Persetujuan itu tidak boleh dipakai kirim lagi. Laporan kirim yang SUDAH terjadi
+  // (afterSend) tetap diterima, supaya lamaran yang terlanjur terkirim tidak hilang dari catatan.
+  if (!args.afterSend) {
+    const { data: resolved, error: resolvedErr } = await db
+      .from('application_logs')
+      .select('details')
+      .eq('user_id', userId)
+      .eq('status', 'incomplete')
+      .contains('details', { approval_request_id: approvalId })
+    if (resolvedErr) {
+      return { ok: false, statusCode: 500, code: 'approval_usage_lookup_failed', error: 'Gagal memeriksa riwayat pengiriman persetujuan' }
+    }
+    if (Array.isArray(resolved) && resolved.some((r: any) => typeof r?.details?.reason === 'string' && RESOLVED_UNSENT_REASONS.has(r.details.reason))) {
+      return { ok: false, statusCode: 409, code: 'approval_resolved', error: 'Persetujuan ini sudah ditutup atau diganti persetujuan baru. Ajukan lagi dari Applify.' }
+    }
+  }
+
   return { ok: true, row, late }
 }
 
@@ -264,7 +283,7 @@ export async function listPendingExtensionApprovals(
   const approvalIds = approvals.map((a: any) => a.id).filter(Boolean)
   const jobIds = [...new Set(approvals.map((a: any) => a.job_id).filter(Boolean))]
 
-  const [jobsRes, sentRes, claimRes, queueRes] = await Promise.all([
+  const [jobsRes, sentRes, claimRes, queueRes, resolvedRes] = await Promise.all([
     jobIds.length
       ? db.from('jobs').select('id, title, company, platform_source, external_url, description').in('id', jobIds)
       : Promise.resolve({ data: [], error: null }),
@@ -285,14 +304,29 @@ export async function listPendingExtensionApprovals(
       .in('status', ['pending', 'processing'])
       .in('payload->>approval_request_id', approvalIds)
       .limit(100),
+    // Persetujuan yang ditutup atau diganti pengguna dari halaman Persetujuan tidak boleh muncul di ekstensi lagi.
+    db
+      .from('application_logs')
+      .select('details')
+      .eq('user_id', userId)
+      .eq('status', 'incomplete')
+      .in('details->>approval_request_id', approvalIds)
+      .limit(200),
   ])
 
   if (jobsRes.error) throw new ExtensionRunnerError(500, 'jobs_lookup_failed', 'Gagal membaca data lowongan')
   if (sentRes.error) throw new ExtensionRunnerError(500, 'approval_usage_lookup_failed', 'Gagal memeriksa riwayat pengiriman persetujuan')
   if (claimRes.error) throw new ExtensionRunnerError(503, 'claim_unavailable', 'Penyimpanan klaim kirim belum siap')
   if (queueRes.error) throw new ExtensionRunnerError(500, 'queue_lookup_failed', 'Gagal memeriksa antrian worker')
+  if (resolvedRes.error) throw new ExtensionRunnerError(500, 'approval_usage_lookup_failed', 'Gagal memeriksa riwayat pengiriman persetujuan')
 
   const blockedApprovalIds = new Set<string>()
+  for (const l of Array.isArray(resolvedRes.data) ? resolvedRes.data : []) {
+    const id = l?.details?.approval_request_id
+    if (typeof id === 'string' && typeof l?.details?.reason === 'string' && RESOLVED_UNSENT_REASONS.has(l.details.reason)) {
+      blockedApprovalIds.add(id)
+    }
+  }
   const extQueueByApproval = new Map<string, { id: string; status: string }>()
   for (const l of Array.isArray(sentRes.data) ? sentRes.data : []) {
     const id = l?.details?.approval_request_id

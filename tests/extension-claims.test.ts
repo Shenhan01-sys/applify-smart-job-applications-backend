@@ -146,6 +146,42 @@ test('pending-approvals: menyembunyikan persetujuan yang sudah diklaim atau seda
   assert.ok(store.calls.some((c) => c.table === 'approval_submit_claims'))
 })
 
+test('pending-approvals: persetujuan yang ditutup atau diganti pengguna tidak muncul lagi di ekstensi, yang lain tetap', async () => {
+  const mk = (id: string, jobId: string) => ({ id, user_id: USER_ID, job_id: jobId, application_id: null, status: 'approved', expires_at: FUTURE, reviewed_at: '2026-11-23T10:00:00Z' })
+  const ids = ['d1', 'd2', 'd3', 'd4'].map((s) => `dddddddd-dddd-dddd-dddd-dddddddddd${s.padStart(2, '0')}`)
+  const log = (id: string, reason: string) => ({ user_id: USER_ID, action: 'apply', status: 'incomplete', job_id: 'x', details: { approval_request_id: id, reason }, created_at: '2026-11-23T11:00:00Z' })
+  const { pending } = await setup({
+    approval_requests: ids.map((id, i) => mk(id, `job-${i}`)),
+    jobs: ids.map((_, i) => ({ id: `job-${i}`, platform_source: 'kalibrr', title: `T${i}`, company: 'Acme', external_url: `https://www.kalibrr.com/c/acme/jobs/${i}` })),
+    application_logs: [
+      log(ids[0], 'user_closed'),
+      log(ids[1], 'user_not_sent'),
+      // alasan lain pada log incomplete (agen berhenti) tidak menutup persetujuan
+      log(ids[2], 'required_remaining'),
+    ],
+  })
+  const res = await pending()
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(res.json().items.map((i: any) => i.approvalId).sort(), [ids[2], ids[3]].sort())
+})
+
+test('authorize-submit: persetujuan yang sudah ditutup atau diganti pengguna ditolak 409 approval_resolved tanpa klaim', async () => {
+  for (const reason of ['user_closed', 'user_not_sent']) {
+    const { store, authorize } = await setup({
+      application_logs: [{ user_id: USER_ID, action: 'apply', status: 'incomplete', job_id: 'job-1', details: { approval_request_id: APPROVAL, reason }, created_at: '2026-11-23T11:00:00Z' }],
+    })
+    const res = await authorize()
+    assert.equal(res.statusCode, 409, reason)
+    assert.equal(res.json().code, 'approval_resolved', reason)
+    assert.equal((store.tables.approval_submit_claims ?? []).length, 0, reason)
+  }
+  // log incomplete biasa (agen berhenti karena alasan lain) tidak menutup persetujuan
+  const { authorize } = await setup({
+    application_logs: [{ user_id: USER_ID, action: 'apply', status: 'incomplete', job_id: 'job-1', details: { approval_request_id: APPROVAL, reason: 'required_remaining' }, created_at: '2026-11-23T11:00:00Z' }],
+  })
+  assert.equal((await authorize()).statusCode, 200)
+})
+
 test('pending-approvals: persetujuan yang sudah terkirim tetap tersembunyi walau ada ratusan log kirim lain yang lebih baru', async () => {
   const noise = Array.from({ length: 250 }, (_, i) => ({
     user_id: USER_ID,
