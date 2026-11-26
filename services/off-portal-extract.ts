@@ -8,7 +8,10 @@ import { detectSocialPostPlatform, extractUrlsFromText, hostMatchesDomain, sanit
  *   - Pasangan "kunci: nilai" per baris atau sebaris dipisah " - " / " | " ("roles: A, B - location: Remote - apply: https://...").
  *   - Judul bernomor dengan akun: "10. @AnodosFinance", "18. Kraken / @Krak", "@acme is hiring".
  *   - Kalimat umum: "Acme is hiring a Backend Engineer", "PT Maju membuka lowongan Data Analyst", "mencari Staff Admin".
- *   - Daftar bernomor atau bullet di bawah header "Posisi:" / "We are hiring:".
+ *   - Daftar bernomor, bullet, atau emoji di bawah header "Posisi:" / "We are hiring:" atau baris pembuka berakhiran ":"
+ *     ("... membuka kesempatan untuk posisi:"). Setiap butir menjadi satu posisi (maksimal 10).
+ *   - Header promosi ("LOWONGAN KERJA", "WE'RE HIRING!", "OPEN RECRUITMENT", "DIBUTUHKAN SEGERA") bukan posisi dan bukan
+ *     perusahaan; posisi diambil dari baris sesudahnya. Label dalam kurung ("(FIKTIF)", "(Hybrid)") dibuang dari nama perusahaan.
  *   - Awalan badan usaha PT/CV, "Perusahaan:", "Company:", serta "Remote" dan nama kota sebagai cadangan lokasi.
  *
  * Tidak ada pemanggilan jaringan atau AI. Bila sebuah bidang tidak terbaca, nilai bawaan dikembalikan dan pemanggil
@@ -124,6 +127,91 @@ function wordCount(value: string): number {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Header promosi ("LOWONGAN KERJA", "WE'RE HIRING!", "OPEN RECRUITMENT") bukan posisi, dan bukan nama perusahaan.
+// ---------------------------------------------------------------------------------------------------------------------
+
+// Urutan penting: frasa yang lebih panjang didahulukan supaya "lowongan kerja" tidak terpotong menjadi "lowongan".
+const PROMO_PHRASES = [
+  "we(?:'|’)?re\\s+hiring",
+  'we\\s+are\\s+hiring',
+  'now\\s+hiring',
+  'open\\s+hiring',
+  'open\\s+recruitment',
+  '(?:is|are)\\s+hiring',
+  'hiring',
+  'recruitment',
+  'rekrutmen',
+  'job\\s+vacanc(?:y|ies)',
+  'vacanc(?:y|ies)',
+  'lowongan\\s+kerja',
+  'info\\s+loker',
+  'loker',
+  'lowongan',
+  'kesempatan\\s+(?:karir|karier|kerja)',
+  'careers?',
+  'karir',
+  'karier',
+  'dibutuhkan\\s+segera',
+  'dibutuhkan',
+  'dicari',
+  'segera',
+  'urgent',
+  'join\\s+(?:us|our\\s+team|the\\s+team)',
+  'bergabunglah',
+]
+const PROMO_ANY_RE = new RegExp(`\\b(?:${PROMO_PHRASES.join('|')})(?![\\p{L}])`, 'giu')
+const PROMO_LEADING_RE = new RegExp(`^(?:${PROMO_PHRASES.join('|')})(?![\\p{L}])[\\s:：\\-–—|!.,•·]*`, 'iu')
+
+/** Baris yang seluruh isinya frasa promosi, emoji, dan tanda baca ("LOWONGAN KERJA — WE'RE HIRING! 🚀"). */
+export function isPromoOnlyLine(text: string): boolean {
+  if (!text.trim()) return false
+  return text.replace(PROMO_ANY_RE, ' ').replace(/[^\p{L}\p{N}]+/gu, '').length === 0
+}
+
+/** Buang frasa promosi di awal ("LOWONGAN KERJA: Admin" -> "Admin"). */
+function stripLeadingPromo(value: string): string {
+  let s = value.trim()
+  for (let i = 0; i < 6; i++) {
+    const next = s.replace(PROMO_LEADING_RE, '').trim()
+    if (next === s) break
+    s = next
+  }
+  return s
+}
+
+/** Buang label dalam kurung/siku ("(FIKTIF, untuk uji)", "(Hybrid)"), kecuali bentuk badan usaha "(Persero)" dan "(Tbk)". */
+function stripParentheticals(value: string): string {
+  return value
+    .replace(/[(\[]([^()[\]]*)[)\]]/g, (m, inner: string) => (/^\s*(?:persero|tbk)\.?\s*$/i.test(inner) ? m : ' '))
+    .replace(/[(\[][^()[\]]*$/, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// Jenis pekerjaan dan mode kerja di akhir judul posisi ("Admin Operasional (Full-time)") bukan bagian nama posisi.
+const EMPLOYMENT_TERMS = new Set([
+  'full-time', 'full time', 'fulltime', 'part-time', 'part time', 'parttime', 'kontrak', 'contract', 'contractor', 'magang',
+  'internship', 'intern', 'freelance', 'freelancer', 'tetap', 'permanent', 'remote', 'hybrid', 'onsite', 'on-site', 'wfo',
+  'wfh', 'wfa', 'fresh graduate', 'fresh grad', 'penuh waktu', 'paruh waktu', 'harian', 'lepas', 'probation', 'project based',
+])
+
+function stripEmploymentSuffix(title: string): string {
+  let s = title.trim()
+  for (let i = 0; i < 3; i++) {
+    const m = s.match(/\s*[(\[]([^()[\]]*)[)\]]\s*$/)
+    if (!m) break
+    const parts = m[1]
+      .toLowerCase()
+      .split(/\s*[\/,&+|]\s*|\s+(?:dan|atau|and|or)\s+/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+    if (parts.length === 0 || !parts.every((p) => EMPLOYMENT_TERMS.has(p))) break
+    s = s.slice(0, m.index).trim()
+  }
+  return s
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Tautan lamaran
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -153,7 +241,7 @@ export function extractApplyKeyUrls(lines: CaptionLine[]): string[] {
 
 // Header tanpa tanda ":" hanya untuk frasa yang jelas; kata umum (roles, positions, hiring, jobs) wajib diikuti ":" atau "-".
 const ROLE_HEADER_RE =
-  /^(?:posisi|lowongan|we(?:'|’)?re hiring|we are hiring|dibutuhkan|terbuka untuk|(?:open\s+)?roles?(?=\s*[:\-–—])|(?:open\s+)?positions?(?=\s*[:\-–—])|jabatan(?=\s*[:\-–—])|job\s+titles?(?=\s*[:\-–—])|hiring\s+for(?=\s*[:\-–—])|hiring(?=\s*[:\-–—])|(?:jobs?|openings?|vacanc(?:y|ies))(?=\s*[:\-–—]))\b/i
+  /^(?:posisi|lowongan(?:\s+kerja)?|we(?:'|’)?re hiring|we are hiring|dibutuhkan|terbuka untuk|(?:open\s+)?roles?(?=\s*[:\-–—])|(?:open\s+)?positions?(?=\s*[:\-–—])|jabatan(?=\s*[:\-–—])|job\s+titles?(?=\s*[:\-–—])|hiring\s+for(?=\s*[:\-–—])|hiring(?=\s*[:\-–—])|(?:jobs?|openings?|vacanc(?:y|ies))(?=\s*[:\-–—]))\b/i
 const ROLE_SECTION_END_RE =
   /^(?:kualifikasi|persyaratan|requirements?|syarat|benefits?|cara melamar|how to apply|kirim cv|lokasi|locations?|penempatan|apply|company|perusahaan|salary|gaji|deadline|tentang|about)\b/i
 const ROLE_NOISE_RE = /^(?:now|asap|urgent|immediately|segera|sekarang|here|ini|dibuka|open|ya|yuk|nih|guys|everyone)\W*$/i
@@ -231,7 +319,13 @@ const PHRASE_ROLE_PATTERNS: RegExp[] = [
   /\blowongan\s+(?:kerja\s+)?(.{3,60}?)\s+(?:di|at)\s+\S/i,
   /\bjoin(?:ing)?\s+.{2,40}?\s+as\s+(?:an?\s+)?(.{3,60})$/i,
   /\bbergabung\s+(?:dengan|di|bersama)\s+.{2,40}?\s+sebagai\s+(.{3,60})$/i,
+  // "Dicari cepat! Staff Admin & Kasir di Kopi Ruang Kerja": kata seru setelah "dicari" bukan akhir frasa.
+  /\bdicari\b[\s!:,.-]*(?:(?:cepat|segera|urgent|banget)\b[\s!:,.-]*)*(.{3,90})$/i,
 ]
+
+// "Mencari kandidat untuk bergabung" menyebut orang secara umum, bukan nama posisi.
+const GENERIC_PEOPLE_RE =
+  /^(?:kandidat|calon(?:\s+karyawan)?|karyawan|pegawai|pelamar|tenaga(?:\s+kerja)?|orang|talenta?|talents?|candidates?|people|anggota(?:\s+tim)?|rekan|teman(?:\s+baru)?|member(?:\s+baru)?|tim|team)\b/i
 
 function rolesFromPhrase(lineText: string): string[] {
   for (const re of PHRASE_ROLE_PATTERNS) {
@@ -240,10 +334,37 @@ function rolesFromPhrase(lineText: string): string[] {
     let phrase = firstSentence(m[1])
     phrase = phrase.split(/\s+(?:to|untuk|yang|who|that|with|dengan|for|di|at|in|on|@|—|–)\s+/i)[0]
     phrase = phrase.replace(/\s[-–—]\s.*$/, '')
-    const roles = splitRoleList(phrase).filter((r) => wordCount(r) <= 7)
+    const roles = splitRoleList(phrase).filter((r) => wordCount(r) <= 7 && !(GENERIC_PEOPLE_RE.test(r) && !ROLE_WORD_RE.test(r)))
     if (roles.length > 0) return roles
   }
   return []
+}
+
+// Baris pembuka daftar posisi tanpa kata "Posisi:" ("... membuka kesempatan untuk posisi:", "Kami mencari kandidat ...:").
+const INTRO_LINE_RE = /[:：]\s*$/
+const INTRO_EXPLICIT_RE = /\b(?:posisi|jabatan|positions?|roles?|lowongan|dibutuhkan|dicari)\b/i
+const INTRO_GENERIC_RE = /\b(?:mencari|membutuhkan|butuh|hiring|membuka|merekrut|rekrut\w*|bergabung|join|bidang|kandidat|looking\s+for|seeking)\b/i
+const LIST_MARKER_RE = /^(?:[-•*▪◦►▶→]|\d{1,3}[.)])\s+/
+const EMOJI_MARKER_RE = /^[\p{Extended_Pictographic}]/u
+
+/** Baris biasa tepat sesudah header/pembuka yang masuk akal sebagai satu nama posisi ("Junior Business Analyst"). */
+function looksLikeRoleLine(line: CaptionLine): boolean {
+  const t = line.text
+  if (line.kv || t.length < 3 || t.length > 80 || wordCount(t) > 8) return false
+  if (URL_OR_EMAIL_RE.test(t) || /^[#@]/.test(t) || /(?:^|\s)@\w+/.test(t)) return false
+  if (NON_TITLE_LINE_RE.test(t) || ROLE_SECTION_END_RE.test(t) || isPromoOnlyLine(t)) return false
+  if (/\b(?:is|are|sedang|lagi)\s+(?:now\s+)?hiring\b|\bmembuka\b|\bmerekrut\b|\bmencari\b/i.test(t)) return false
+  return ROLE_WORD_RE.test(t)
+}
+
+interface RoleSection {
+  /** true bila dibuka header/pembuka yang menyebut "posisi"/"dibutuhkan": butir bullet apa adanya dianggap posisi. */
+  explicit: boolean
+  /** Baris biasa berikutnya masih boleh menjadi satu posisi ("baris berikut sesudah header"). */
+  justOpened: boolean
+  /** Baris biasa sebelumnya diterima sebagai posisi, jadi baris pendek berikutnya yang mirip posisi juga diterima. */
+  plainRun: boolean
+  items: string[]
 }
 
 /** Ekstrak 1..N nama posisi dari poster/caption (kunci "roles:", header + daftar, atau kalimat umum). */
@@ -259,24 +380,83 @@ export function extractRoleTitles(text: string): string[] {
     return false
   }
 
-  // 1. Header posisi + nilai sebaris + daftar bernomor/bullet di bawahnya.
-  let inPositionsSection = false
-  for (const line of lines) {
-    const bullet = line.raw.match(/^(?:[-•*]|\d+[.)])\s+(.+)$/)
-    // Butir daftar di dalam bagian posisi didahulukan, supaya butir "Hiring Manager" tidak dianggap header.
-    if (inPositionsSection && bullet && !line.kv && !ROLE_SECTION_END_RE.test(line.text)) {
-      const title = bullet[1].trim()
-      if (title.length >= 3 && title.length <= 80 && !URL_OR_EMAIL_RE.test(title) && push([title])) break
-      continue
-    }
-    if (ROLE_HEADER_RE.test(line.text)) {
-      inPositionsSection = true
-      const inline = line.text.replace(ROLE_HEADER_RE, '').replace(/^\s*[:：\-–—]?\s*/, '').trim()
-      if (inline && push(splitRoleList(inline))) break
-      continue
-    }
-    if (ROLE_SECTION_END_RE.test(line.text)) inPositionsSection = false
+  // 1. Header posisi ("Posisi:", "Dibutuhkan:", "We are hiring:"), baris pembuka ("... untuk posisi:"), atau header
+  //    promosi ("LOWONGAN KERJA") yang diikuti baris posisi. Butir bernomor atau berbutir di bawahnya menjadi posisi sendiri-sendiri.
+  // Dibungkus objek supaya penyempitan tipe TypeScript tidak salah paham atas perubahan di dalam closure.
+  const state: { section: RoleSection | null } = { section: null }
+  let full = false
+  const flush = (): void => {
+    const sec = state.section
+    state.section = null
+    if (!sec || sec.items.length === 0) return
+    // Daftar yang dibuka kalimat umum ("Kami mencari ...:") hanya dipakai bila butirnya memang tampak seperti nama posisi.
+    const roleish = sec.items.filter((t) => ROLE_WORD_RE.test(t)).length
+    if (!sec.explicit && roleish * 2 < sec.items.length) return
+    if (push(sec.items)) full = true
   }
+  const open = (explicit: boolean): void => {
+    flush()
+    state.section = { explicit, justOpened: true, plainRun: false, items: [] }
+  }
+  for (const line of lines) {
+    if (full) break
+    const t = line.text
+    const listMarker = LIST_MARKER_RE.test(line.raw)
+    const emojiMarker = !listMarker && EMOJI_MARKER_RE.test(line.raw)
+    const canBeItem = !line.kv && !ROLE_SECTION_END_RE.test(t) && !isPromoOnlyLine(t) && !URL_OR_EMAIL_RE.test(t)
+
+    // Butir daftar di dalam bagian posisi didahulukan, supaya butir "Hiring Manager" tidak dianggap header.
+    const sec = state.section
+    if (sec && canBeItem) {
+      if (listMarker || (emojiMarker && ROLE_WORD_RE.test(t))) {
+        const title = stripEmploymentSuffix(t)
+        if (title.length >= 3 && title.length <= 80) sec.items.push(title)
+        sec.justOpened = false
+        sec.plainRun = false
+        continue
+      }
+      if ((sec.justOpened || (sec.plainRun && wordCount(t) <= 5)) && !emojiMarker && looksLikeRoleLine(line)) {
+        sec.items.push(stripEmploymentSuffix(t))
+        sec.justOpened = false
+        sec.plainRun = true
+        continue
+      }
+      // Daftar umum berakhir di baris biasa pertama sesudah butirnya.
+      if (!sec.explicit && sec.items.length > 0 && !emojiMarker) flush()
+    }
+
+    if (isPromoOnlyLine(t)) {
+      open(true)
+      continue
+    }
+    if (ROLE_HEADER_RE.test(t)) {
+      open(true)
+      const rest = t.replace(ROLE_HEADER_RE, '')
+      // "WE'RE HIRING! Join X as Y": tanda seru menutup header, sisanya bukan daftar posisi.
+      let inline = /^\s*[!?.]/.test(rest) ? '' : stripLeadingPromo(rest.replace(/^\s*[:：\-–—]?\s*/, '').trim())
+      if (!/[\p{L}\p{N}]/u.test(inline) || /^(?:di|at|untuk|for|yang|dengan|with|pt|cv)\b/i.test(inline) || /[:：]\s*$/.test(inline)) inline = ''
+      // "LOWONGAN KERJA - Studio Kreasi": sesudah tanda hubung, tanpa kata jabatan, yang menyusul adalah nama perusahaan.
+      else if (/^(?:lowongan|we)/i.test(t) && /^\s*[-–—|]/.test(rest) && !ROLE_WORD_RE.test(inline)) inline = ''
+      if (inline) {
+        if (state.section) state.section.justOpened = false
+        if (push(splitRoleList(inline))) full = true
+      }
+      continue
+    }
+    if (!line.kv && INTRO_LINE_RE.test(t) && (INTRO_EXPLICIT_RE.test(t) || INTRO_GENERIC_RE.test(t))) {
+      open(INTRO_EXPLICIT_RE.test(t))
+      continue
+    }
+    if (ROLE_SECTION_END_RE.test(t)) {
+      flush()
+      continue
+    }
+    if (state.section) {
+      state.section.justOpened = false
+      state.section.plainRun = false
+    }
+  }
+  flush()
   const fromHeaders = [...new Set(roles)]
   if (fromHeaders.length > 0) return fromHeaders.slice(0, MAX_OFF_PORTAL_ROLES)
 
@@ -290,7 +470,7 @@ export function extractRoleTitles(text: string): string[] {
   for (const line of lines) {
     const t = line.text
     if (t.length < 3 || t.length > 90 || URL_OR_EMAIL_RE.test(t)) continue
-    if (line.kv) continue
+    if (line.kv || isPromoOnlyLine(t)) continue
     if (/^#/.test(t) || /^@/.test(t) || /(?:^|\s)@\w+/.test(t)) continue
     if (NON_TITLE_LINE_RE.test(t) || ROLE_SECTION_END_RE.test(t)) continue
     if (/\b(?:is|are|sedang|lagi)\s+(?:now\s+)?hiring\b|\bhiring!*$|\bmembuka\b|\bmerekrut\b/i.test(t)) continue
@@ -320,7 +500,8 @@ const COMPANY_STOPWORDS =
   /^(?:we|our|us|kami|kita|they|who|company|perusahaan|tim|team|the|a|an|saya|aku|kamu|anda|you|i|this|ini|itu|dia|di|at|hiring|jobs?|lowongan|info|loker|urgent|hello|halo|hi)$/i
 
 function cutCompanyTail(raw: string): string {
-  let s = raw.trim()
+  // Label dalam kurung ("(FIKTIF, untuk uji)", "(Yogyakarta)", "(Hybrid)") bukan bagian nama perusahaan.
+  let s = stripParentheticals(raw.trim())
   s = s.split(URL_OR_EMAIL_RE)[0]
   s = s.split(/\s+(?:membuka|sedang|lagi|mencari|merekrut|membutuhkan|butuh|dibutuhkan|menerima|is\s+hiring|are\s+hiring|hiring|open|kirim|buka)\b/i)[0]
   s = s.split(/\s+[-–—|•]\s+|[,;|]\s+|\.\s+(?=[A-Z])/)[0]
@@ -340,8 +521,9 @@ function validCompanyName(name: string): boolean {
   if (wordCount(name) > 6) return false
   const first = name.split(/\s+/)[0].replace(/['’].*$/, '')
   if (COMPANY_STOPWORDS.test(name) || COMPANY_STOPWORDS.test(first)) return false
-  // "lowongan di Surabaya" menyebut kota, bukan perusahaan.
-  if (KNOWN_CITIES.some((c) => c.toLowerCase() === name.toLowerCase())) return false
+  // "lowongan di Surabaya" atau "di Jakarta Selatan" menyebut kota, bukan perusahaan.
+  const withoutArea = name.replace(/\b(?:kota|kabupaten|kab\.?|raya|pusat|utara|selatan|barat|timur|tengah)\b/gi, ' ').replace(/\s+/g, ' ').trim()
+  if (!withoutArea || KNOWN_CITIES.some((c) => c.toLowerCase() === withoutArea.toLowerCase())) return false
   return /[A-Za-z]/.test(name)
 }
 
@@ -352,6 +534,11 @@ const NAME_HIRING_RE =
   /^(.{2,45}?)\s+(?:(?:is|are|sedang|lagi)\s+(?:now\s+)?)?(?:hiring|membuka|merekrut|mencari|membutuhkan|buka\s+lowongan)\b/i
 const NAME_AFTER_RE =
   /(?:hiring\s+at|lowongan(?:\s+kerja)?\s+di|bergabung\s+(?:dengan|di|bersama)|join(?:ing)?|kerja\s+di|karir\s+di)\s+(.{2,50})/i
+// "Dicari cepat! Staff Admin & Kasir di Kopi Ruang Kerja": nama tempat sesudah "di" pada kalimat "dicari/dibutuhkan".
+const NAME_AFTER_WANTED_RE = /\b(?:dicari|dibutuhkan)\b[^\n]*?\s+di\s+(.{2,50})/i
+// "OPEN RECRUITMENT — Studio Kreasi Harmoni": header promosi yang diikuti nama perusahaan.
+const PROMO_NAME_HEADER_RE =
+  /^(?:open\s+recruitment|open\s+hiring|lowongan\s+kerja|info\s+loker|loker|job\s+vacanc(?:y|ies)|vacanc(?:y|ies)|rekrutmen|recruitment|kesempatan\s+(?:karir|karier|kerja)|careers?|karir|karier)\s*[-–—|:•]\s*(.+)$/i
 
 const GENERIC_URL_HOSTS = [
   'forms.gle',
@@ -471,6 +658,15 @@ export function extractCompanyName(lines: CaptionLine[], opts: { hint?: string; 
     if (m && validCompanyName(m[1])) return { name: `PT ${m[1]}`, source: 'label' }
   }
 
+  // 1c. Header promosi diikuti nama: "OPEN RECRUITMENT — Studio Kreasi Harmoni (label)". Kata jabatan berarti itu posisi, bukan perusahaan.
+  for (const line of lines) {
+    if (line.kv) continue
+    const m = line.text.match(PROMO_NAME_HEADER_RE)
+    if (!m) continue
+    const name = cutCompanyTail(m[1])
+    if (name.length >= 2 && validCompanyName(name) && !ROLE_WORD_RE.test(name)) return { name: name.slice(0, 200), source: 'phrase' }
+  }
+
   // 2. Akun media sosial: "10. @AnodosFinance", "18. Kraken / @Krak", "@acme is hiring".
   for (const line of lines) {
     const handleLine = line.text.match(HANDLE_LINE_RE)
@@ -486,12 +682,13 @@ export function extractCompanyName(lines: CaptionLine[], opts: { hint?: string; 
   // 3. Kalimat: "Acme Corp is hiring ...", "PT Maju membuka lowongan ...", "hiring at Acme", "lowongan di Acme".
   for (const line of lines) {
     if (line.kv) continue
+    if (isPromoOnlyLine(line.text)) continue
     const lead = line.text.match(NAME_HIRING_RE)
     if (lead) {
-      const name = leadingCapitalizedName(lead[1])
-      if (name && name === tidy(lead[1])) return { name, source: 'phrase' }
+      const name = leadingCapitalizedName(stripParentheticals(lead[1]))
+      if (name && name === tidy(stripParentheticals(lead[1]))) return { name, source: 'phrase' }
     }
-    const after = line.text.match(NAME_AFTER_RE)
+    const after = line.text.match(NAME_AFTER_RE) ?? line.text.match(NAME_AFTER_WANTED_RE)
     if (after) {
       const name = leadingCapitalizedName(after[1])
       if (name) return { name, source: 'phrase' }
@@ -518,7 +715,20 @@ export function cleanLocationValue(value: string): string {
   )
   s = s.replace(/#\w+/g, ' ')
   s = s.replace(/\(\s*\)/g, ' ').replace(/\(\s*$/, ' ')
-  return tidy(s).slice(0, 120)
+  // Kurung tutup tanpa pasangan terbawa dari kalimat sekitarnya: "(Penempatan: Sleman, Remote):" -> "Sleman, Remote".
+  let depth = 0
+  s = [...s]
+    .filter((ch) => {
+      if (ch === '(') depth++
+      else if (ch === ')') {
+        if (depth === 0) return false
+        depth--
+      }
+      return true
+    })
+    .join('')
+  // Titik akhir kalimat bukan bagian lokasi ("Yogyakarta (Di kantor).").
+  return tidy(s).replace(/\.+$/, '').trim().slice(0, 120)
 }
 
 const KNOWN_CITIES = [

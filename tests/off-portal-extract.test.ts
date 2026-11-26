@@ -369,6 +369,164 @@ test('perusahaan: "lowongan di Surabaya" tidak menjadikan kota sebagai perusahaa
   assert.equal(res.jobs[0].location, 'Surabaya')
 })
 
+/**
+ * Tiga caption contoh UAT (fiktif) dari Skripsi/UAT-Peserta/bahan-contoh/caption-contoh.md, disalin persis.
+ * Temuan production (deploy 36b6303): judul "KERJA — WE'RE HIRING!", perusahaan berisi label FIKTIF dan lokasi,
+ * caption 2 hanya menghasilkan satu kandidat "kandidat".
+ */
+const UAT_CAPTION_1 = `[FIKTIF, untuk uji]
+LOWONGAN KERJA — WE'RE HIRING! 🚀
+
+PT Mentari Digital Nusantara (FIKTIF, untuk uji) membuka kesempatan untuk posisi:
+📌 Junior Business Analyst
+📍 Lokasi: Yogyakarta (Hybrid)
+
+Kualifikasi singkat:
+- Lulusan S1 Sistem Informasi / Teknik Informatika / bidang terkait
+- Terbiasa menyusun dokumentasi kebutuhan, spreadsheet, dan alur proses bisnis
+- Komunikatif dan teliti
+
+Kirim lamaranmu lewat formulir berikut:
+https://docs.google.com/forms/d/e/1FAIpQLSfzKLZN3xcWABE9LHyuOzAeS7nd67TmSQ8WMJJnuPA4GfArbQ/viewform
+
+#lokerjogja #lowongankerja #FIKTIFuntukUji`
+
+const UAT_CAPTION_2 = `[FIKTIF, untuk uji]
+OPEN RECRUITMENT — Studio Kreasi Harmoni (FIKTIF, untuk uji)
+
+Kami mencari kandidat untuk bergabung di tim kami (Penempatan: Sleman, Yogyakarta / Remote):
+1. Admin Operasional (Full-time)
+2. Social Media Specialist (Full-time)
+3. Junior QA Tester (Kontrak / Magang)
+
+Kirim CV terbaru ke email: rekrutmen-fiktif@example.com
+Subjek email: [Nama Posisi] - [Nama Lengkap]
+Catatan: Data di atas sepenuhnya FIKTIF, untuk uji UAT.`
+
+const UAT_CAPTION_3 = `[FIKTIF, untuk uji]
+Dicari cepat! Staff Admin & Kasir Operasional di Kopi Ruang Kerja (FIKTIF, untuk uji).
+Lokasi: Yogyakarta (Di kantor, shift pagi/siang).
+Diutamakan yang rapi mengurus rekap harian & stok.
+
+Yang minat langsung DM untuk apply ya! ✨
+(FIKTIF, untuk uji)`
+
+test('UAT caption 1: header promosi bukan posisi; posisi dari baris sesudah pembuka, perusahaan tanpa label, lokasi terpisah', () => {
+  const res = parse({ rawText: UAT_CAPTION_1 })
+  assert.equal(res.jobs.length, 1)
+  const job = res.jobs[0]
+  assert.equal(job.title, 'Junior Business Analyst')
+  assert.equal(job.company, 'PT Mentari Digital Nusantara')
+  assert.equal(job.location, 'Yogyakarta (Hybrid)')
+  assert.equal(job.formProvider, 'google_forms')
+  assert.match(job.applyUrl ?? '', /^https:\/\/docs\.google\.com\/forms\/d\/e\/1FAIpQLSfzKLZN3xcWABE9LHyuOzAeS7nd67TmSQ8WMJJnuPA4GfArbQ\/viewform$/)
+  assert.deepEqual(job.unreadFields, [])
+})
+
+test('UAT caption 2: tiga butir daftar menjadi tiga kandidat dengan perusahaan dan lokasi yang sama', () => {
+  const res = parse({ rawText: UAT_CAPTION_2.replace('example.com', 'studiokreasi.co.id') })
+  assert.deepEqual(res.jobs.map((j) => j.title), ['Admin Operasional', 'Social Media Specialist', 'Junior QA Tester'])
+  for (const job of res.jobs) {
+    assert.equal(job.company, 'Studio Kreasi Harmoni')
+    assert.equal(job.location, 'Sleman, Yogyakarta / Remote')
+    assert.equal(job.sourceGroupId, res.sourceGroupId)
+    assert.deepEqual(job.unreadFields, [])
+  }
+  assert.equal(new Set(res.jobs.map((j) => j.publicationFingerprint)).size, 3)
+})
+
+test('UAT caption 2: email apply dikenali sebagai kanal email untuk setiap kandidat (domain bukan placeholder)', () => {
+  for (const domain of ['studiokreasi.co.id', 'studiokreasi.test', 'harmoni.id']) {
+    const res = parse({ rawText: UAT_CAPTION_2.replace('example.com', domain) })
+    assert.equal(res.jobs.length, 3)
+    for (const job of res.jobs) {
+      assert.equal(job.applyEmail, `rekrutmen-fiktif@${domain}`)
+      assert.equal(job.channel.channel, 'email_direct')
+      assert.equal(job.channel.emailApplySupported, true)
+      assert.equal(job.applyUrl, null)
+    }
+  }
+})
+
+test('UAT caption 2 dengan @example.com: domain placeholder sengaja diabaikan (IGNORED_EMAIL_DOMAINS), tetap tiga kandidat', () => {
+  const res = parse({ rawText: UAT_CAPTION_2 })
+  assert.equal(res.jobs.length, 3)
+  assert.equal(res.jobs[0].applyEmail, null)
+  assert.notEqual(res.jobs[0].channel.channel, 'email_direct')
+  assert.equal(res.jobs[0].company, 'Studio Kreasi Harmoni')
+})
+
+test('UAT caption 3: tanpa tautan atau email tetap kanal buntu (tidak ada tautan, email, atau WhatsApp)', () => {
+  const res = parse({ rawText: UAT_CAPTION_3 })
+  assert.equal(res.jobs.length, 1)
+  const job = res.jobs[0]
+  assert.equal(job.applyUrl, null)
+  assert.equal(job.applyEmail, null)
+  assert.equal(job.whatsappUrl, null)
+  assert.equal(job.channel.channel, 'external_web')
+  assert.equal(job.channel.autoWorkerSupported, false)
+  assert.equal(job.channel.emailApplySupported, false)
+  assert.equal(job.title, 'Staff Admin & Kasir Operasional')
+  assert.equal(job.company, 'Kopi Ruang Kerja')
+  assert.equal(job.location, 'Yogyakarta (Di kantor, shift pagi/siang)')
+})
+
+test('header promosi: tidak pernah jadi posisi, dan posisi diambil dari baris sesudah header atau pola yang jelas', () => {
+  const headers = [
+    'LOWONGAN KERJA',
+    "WE'RE HIRING!",
+    'HIRING!',
+    'OPEN RECRUITMENT',
+    'DIBUTUHKAN SEGERA',
+    'INFO LOKER',
+    'LOWONGAN KERJA — WE\'RE HIRING! 🚀',
+    'We are hiring',
+  ]
+  for (const header of headers) {
+    assert.deepEqual(extractRoleTitles(header), ['Lowongan Off-Portal'], header)
+    assert.deepEqual(extractRoleTitles(`${header}\nJunior Business Analyst\nLokasi: Bandung`), ['Junior Business Analyst'], header)
+  }
+  assert.deepEqual(extractRoleTitles("WE'RE HIRING!\nBackend Engineer\nFrontend Engineer\nLokasi: Remote"), ['Backend Engineer', 'Frontend Engineer'])
+  assert.deepEqual(extractRoleTitles('LOWONGAN KERJA Barista\nPT Kopi Senja'), ['Barista'])
+  assert.deepEqual(extractRoleTitles('Position: QA Engineer'), ['QA Engineer'])
+  assert.deepEqual(extractRoleTitles('Dibutuhkan: Staff Admin, Kasir'), ['Staff Admin', 'Kasir'])
+  assert.deepEqual(extractRoleTitles('DIBUTUHKAN SEGERA:\n1. Staff Admin\n2. Kasir\nKualifikasi:\n1. Jujur\n2. Rajin'), ['Staff Admin', 'Kasir'])
+  assert.deepEqual(extractRoleTitles('We are hiring! 🚀\n🔹 Backend Engineer\n🔹 Data Analyst\n📍 Jakarta'), ['Backend Engineer', 'Data Analyst'])
+})
+
+test('multi-posisi: butir bernomor atau berbutir dipecah per kandidat, maksimal 10, jenis pekerjaan dalam kurung dibuang', () => {
+  const bulleted = extractRoleTitles('Kami membuka lowongan untuk posisi:\n- Admin Gudang (Full-time)\n- Kasir (Part-time)\n• Barista (Magang)\nLokasi: Solo')
+  assert.deepEqual(bulleted, ['Admin Gudang', 'Kasir', 'Barista'])
+
+  const many = extractRoleTitles(`Posisi yang dibuka:\n${Array.from({ length: 14 }, (_, i) => `${i + 1}. Staff Role ${i + 1}`).join('\n')}`)
+  assert.equal(many.length, 10)
+  assert.equal(many[9], 'Staff Role 10')
+
+  // Parenthesis yang bukan jenis pekerjaan tetap bagian dari nama posisi.
+  assert.deepEqual(extractRoleTitles('Posisi:\n1. Backend Engineer (Rust, Go)\n2. Data Analyst (Remote)'), ['Backend Engineer (Rust, Go)', 'Data Analyst'])
+
+  // Daftar umum yang bukan posisi (tugas, syarat) tidak dianggap lowongan.
+  assert.deepEqual(extractRoleTitles('Kami mencari tenaga baru untuk tim kami:\n1. Menyusun laporan\n2. Menjaga toko'), ['Lowongan Off-Portal'])
+})
+
+test('perusahaan: label dalam kurung (FIKTIF, lokasi, mode kerja) dibuang dari nama, dan nama kota bukan perusahaan', () => {
+  const company = (text: string) => parse({ rawText: text }).jobs[0].company
+  assert.equal(company('PT Mentari Digital Nusantara (FIKTIF, untuk uji) membuka lowongan Data Analyst'), 'PT Mentari Digital Nusantara')
+  assert.equal(company('Perusahaan: Acme Studio (Jakarta, Hybrid)\nPosisi: Kasir'), 'Acme Studio')
+  assert.equal(company('PT Maju Jaya (Persero) membuka lowongan Kasir'), 'PT Maju Jaya (Persero)')
+  assert.equal(company('Lowongan Kerja - PT Maju Jaya (Jakarta, Hybrid)\nPosisi: Data Analyst'), 'PT Maju Jaya')
+  assert.equal(company('Lowongan Kerja - Studio Kreasi (FIKTIF)\nPosisi: Data Analyst'), 'Studio Kreasi')
+  assert.equal(company('OPEN RECRUITMENT\nPosisi: Data Analyst'), 'Perusahaan (Off-Portal)')
+  assert.equal(company('Dibutuhkan Kasir di Jakarta Selatan'), 'Perusahaan (Off-Portal)')
+  assert.equal(parse({ rawText: 'Dibutuhkan Kasir di Jakarta Selatan' }).jobs[0].location, 'Jakarta')
+})
+
+test('lokasi: kurung tutup tanpa pasangan dan titik akhir kalimat tidak ikut', () => {
+  assert.equal(cleanLocationValue('Sleman, Yogyakarta / Remote):'), 'Sleman, Yogyakarta / Remote')
+  assert.equal(cleanLocationValue('Yogyakarta (Di kantor, shift pagi/siang).'), 'Yogyakarta (Di kantor, shift pagi/siang)')
+  assert.equal(cleanLocationValue('Yogyakarta (Hybrid)'), 'Yogyakarta (Hybrid)')
+})
+
 test('rute POST /off-portal/parse: link IG saja -> 200 needsCaption tanpa kandidat; peringatan rute dan parser digabung', async () => {
   const app = Fastify()
   app.addHook('preHandler', async (req) => {
