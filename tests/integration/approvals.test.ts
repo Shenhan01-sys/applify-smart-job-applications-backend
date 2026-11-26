@@ -29,6 +29,8 @@ test('tanpa token atau token tak dikenal: 401 di semua rute persetujuan', async 
     ['POST', `/api/approvals/${approvalId}/approve`],
     ['POST', `/api/approvals/${approvalId}/rerun`],
     ['POST', `/api/approvals/${approvalId}/mark-sent`],
+    ['POST', `/api/approvals/${approvalId}/not-sent`],
+    ['POST', `/api/approvals/${approvalId}/close`],
   ] as const) {
     assert.equal((await api(method, path, { user: null })).status, 401, `${method} ${path} tanpa token`)
     assert.equal((await api(method, path, { user: { token: 'token-palsu' } })).status, 401, `${method} ${path} token palsu`)
@@ -208,12 +210,12 @@ test('mark-sent sesudah agen terkirim (log success bukan manual): 409 already_se
   assert.equal(logRows().length, 1)
 })
 
-test('mark-sent: klaim kirim dari worker atau ekstensi, pekerjaan aktif, belum disetujui, milik orang lain: ditolak', async () => {
+test('mark-sent: klaim ekstensi yang masih baru, pekerjaan aktif, belum disetujui, milik orang lain: ditolak', async () => {
   const claimed = seedApproval()
-  fake.seed('approval_submit_claims', { approval_request_id: claimed.approvalId, user_id: USER_A.id, channel: 'worker' })
+  fake.seed('approval_submit_claims', { approval_request_id: claimed.approvalId, user_id: USER_A.id, channel: 'extension', created_at: new Date().toISOString() })
   const c = await api('POST', `/api/approvals/${claimed.approvalId}/mark-sent`)
   assert.equal(c.status, 409)
-  assert.equal(c.body.code, 'already_sent')
+  assert.equal(c.body.code, 'agent_working')
 
   const active = seedApproval()
   fake.seed('automation_queue', { user_id: USER_A.id, job_type: 'apply', status: 'processing', payload: { approval_request_id: active.approvalId } })
@@ -228,6 +230,61 @@ test('mark-sent: klaim kirim dari worker atau ekstensi, pekerjaan aktif, belum d
   assert.equal((await api('POST', `/api/approvals/${others.approvalId}/mark-sent`)).status, 404)
 
   assert.equal(logRows().length, 0, 'tidak ada log yang ditulis oleh kasus yang ditolak')
+})
+
+test('mark-sent: kirim belum terkonfirmasi (submit_unverified) dari 23 November: 200, ditandai konfirmasi pengguna', async () => {
+  const { approvalId, appId } = seedApproval({ approval: { expires_at: past(3 * 86_400_000) } })
+  fake.seed('application_logs', { user_id: USER_A.id, action: 'apply', status: 'submit_unverified', details: { approval_request_id: approvalId } })
+  const res = await api('POST', `/api/approvals/${approvalId}/mark-sent`)
+  assert.equal(res.status, 200, res.text)
+  const written = logRows().filter((l) => l.status === 'success')
+  assert.equal(written.length, 1)
+  assert.equal(written[0].details.confirmed_by, 'user')
+  assert.equal(written[0].details.confirmed_from, 'submit_unverified')
+  assert.equal(fake.rows('ai_applications').find((r) => r.id === appId)!.status, 'submitted')
+})
+
+// ───────────────────────────────────────────────────────────────── not-sent dan close
+
+test('not-sent: persetujuan baru pending 24 jam untuk pemilik, persetujuan lama diganti, status klaim abandoned', async () => {
+  const { approvalId, jobId, appId } = seedApproval({ approval: { expires_at: past(3 * 86_400_000) } })
+  fake.seed('application_logs', { user_id: USER_A.id, action: 'apply', status: 'submit_unverified', details: { approval_request_id: approvalId } })
+  const res = await api('POST', `/api/approvals/${approvalId}/not-sent`)
+  assert.equal(res.status, 200, res.text)
+  const newId = res.body.new_approval_id as string
+  const fresh = fake.rows('approval_requests').find((r) => r.id === newId)!
+  assert.equal(fresh.user_id, USER_A.id)
+  assert.equal(fresh.status, 'pending')
+  assert.equal(fresh.job_id, jobId)
+  assert.equal(fresh.application_id, appId)
+  const ttl = new Date(fresh.expires_at).getTime() - Date.now()
+  assert.ok(ttl > 23 * 3_600_000 && ttl <= 24 * 3_600_000)
+  assert.equal(queueRows().length, 0, 'tidak ada tugas agen sebelum persetujuan baru disetujui')
+
+  const claims = await api('POST', '/api/approvals/claim-statuses', { body: { approval_ids: [approvalId] } })
+  assert.equal(claims.status, 200, claims.text)
+  assert.equal(claims.body.claims[approvalId].state, 'abandoned')
+
+  assert.equal((await api('POST', `/api/approvals/${approvalId}/not-sent`)).status, 409, 'dua kali: already_resolved')
+})
+
+test('close: log user_closed, status klaim closed, kartu lamaran tidak berubah', async () => {
+  const { approvalId, appId } = seedApproval({ approval: { expires_at: past(3 * 86_400_000) } })
+  const res = await api('POST', `/api/approvals/${approvalId}/close`)
+  assert.equal(res.status, 200, res.text)
+  assert.equal(logRows().filter((l) => l.details?.reason === 'user_closed').length, 1)
+  assert.equal(fake.rows('ai_applications').find((r) => r.id === appId)!.status, 'ready')
+  const claims = await api('POST', '/api/approvals/claim-statuses', { body: { approval_ids: [approvalId] } })
+  assert.equal(claims.body.claims[approvalId].state, 'closed')
+})
+
+test('not-sent dan close: hanya pemilik. Persetujuan pengguna lain dijawab 404 tanpa tulisan', async () => {
+  const others = seedApproval({ user: USER_B })
+  const before = fake.rows('approval_requests').length
+  assert.equal((await api('POST', `/api/approvals/${others.approvalId}/not-sent`)).status, 404)
+  assert.equal((await api('POST', `/api/approvals/${others.approvalId}/close`)).status, 404)
+  assert.equal(logRows().length, 0)
+  assert.equal(fake.rows('approval_requests').length, before)
 })
 
 test('mark-sent tidak memeriksa kedaluwarsa (pengguna mengirim sendiri)', async () => {

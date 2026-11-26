@@ -46,6 +46,8 @@ const ID_ROUTES: Array<{ method: 'GET' | 'POST'; path: (id: string) => string; p
   { method: 'POST', path: (id) => `/api/approvals/${id}/approve`, payload: {} },
   { method: 'POST', path: (id) => `/api/approvals/${id}/rerun`, payload: {} },
   { method: 'POST', path: (id) => `/api/approvals/${id}/mark-sent`, payload: {} },
+  { method: 'POST', path: (id) => `/api/approvals/${id}/not-sent`, payload: {} },
+  { method: 'POST', path: (id) => `/api/approvals/${id}/close`, payload: {} },
   { method: 'POST', path: (id) => `/api/approvals/${id}/reject`, payload: { reason: 'x' } },
   { method: 'POST', path: (id) => `/api/approvals/${id}/regenerate`, payload: {} },
   { method: 'POST', path: (id) => `/api/approvals/${id}/resolve-claim`, payload: { resolution: 'mark_sent' } },
@@ -92,6 +94,8 @@ test('galat database tidak pernah dikirim ke klien: 500 generik pada rerun, mark
   const cases: Array<{ method: 'GET' | 'POST'; url: string; payload?: unknown; code?: string }> = [
     { method: 'POST', url: `/api/approvals/${GOOD_ID}/rerun`, payload: {}, code: 'rerun_failed' },
     { method: 'POST', url: `/api/approvals/${GOOD_ID}/mark-sent`, payload: {}, code: 'mark_failed' },
+    { method: 'POST', url: `/api/approvals/${GOOD_ID}/not-sent`, payload: {}, code: 'not_sent_failed' },
+    { method: 'POST', url: `/api/approvals/${GOOD_ID}/close`, payload: {}, code: 'close_failed' },
     { method: 'GET', url: '/api/approvals/pending', code: 'internal_error' },
     { method: 'GET', url: '/api/approvals/history', code: 'internal_error' },
     { method: 'POST', url: '/api/approvals/claim-statuses', payload: { approval_ids: [GOOD_ID] }, code: 'claims_lookup_failed' },

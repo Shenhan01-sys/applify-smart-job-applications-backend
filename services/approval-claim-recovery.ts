@@ -1,7 +1,16 @@
-import crypto from 'crypto'
 import type { GuardDb } from './queue-guard.js'
 import { APPROVAL_CLAIM_TABLE } from './extension-runner.js'
-import { APPROVAL_TTL_MS } from '../api/routes/approval.js'
+import {
+  ABANDONED_REASON,
+  APPROVAL_TTL_MS,
+  CONFIRMED_BY_USER,
+  EXTENSION_CLAIM_STALE_MS,
+  USER_CLOSED_REASON,
+  USER_NOT_SENT_REASON,
+  freshApprovalId,
+} from './approval-shared.js'
+
+export { ABANDONED_REASON, EXTENSION_CLAIM_STALE_MS }
 
 /**
  * Penanganan klaim persetujuan yang macet (`approval_submit_claims`) — Catatan 16 section 4.4.
@@ -27,12 +36,14 @@ import { APPROVAL_TTL_MS } from '../api/routes/approval.js'
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-export const EXTENSION_CLAIM_STALE_MS = 2 * 60 * 1000
 export const MAX_CLAIM_STATUS_IDS = 50
-/** Nilai `details.reason` pada log `incomplete` yang menandai klaim lama ditinggalkan oleh `create_fresh_approval`. */
-export const ABANDONED_REASON = 'abandoned_locked_claim'
 
-export type ClaimStatusKind = 'none' | 'in_progress' | 'submitted' | 'abandoned' | 'locked_stuck'
+/**
+ * `abandoned` = persetujuan diganti persetujuan baru (klaim dilepas, atau pengguna memilih "Belum terkirim, ulangi").
+ * `closed` = pengguna menutupnya ("Tutup"). Keduanya bisa terjadi pada persetujuan tanpa baris klaim sama sekali,
+ * misalnya kirim yang belum terkonfirmasi atau persetujuan yang kedaluwarsa tanpa tugas agen.
+ */
+export type ClaimStatusKind = 'none' | 'in_progress' | 'submitted' | 'abandoned' | 'closed' | 'locked_stuck'
 
 export interface ClaimStatusInfo {
   approvalId: string
@@ -84,14 +95,25 @@ export async function getClaimStatuses(
   // terjadi atau masih berjalan. Status jatuh ke `in_progress` (tidak ada tombol pemulihan) sampai bukti terbaca.
   const evidenceUnknown = Boolean(logsRes.error) || Boolean(queueRes.error)
 
-  const submittedIds = new Set<string>()
+  const successIds = new Set<string>()
+  const unverifiedIds = new Set<string>()
   const abandonedIds = new Set<string>()
+  const closedIds = new Set<string>()
   for (const row of Array.isArray(logsRes.data) ? logsRes.data : []) {
     const aid = row?.details?.approval_request_id
     if (typeof aid !== 'string') continue
-    if (row.status === 'success' || row.status === 'submit_unverified') submittedIds.add(aid)
-    else if (row.status === 'incomplete' && row.details?.reason === ABANDONED_REASON) abandonedIds.add(aid)
+    if (row.status === 'success') successIds.add(aid)
+    else if (row.status === 'submit_unverified') unverifiedIds.add(aid)
+    else if (row.status === 'incomplete') {
+      const reason = row.details?.reason
+      if (reason === ABANDONED_REASON || reason === USER_NOT_SENT_REASON) abandonedIds.add(aid)
+      else if (reason === USER_CLOSED_REASON) closedIds.add(aid)
+    }
   }
+  // Pernyataan pengguna ("Belum terkirim, ulangi" atau "Tutup") mengalahkan kirim yang belum terkonfirmasi, tetapi tidak
+  // pernah mengalahkan log success: lamaran yang tercatat terkirim tidak bisa ditutup atau diganti.
+  const submittedIds = new Set<string>(successIds)
+  for (const aid of unverifiedIds) if (!abandonedIds.has(aid) && !closedIds.has(aid)) submittedIds.add(aid)
 
   const activeQueueIds = new Set<string>()
   for (const row of Array.isArray(queueRes.data) ? queueRes.data : []) {
@@ -107,7 +129,10 @@ export async function getClaimStatuses(
   for (const id of ids) {
     const claim = claimByApproval.get(id)
     if (!claim) {
-      out[id] = { approvalId: id, state: 'none', channel: null, claimedAt: null, queueJobId: null, runId: null }
+      // Tanpa baris klaim, hanya penyelesaian oleh pengguna yang punya keadaan sendiri. Log success tetap dibaca layar
+      // lewat daftar "terkirim", bukan lewat status klaim.
+      const resolved = successIds.has(id) ? null : abandonedIds.has(id) ? 'abandoned' : closedIds.has(id) ? 'closed' : null
+      out[id] = { approvalId: id, state: resolved ?? 'none', channel: null, claimedAt: null, queueJobId: null, runId: null }
       continue
     }
     const channel = claim.channel === 'extension' ? 'extension' : 'worker'
@@ -123,10 +148,10 @@ export async function getClaimStatuses(
       continue
     }
 
-    if (abandonedIds.has(id)) {
+    if (abandonedIds.has(id) || closedIds.has(id)) {
       out[id] = {
         approvalId: id,
-        state: 'abandoned',
+        state: abandonedIds.has(id) ? 'abandoned' : 'closed',
         channel,
         claimedAt: claim.created_at ?? null,
         queueJobId: claim.queue_job_id ?? null,
@@ -188,7 +213,8 @@ export async function resolveLockedClaim(
       case 'submitted':
         throw new ClaimRecoveryError(409, 'already_logged', 'Persetujuan ini sudah memiliki catatan pengiriman.')
       case 'abandoned':
-        throw new ClaimRecoveryError(409, 'already_resolved', 'Klaim ini sudah ditinggalkan dan persetujuan baru sudah dibuat.')
+      case 'closed':
+        throw new ClaimRecoveryError(409, 'already_resolved', 'Klaim ini sudah ditinggalkan atau ditutup, jadi tidak perlu dipulihkan lagi.')
       default:
         throw new ClaimRecoveryError(409, 'claim_not_found', 'Persetujuan ini tidak sedang terkunci oleh klaim aktif')
     }
@@ -208,6 +234,10 @@ export async function resolveLockedClaim(
         channel: 'manual_recovery',
         recovered_from_claim: true,
         previous_channel: claim.channel,
+        // Atas pernyataan pengguna sesudah memeriksa email atau portal, bukan konfirmasi sistem (data skripsi tetap jujur).
+        manual: true,
+        confirmed_by: CONFIRMED_BY_USER,
+        confirmed_from: 'locked_claim',
       },
     })
     if (logErr) throw new ClaimRecoveryError(500, 'log_insert_failed', 'Gagal menyimpan catatan terkirim manual')
@@ -278,13 +308,4 @@ export async function resolveLockedClaim(
   }
 
   return { ok: true, resolution, newApprovalId: String(created?.id ?? newId) }
-}
-
-/** UUID deterministik (bentuk v5) dari id persetujuan lama: satu klaim hanya bisa melahirkan satu persetujuan baru. */
-function freshApprovalId(oldApprovalId: string): string {
-  const bytes = crypto.createHash('sha256').update(`applify:fresh-approval:${oldApprovalId.toLowerCase()}`).digest().subarray(0, 16)
-  bytes[6] = (bytes[6] & 0x0f) | 0x50
-  bytes[8] = (bytes[8] & 0x3f) | 0x80
-  const hex = Buffer.from(bytes).toString('hex')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
 }

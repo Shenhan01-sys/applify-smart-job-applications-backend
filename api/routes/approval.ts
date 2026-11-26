@@ -9,7 +9,8 @@ import { AiAccessError, aiGuardService, type AiGuardService } from '../../servic
 import { regenerateApprovalCoverLetter } from '../../services/approval-regenerate.service.js'
 import { currentResumeUrlForApproval, resumeUrlForUser } from '../../services/resume-file.service.js'
 import { rerunApproval } from '../../services/rerun-guard.js'
-import { markApprovalSent } from '../../services/manual-submit-guard.js'
+import { closeApproval, markApprovalSent, reportNotSent } from '../../services/manual-submit-guard.js'
+import { APPROVAL_TTL_MS } from '../../services/approval-shared.js'
 import { notifyApplicationStatus } from '../../services/application-status.service.js'
 import { notificationsService } from '../../services/notifications.service.js'
 import { afterReplyFor, runAfterReplyTasks } from '../../services/after-reply.js'
@@ -17,8 +18,8 @@ import { isUuid } from '../../services/uuid.js'
 import { ClaimRecoveryError, getClaimStatuses, resolveLockedClaim, type ClaimResolution } from '../../services/approval-claim-recovery.js'
 import { isJobAccessibleToUser, selectJobWithVisibility } from '../../services/private-job-access.js'
 
-/** Masa berlaku permintaan persetujuan sejak dibuat: 24 jam. */
-export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000
+/** Masa berlaku permintaan persetujuan sejak dibuat: 24 jam (nilainya di services/approval-shared.ts). */
+export { APPROVAL_TTL_MS }
 
 interface ApprovalRequest {
   id: string
@@ -651,6 +652,33 @@ export async function approvalRoutes(
     const result = await markApprovalSent(supabase as any, userId, id, new Date(), async (applicationId) => {
       afterReply(() => notifyApplicationStatus(supabase as any, notificationsService, { userId, applicationId }))
     })
+    return reply.status(result.status).send(result.body)
+  })
+
+  // "Belum terkirim, ulangi": pengguna sudah memeriksa email atau portal dan lamaran ternyata belum terkirim. Membuat
+  // persetujuan baru (pending, 24 jam) untuk lowongan yang sama dan menutup yang lama ke Riwayat. Tidak ada yang
+  // dikirim; agen baru jalan sesudah pengguna menyetujui yang baru. Hanya pemilik. Aturan: manual-submit-guard.ts.
+  app.post('/:id/not-sent', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' })
+    }
+
+    const { id } = request.params as { id: string }
+    const result = await reportNotSent((await getDb()) as any, userId, id)
+    return reply.status(result.status).send(result.body)
+  })
+
+  // "Tutup": pengguna menutup persetujuan yang hasil kirimnya tidak pasti. Pindah ke Riwayat dengan status Ditutup.
+  // Tidak ada yang dikirim dan kartu lamaran tidak diubah. Hanya pemilik. Aturan: manual-submit-guard.ts.
+  app.post('/:id/close', async (request, reply) => {
+    const userId = (request as any).user?.id
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' })
+    }
+
+    const { id } = request.params as { id: string }
+    const result = await closeApproval((await getDb()) as any, userId, id)
     return reply.status(result.status).send(result.body)
   })
 

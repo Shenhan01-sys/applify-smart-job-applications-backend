@@ -261,3 +261,52 @@ test('resolve-claim (HTTP): klaim in_progress 409, klaim macet pulih sekali, ula
   assert.equal(again.json().code, 'already_resolved')
   assert.equal(store.tables.approval_requests.length, 3)
 })
+
+test('getClaimStatuses: persetujuan yang diganti atau ditutup pengguna jadi abandoned atau closed, juga tanpa baris klaim', async () => {
+  const store = makeExtensionTestDb({
+    approval_submit_claims: [{ approval_request_id: A4, user_id: USER_ID, channel: 'worker', queue_job_id: 'q4', created_at: '2026-11-23T12:00:00Z' }],
+    automation_queue: [],
+    application_logs: [
+      // A1: kirim belum terkonfirmasi lalu pengguna menyatakan belum terkirim (tanpa klaim): diganti.
+      { user_id: USER_ID, status: 'submit_unverified', details: { approval_request_id: A1 } },
+      { user_id: USER_ID, status: 'incomplete', details: { approval_request_id: A1, reason: 'user_not_sent' } },
+      // A2: ditutup pengguna, tanpa klaim.
+      { user_id: USER_ID, status: 'incomplete', details: { approval_request_id: A2, reason: 'user_closed' } },
+      // A3: log success mengalahkan penutupan yang datang belakangan.
+      { user_id: USER_ID, status: 'success', details: { approval_request_id: A3 } },
+      { user_id: USER_ID, status: 'incomplete', details: { approval_request_id: A3, reason: 'user_closed' } },
+      // A4: klaim macet lalu ditutup: closed, bukan locked_stuck.
+      { user_id: USER_ID, status: 'incomplete', details: { approval_request_id: A4, reason: 'user_closed' } },
+    ],
+  })
+  const map = await getClaimStatuses(store.db, USER_ID, [A1, A2, A3, A4], new Date('2026-11-23T12:10:00Z'))
+  assert.equal(map[A1].state, 'abandoned')
+  assert.equal(map[A2].state, 'closed')
+  assert.equal(map[A3].state, 'none') // success dibaca layar lewat daftar terkirim, bukan status klaim
+  assert.equal(map[A4].state, 'closed')
+})
+
+test('getClaimStatuses: kirim belum terkonfirmasi tanpa pernyataan pengguna tetap submitted', async () => {
+  const store = makeExtensionTestDb({
+    approval_submit_claims: [{ approval_request_id: A1, user_id: USER_ID, channel: 'worker', queue_job_id: 'q1', created_at: '2026-11-23T12:00:00Z' }],
+    automation_queue: [],
+    application_logs: [{ user_id: USER_ID, status: 'submit_unverified', details: { approval_request_id: A1 } }],
+  })
+  const map = await getClaimStatuses(store.db, USER_ID, [A1], new Date('2026-11-23T12:10:00Z'))
+  assert.equal(map[A1].state, 'submitted')
+})
+
+test('resolveLockedClaim mark_sent: log success ditandai manual dan confirmed_by user, bukan konfirmasi sistem', async () => {
+  const store = makeExtensionTestDb({
+    approval_requests: [seedApproval(A1)],
+    approval_submit_claims: [{ approval_request_id: A1, user_id: USER_ID, channel: 'worker', queue_job_id: 'q1', created_at: '2026-11-23T12:00:00Z' }],
+    automation_queue: [{ id: 'q1', user_id: USER_ID, job_type: 'apply', status: 'failed', payload: { approval_request_id: A1 } }],
+    ai_applications: [{ id: 'app-1', user_id: USER_ID, status: 'ready' }],
+  })
+  await resolveLockedClaim(store.db, USER_ID, A1, 'mark_sent', NOW)
+  const written = store.tables.application_logs[0]
+  assert.equal(written.status, 'success')
+  assert.equal(written.details.manual, true)
+  assert.equal(written.details.confirmed_by, 'user')
+  assert.equal(written.details.confirmed_from, 'locked_claim')
+})
