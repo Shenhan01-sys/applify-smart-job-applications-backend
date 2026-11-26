@@ -53,8 +53,16 @@ export function isInternshipPeriod(row: WorkPeriodRow): boolean {
   return typeof row.role_title === 'string' && INTERNSHIP_TITLE_RE.test(row.role_title)
 }
 
+const YEAR_ONLY_NOTE_RE = /hanya tahun|bulan (?:mulai|selesai) tidak tercantum/i
+
 function isYearOnlyPeriod(row: WorkPeriodRow): boolean {
-  return Array.isArray(row.notes) && row.notes.some((n) => /hanya tahun/i.test(String(n ?? '')))
+  if (Array.isArray(row.notes)) {
+    return row.notes.some((n) => YEAR_ONLY_NOTE_RE.test(String(n ?? '')))
+  }
+  if (typeof row.notes === 'string') {
+    return YEAR_ONLY_NOTE_RE.test(row.notes)
+  }
+  return false
 }
 
 const monthIndex = (v: unknown): number | null => {

@@ -324,13 +324,22 @@ async function loadWorkExperiences(db: AnswersDb, userId: string): Promise<Array
   try {
     let { data, error } = await db
       .from('work_experiences')
-      .select('start_date, end_date, is_current, employment_type, role_title')
+      .select('start_date, end_date, is_current, employment_type, role_title, notes')
       .eq('user_id', userId)
       .limit(100)
-    if (error && (error.code === '42703' || error.code === 'PGRST204' || /employment_type|role_title/i.test(String(error.message ?? '')))) {
-      const fallback = await db.from('work_experiences').select('start_date, end_date, is_current').eq('user_id', userId).limit(100)
-      data = fallback.data
-      error = fallback.error
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || /notes|employment_type|role_title/i.test(String(error.message ?? '')))) {
+      const noNotes = await db
+        .from('work_experiences')
+        .select('start_date, end_date, is_current, employment_type, role_title')
+        .eq('user_id', userId)
+        .limit(100)
+      data = noNotes.data
+      error = noNotes.error
+      if (error && (error.code === '42703' || error.code === 'PGRST204' || /employment_type|role_title/i.test(String(error.message ?? '')))) {
+        const fallback = await db.from('work_experiences').select('start_date, end_date, is_current').eq('user_id', userId).limit(100)
+        data = fallback.data
+        error = fallback.error
+      }
     }
     return !error && Array.isArray(data) ? data : null
   } catch (e) {
