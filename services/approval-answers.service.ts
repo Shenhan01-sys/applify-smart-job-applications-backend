@@ -345,12 +345,22 @@ export function resetWorkExperienceSchemaCache(db?: object): void {
 async function loadWorkExperiences(db: AnswersDb, userId: string): Promise<Array<Record<string, any>> | null> {
   try {
     const cached = typeof db === 'object' && db !== null ? workExpTierByDb.get(db) : undefined
-    const freshTier: WorkExpSchemaTier =
-      cached && Date.now() - cached.checkedAt < WORK_EXP_SCHEMA_CACHE_TTL_MS ? cached.tier : 'full'
+    const cacheFresh = cached !== undefined && Date.now() - cached.checkedAt < WORK_EXP_SCHEMA_CACHE_TTL_MS
+    const freshTier: WorkExpSchemaTier = cacheFresh ? cached.tier : 'full'
 
     const setTier = (tier: WorkExpSchemaTier) => {
       if (typeof db === 'object' && db !== null) {
         workExpTierByDb.set(db, { tier, checkedAt: Date.now() })
+      }
+    }
+    // Cache hanya dicatat saat tingkat kolom turun. Saat bacaan sukses pada tingkat yang sama, `checkedAt` tidak
+    // disegarkan: kalau disegarkan, lalu lintas yang rutin membuat cache tidak pernah kedaluwarsa dan kolom `notes`
+    // yang baru dimigrasi tidak pernah dicoba lagi sampai proses dimulai ulang.
+    const rememberSuccess = (tier: WorkExpSchemaTier) => {
+      if (tier === 'full') {
+        if (typeof db === 'object' && db !== null) workExpTierByDb.delete(db)
+      } else if (!(cacheFresh && cached.tier === tier)) {
+        setTier(tier)
       }
     }
 
@@ -361,7 +371,7 @@ async function loadWorkExperiences(db: AnswersDb, userId: string): Promise<Array
       const tier = tiers[i]
       const { data, error } = await db.from('work_experiences').select(WORK_EXP_SELECTS[tier]).eq('user_id', userId).limit(100)
       if (!error) {
-        setTier(tier)
+        rememberSuccess(tier)
         return Array.isArray(data) ? data : null
       }
       const pattern = tier === 'full' ? /notes|employment_type|role_title|does not exist|schema cache/i : /employment_type|role_title|does not exist|schema cache/i

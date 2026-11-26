@@ -278,6 +278,35 @@ test('loadWorkExperiences: mengambil notes & employment_type serta fallback kolo
   assert.ok(!dbNoNotes.selectedCols[2]?.includes('notes'))
   assert.ok(dbNoNotes.selectedCols[2]?.includes('employment_type'))
 
+  // 4b) Cache tidak disegarkan oleh lalu lintas: sesudah kolom `notes` dimigrasi, tingkat penuh dicoba lagi begitu
+  // TTL sejak deteksi awal lewat, walau ada panggilan di tengah-tengahnya (bug: checkedAt ikut disegarkan tiap sukses).
+  const missingCols = ['notes']
+  const dbMig = makeDb(
+    [{ start_date: '2024-01-01', end_date: '2024-12-01', is_current: false, employment_type: 'full-time', role_title: 'Backend' }],
+    missingCols
+  )
+  const realNow = Date.now
+  let offsetMs = 0
+  Date.now = () => realNow() + offsetMs
+  try {
+    const ask = () => prepareApprovalAnswers(dbMig, { userId: 'u-4', jobTitle: 'Backend', company: 'PT Uji' }, deterministicFiller)
+    await ask()
+    assert.equal(dbMig.selectedCols.length, 2, 'deteksi awal: full gagal 42703, lalu tanpa notes')
+    offsetMs = 4 * 60 * 1000
+    await ask()
+    assert.equal(dbMig.selectedCols.length, 3, 'cache masih segar: satu kueri tanpa notes')
+    assert.ok(!dbMig.selectedCols[2]?.includes('notes'))
+    missingCols.length = 0 // migrasi dijalankan
+    offsetMs = 6 * 60 * 1000
+    await ask()
+    assert.equal(dbMig.selectedCols.length, 4, 'TTL lewat: langsung satu kueri penuh yang kini berhasil')
+    assert.ok(dbMig.selectedCols[3]?.includes('notes'), 'kolom notes dicoba lagi sesudah TTL meski ada panggilan di tengah')
+    await ask()
+    assert.ok(dbMig.selectedCols[4]?.includes('notes'), 'cache dibersihkan: panggilan berikut tetap memilih notes')
+  } finally {
+    Date.now = realNow
+  }
+
   // 5) DRAFT_2026-11-26_work_experiences_notes.sql memuat pre-check, add column if not exists notes text, & post-check
   const { readFileSync } = await import('node:fs')
   const { resolve } = await import('node:path')
