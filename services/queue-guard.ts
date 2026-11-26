@@ -10,6 +10,7 @@
  */
 import { isValidApplyEmail } from './email-address.js'
 import { currentResumeUrlForApproval } from './resume-file.service.js'
+import { isJobAccessibleToUser, selectJobWithVisibility } from './private-job-access.js'
 
 /** Minimal shape of the Supabase client used here (a fake is passed in tests). */
 export interface GuardDb {
@@ -42,6 +43,19 @@ export class MissingCvUnconfirmedError extends Error {
   constructor(message = 'CV belum tersedia pada persetujuan ini dan pengiriman tanpa CV belum dikonfirmasi.') {
     super(message)
     this.name = 'MissingCvUnconfirmedError'
+  }
+}
+
+/**
+ * Lowongan privat milik pengguna lain dirujuk lewat `job_id` (HTTP 404, tidak membocorkan keberadaan baris).
+ * Dipakai untuk job `apply` tanpa persetujuan: worker membaca `jobs` lewat service role dan melewati RLS.
+ */
+export class JobNotAccessibleError extends Error {
+  readonly statusCode = 404
+  readonly code = 'job_not_found'
+  constructor() {
+    super('Job not found')
+    this.name = 'JobNotAccessibleError'
   }
 }
 
@@ -80,6 +94,7 @@ export function clientErrorReply(error: unknown): { statusCode: number; body: { 
     error instanceof ApprovalChannelConflictError ||
     error instanceof MissingCvUnconfirmedError ||
     error instanceof InvalidPayloadError ||
+    error instanceof JobNotAccessibleError ||
     error instanceof PlatformLimitReachedError
   ) {
     return { statusCode: error.statusCode, body: { error: error.message, code: error.code } }
@@ -206,6 +221,13 @@ export async function guardQueuePayload(
 
   if (payload.approval_request_id == null && !needsApproval) {
     delete payload.approval_request_id
+    // Jalur isi-saja tanpa persetujuan: `job_id` dari klien tidak boleh menunjuk lowongan privat milik orang lain,
+    // karena worker membacanya lewat service role. Lowongan yang tidak ada dibiarkan lewat (tidak ada yang bocor).
+    if (jobType === 'apply' && typeof payload.job_id === 'string' && payload.job_id.trim()) {
+      const { data: jobRow, error: jobErr } = await selectJobWithVisibility(db, payload.job_id.trim(), 'id')
+      if (jobErr) throw new Error(`job lookup failed: ${String(jobErr.message ?? jobErr).slice(0, 200)}`)
+      if (jobRow && !isJobAccessibleToUser(jobRow, userId)) throw new JobNotAccessibleError()
+    }
     return payload
   }
 
