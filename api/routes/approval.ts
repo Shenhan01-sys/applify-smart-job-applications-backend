@@ -132,6 +132,9 @@ export async function approvalRoutes(
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
+    if (!request.body || typeof request.body !== 'object') {
+      return reply.status(400).send({ error: 'ID lowongan wajib diisi', code: 'job_id_required' })
+    }
     const {
       job_id,
       application_id,
@@ -139,7 +142,7 @@ export async function approvalRoutes(
       company,
       platform,
       answers,
-    } = (request.body ?? {}) as any
+    } = request.body as any
     const cleanJobId = typeof job_id === 'string' ? job_id.trim() : ''
     if (!cleanJobId) {
       return reply.status(400).send({ error: 'ID lowongan wajib diisi', code: 'job_id_required' })
