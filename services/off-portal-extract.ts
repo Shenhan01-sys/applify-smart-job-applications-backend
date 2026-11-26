@@ -1,4 +1,4 @@
-import { detectSocialPostPlatform, extractUrlsFromText, hostMatchesDomain, sanitizeHttpUrl } from './apply-channel.js'
+import { detectSocialPostPlatform, hostMatchesDomain, sanitizeHttpUrl } from './apply-channel.js'
 
 /**
  * Ekstraksi deterministik posisi, perusahaan, lokasi, dan tautan lamaran dari teks bebas lowongan off-portal
@@ -230,24 +230,166 @@ function stripEmploymentSuffix(title: string): string {
 // Tautan lamaran
 // ---------------------------------------------------------------------------------------------------------------------
 
+/** Satu tautan hasil bacaan. `truncated` true bila tautan di teks terpotong elipsis dan yang tersimpan hanya bagian utuhnya. */
+export interface UrlToken {
+  url: string
+  truncated: boolean
+}
+
+export interface UrlScan {
+  urls: UrlToken[]
+  /**
+   * Jumlah kemunculan tautan terpotong di teks, termasuk yang tidak bisa dipulihkan dan tidak ada di `urls`. Tautan yang sama bisa
+   * terhitung dua kali bila dibaca dari dua jalur, jadi pakai hanya sebagai ada atau tidak.
+   */
+  truncatedCount: number
+}
+
+const ELLIPSIS_MARK_RE = /…|%E2%80%A6/i
+const TEXT_URL_RE = /https?:\/\/[^\s<>"'\])}`]+/gi
+// Situs yang seluruh isinya ada di jalurnya (tautan pendek, WhatsApp, formulir, pohon tautan): potongannya tidak menunjuk ke mana-mana.
+const OPAQUE_LINK_DOMAINS = [
+  'wa.me',
+  'whatsapp.com',
+  'forms.gle',
+  'forms.office.com',
+  'typeform.com',
+  'tally.so',
+  'airtable.com',
+  't.co',
+  'bit.ly',
+  'tinyurl.com',
+  's.id',
+  'cutt.ly',
+  'rebrand.ly',
+  'shorturl.at',
+  'lnkd.in',
+  'goo.gl',
+  'is.gd',
+  'ow.ly',
+  'rb.gy',
+  'linktr.ee',
+]
+
+/**
+ * Teks tautan yang terpotong: diakhiri "…" (U+2026), "..." (tiga titik atau lebih), atau "%E2%80%A6" (bentuk percent-encoded
+ * dari U+2026), dan "…" / "%E2%80%A6" di tengah tautan. Web X menampilkan tautan panjang dengan elipsis seperti ini, jadi yang
+ * tersalin hanya potongannya. Titik tunggal di ujung bukan elipsis (itu titik akhir kalimat).
+ */
+export function isTruncatedUrlText(raw: string): boolean {
+  const t = raw.trim()
+  return ELLIPSIS_MARK_RE.test(t) || /\.{3,}[,;:!?)]*$/.test(t)
+}
+
+function hasEllipsisMark(value: string): boolean {
+  return ELLIPSIS_MARK_RE.test(value) || /\.{3,}$/.test(value)
+}
+
+function isOpaqueLink(host: string, path: string): boolean {
+  return hostMatchesDomain(host, OPAQUE_LINK_DOMAINS) || (hostMatchesDomain(host, ['docs.google.com']) && /^\/(?:u\/\d+\/)?forms(?:\/|$)/i.test(path))
+}
+
+/**
+ * Pulihkan bagian utuh dari tautan yang terpotong, atau null bila tidak ada yang bisa dipercaya. Tautan dipotong ke `/` terakhir
+ * sebelum elipsis, karena segmen terakhir hampir pasti terpotong di tengah ("wirexapp.com/company/career…" menjadi
+ * "https://wirexapp.com/company/"). Bila elipsis jatuh di query atau fragmen, jalurnya sudah utuh dan hanya sisanya yang dibuang.
+ * Tanpa jalur sama sekali ("wirexapp.co…") nama host sendiri mungkin terpotong, jadi hasilnya null: domain tebakan bisa menunjuk
+ * ke situs orang lain. Tautan pendek, WhatsApp, dan formulir juga null karena potongannya tidak menunjuk ke mana-mana.
+ * Hasilnya tidak pernah memuat elipsis.
+ */
+export function repairTruncatedUrl(raw: string): string | null {
+  let s = raw.trim()
+  const mark = s.search(ELLIPSIS_MARK_RE)
+  if (mark >= 0) s = s.slice(0, mark)
+  s = s.replace(/[,;:!?)]*\.{3,}[,;:!?)]*$/, '').replace(/[,;:!?)]+$/, '')
+  const scheme = /^https?:\/\//i.exec(s)
+  const rest = scheme ? s.slice(scheme[0].length) : s
+  // Skema lain ("ftp://", "javascript:") bukan tautan lamaran; titik dua yang disusul angka adalah port.
+  if (!rest || /\s/.test(rest) || /^[a-z][a-z0-9+.-]*:(?!\d)/i.test(rest)) return null
+  const query = rest.search(/[?#]/)
+  let core: string
+  if (query >= 0) {
+    core = rest.slice(0, query)
+  } else {
+    const lastSlash = rest.lastIndexOf('/')
+    if (lastSlash < 0) return null
+    core = rest.slice(0, lastSlash + 1)
+  }
+  if (!core) return null
+  const safe = sanitizeHttpUrl(`${scheme ? scheme[0].toLowerCase() : 'https://'}${core}`)
+  if (!safe || hasEllipsisMark(safe)) return null
+  const u = new URL(safe)
+  return isOpaqueLink(u.hostname, u.pathname) ? null : safe
+}
+
+/**
+ * Tautan bersekema di teks. Yang terpotong elipsis tidak disimpan utuh: dipulihkan lewat `repairTruncatedUrl` dan ditandai
+ * `truncated`, atau dibuang bila tidak bisa dipulihkan. Selain itu sama dengan `extractUrlsFromText`.
+ */
+export function scanTextUrls(text: string): UrlScan {
+  const scan: UrlScan = { urls: [], truncatedCount: 0 }
+  if (!text) return scan
+  for (const m of text.match(TEXT_URL_RE) ?? []) {
+    const truncated = isTruncatedUrlText(m)
+    const candidate = truncated ? repairTruncatedUrl(m) : sanitizeHttpUrl(m.replace(/[.,;:!?)]+$/, ''))
+    if (truncated) scan.truncatedCount++
+    if (!candidate) continue
+    addUrlToken(scan.urls, { url: candidate, truncated })
+  }
+  return scan
+}
+
+/** Tambahkan tanpa duplikat. Tautan yang utuh di satu tempat tidak dianggap terpotong karena potongannya muncul di tempat lain. */
+function addUrlToken(list: UrlToken[], token: UrlToken): void {
+  const existing = list.find((t) => t.url === token.url)
+  if (!existing) list.push(token)
+  else if (!token.truncated) existing.truncated = false
+}
+
+export function mergeUrlScans(...scans: UrlScan[]): UrlScan {
+  const merged: UrlScan = { urls: [], truncatedCount: 0 }
+  for (const scan of scans) {
+    merged.truncatedCount += scan.truncatedCount
+    for (const token of scan.urls) addUrlToken(merged.urls, { ...token })
+  }
+  return merged
+}
+
+/** Urutan pilihan tautan: yang utuh lebih dulu (urutan asli dipertahankan), lalu hasil pemulihan tautan terpotong. */
+export function completeUrlsFirst(tokens: UrlToken[]): UrlToken[] {
+  return [...tokens.filter((t) => !t.truncated), ...tokens.filter((t) => t.truncated)]
+}
+
+/** Salinan teks tanpa tautan bersekema yang terpotong, untuk pembacaan yang tidak boleh memungut tautan rusak (klasifikasi kanal). */
+export function maskTruncatedUrls(text: string): string {
+  if (!text) return text
+  return text.replace(TEXT_URL_RE, (m) => (isTruncatedUrlText(m) ? ' ' : m))
+}
+
 /** URL yang ditulis sebagai nilai "apply:" / "link:" / "daftar:" (didahulukan sebagai tautan lamaran). */
-export function extractApplyKeyUrls(lines: CaptionLine[]): string[] {
-  const urls: string[] = []
+export function scanApplyKeyUrls(lines: CaptionLine[]): UrlScan {
+  const scans: UrlScan[] = []
   for (const line of lines) {
     if (line.kv?.group !== 'apply') continue
     const value = line.kv.value
-    const before = urls.length
-    for (const u of extractUrlsFromText(value)) urls.push(u)
+    const scan = scanTextUrls(value)
+    scans.push(scan)
     // Tanpa skema: "apply: www.acme.com/careers" atau "apply: acme.com/jobs".
-    if (urls.length === before) {
+    if (scan.urls.length === 0 && scan.truncatedCount === 0) {
       const bare = value.match(/^(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:\/\S*)?/i)
       if (bare && !/@/.test(bare[0])) {
-        const safe = sanitizeHttpUrl(`https://${bare[0].replace(/[.,;:!?)]+$/, '')}`)
-        if (safe) urls.push(safe)
+        const token = value.match(/^\S+/)?.[0] ?? bare[0]
+        if (isTruncatedUrlText(token)) {
+          const fixed = repairTruncatedUrl(token)
+          scans.push({ urls: fixed ? [{ url: fixed, truncated: true }] : [], truncatedCount: 1 })
+        } else {
+          const safe = sanitizeHttpUrl(`https://${bare[0].replace(/[.,;:!?)]+$/, '')}`)
+          if (safe) scans.push({ urls: [{ url: safe, truncated: false }], truncatedCount: 0 })
+        }
       }
     }
   }
-  return urls
+  return mergeUrlScans(...scans)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

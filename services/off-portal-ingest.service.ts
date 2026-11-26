@@ -4,7 +4,6 @@ import {
   classifyJobChannel,
   detectSocialPostPlatform,
   extractApplyEmail,
-  extractUrlsFromText,
   isLinkedInUrl,
   isPublicHttpUrl,
   type ChannelClassification,
@@ -17,16 +16,23 @@ import {
   OFF_PORTAL_COMPANY_PLACEHOLDER,
   OFF_PORTAL_LOCATION_DEFAULT,
   OFF_PORTAL_TITLE_PLACEHOLDER,
-  extractApplyKeyUrls,
+  completeUrlsFirst,
   extractBlockCompany,
   extractCompanyName,
   extractLocationValue,
   extractRoleTitles,
+  isTruncatedUrlText,
+  maskTruncatedUrls,
+  mergeUrlScans,
   normalizeCopiedPostText,
+  repairTruncatedUrl,
+  scanApplyKeyUrls,
+  scanTextUrls,
   splitCaptionLines,
   splitCompanyBlocks,
   type CaptionLine,
   type CompanyBlock,
+  type UrlScan,
 } from './off-portal-extract.js'
 import {
   OFF_PORTAL_AI_TIMEOUT_MS,
@@ -52,6 +58,9 @@ import {
  *     kelebihannya dilaporkan di `warnings` beserta jumlah aslinya.
  *   - Memvalidasi setiap URL (sumber, teks, QR) lewat `isPublicHttpUrl` agar URL privat/IP/javascript: ditolak.
  *   - Tautan postingan media sosial tidak pernah dijadikan tautan lamaran. Tautan LinkedIn diberi peringatan lamar manual.
+ *   - Tautan yang terpotong elipsis ("wirexapp.com/company/career…", salinan web X) tidak pernah disimpan utuh dan tidak pernah
+ *     memuat "…" atau "%E2%80%A6". Yang disimpan hanya bagian sampai `/` terakhir (atau tidak ada bila sulit dipercaya), dan
+ *     kandidatnya diberi `TRUNCATED_URL_WARNING` beserta ringkasannya di `warnings` hasil.
  *   - Menyertakan deteksi kontak WhatsApp (`wa.me` / `api.whatsapp.com`), formulir eksternal (Google Form/Typeform/Tally),
  *     email HR, klasifikasi kanal, serta laporan anti-scam (`assessJobSafety`).
  *   - Ekstraksi posisi, perusahaan, dan lokasi ada di `off-portal-extract.ts`.
@@ -125,6 +134,14 @@ export { MAX_OFF_PORTAL_CANDIDATES, MAX_OFF_PORTAL_ROLES, extractRoleTitles }
 
 export const LINKEDIN_MANUAL_APPLY_WARNING =
   'Lowongan LinkedIn wajib dilamar manual di LinkedIn. Applify tidak mengisi atau mengirim lamaran di LinkedIn, jadi simpan lowongannya lalu lamar sendiri lewat tautannya.'
+
+export const TRUNCATED_URL_WARNING = 'Tautan di caption terpotong; buka postingan asli untuk tautan lengkap.'
+
+/** Ringkasan di tingkat hasil. Bila semua lowongan terkena, jumlahnya tidak disebut supaya tetap benar setelah cadangan AI mengubah jumlah kandidat. */
+export function truncatedUrlSummary(truncatedJobs: number, totalJobs: number): string {
+  const scope = truncatedJobs < totalJobs ? ` pada ${truncatedJobs} dari ${totalJobs} lowongan` : ''
+  return `Ada tautan di caption yang terpotong${scope}. Applify hanya menyimpan bagian tautan yang masih utuh, atau tidak menyimpan tautan bila tidak ada yang utuh. Buka postingan asli untuk tautan lengkap.`
+}
 
 const AI_FIELD_LABELS: Record<OffPortalAiField, string> = {
   title: 'posisi',
@@ -211,6 +228,8 @@ interface JobSpec {
   whatsappUrl: string | null
   extraction?: OffPortalExtraction
   aiFields?: OffPortalAiField[]
+  /** Teks lowongan memuat tautan yang terpotong elipsis. */
+  urlTruncated?: boolean
 }
 
 /** Satu kandidat dari bidang yang sudah ditentukan. Dipakai bersama oleh jalur aturan (satu lowongan, multi-perusahaan) dan cadangan AI. */
@@ -219,7 +238,8 @@ function buildJob(base: JobBase, s: JobSpec): ParsedOffPortalJob {
     platform_source: base.sourceType,
     external_url: s.applyUrl,
     apply_email: s.applyEmail,
-    description: s.description,
+    // Tautan ATS yang terpotong di deskripsi tidak boleh menjadi tautan lamaran hasil klasifikasi.
+    description: maskTruncatedUrls(s.description),
   })
   const safety = assessJobSafety(
     {
@@ -239,6 +259,7 @@ function buildJob(base: JobBase, s: JobSpec): ParsedOffPortalJob {
   const aiFields = s.aiFields ?? []
   const warnings: string[] = []
   if (isLinkedInUrl(s.applyUrl)) warnings.push(LINKEDIN_MANUAL_APPLY_WARNING)
+  if (s.urlTruncated) warnings.push(TRUNCATED_URL_WARNING)
   if (aiFields.length > 0) warnings.push(aiJobWarning(aiFields))
   return {
     title: s.title,
@@ -267,13 +288,14 @@ function buildJob(base: JobBase, s: JobSpec): ParsedOffPortalJob {
   }
 }
 
-/** Tautan lamaran dari satu blok perusahaan: hanya URL di blok itu (kunci "apply:" dulu), publik, dan bukan postingan sosial. */
-function blockApplyUrls(lines: CaptionLine[], blockText: string): string[] {
-  const out: string[] = []
-  for (const u of [...extractApplyKeyUrls(lines), ...extractUrlsFromText(blockText)]) {
-    if (!out.includes(u) && isPublicHttpUrl(u) && !detectSocialPostPlatform(u)) out.push(u)
-  }
-  return out
+/**
+ * Tautan lamaran dari satu blok perusahaan: hanya URL di blok itu (kunci "apply:" dulu), publik, dan bukan postingan sosial.
+ * Tautan utuh didahulukan atas bagian utuh dari tautan terpotong.
+ */
+function blockApplyScan(lines: CaptionLine[], blockText: string): UrlScan {
+  const scan = mergeUrlScans(scanApplyKeyUrls(lines), scanTextUrls(blockText))
+  const urls = completeUrlsFirst(scan.urls).filter((t) => isPublicHttpUrl(t.url) && !detectSocialPostPlatform(t.url))
+  return { urls, truncatedCount: scan.truncatedCount }
 }
 
 /**
@@ -288,7 +310,8 @@ function jobsFromCompanyBlocks(blocks: CompanyBlock[], base: JobBase, locationHi
   let lastCompany = 0
   blocks.forEach((block, index) => {
     const lines = splitCaptionLines(block.text)
-    const urls = blockApplyUrls(lines, block.text)
+    const scan = blockApplyScan(lines, block.text)
+    const urls = scan.urls.map((t) => t.url)
     const whatsappUrl = urls.find(isWhatsAppUrl) ?? null
     const applyUrl = urls.find((u) => !isWhatsAppUrl(u)) ?? urls[0] ?? null
     const applyEmail = extractApplyEmail(block.text)
@@ -309,6 +332,7 @@ function jobsFromCompanyBlocks(blocks: CompanyBlock[], base: JobBase, locationHi
           applyUrl,
           applyEmail,
           whatsappUrl,
+          urlTruncated: scan.truncatedCount > 0,
         }),
       )
       lastCompany = index + 1
@@ -333,6 +357,7 @@ interface AiMergeContext {
   applyUrl: string | null
   applyEmail: string | null
   whatsappUrl: string | null
+  urlTruncated: boolean
 }
 
 interface Analysis {
@@ -352,27 +377,34 @@ function analyzeOffPortalPosting(input: OffPortalParseInput, now: Date): Analysi
   const base: JobBase = { sourceType, sourceGroupId, now }
   const lines = splitCaptionLines(rawText)
 
-  // Urutan kandidat tautan: tautan yang diisi pengguna, QR, nilai "apply:" di teks, lalu tautan lain di teks.
-  const candidateUrls: string[] = []
-  if (typeof input.sourceUrl === 'string' && input.sourceUrl.trim()) candidateUrls.push(input.sourceUrl.trim())
+  // Urutan kandidat tautan: tautan yang diisi pengguna, QR, nilai "apply:" di teks, lalu tautan lain di teks. Tautan yang terpotong
+  // elipsis hanya masuk sebagai bagian utuhnya dan diurutkan sesudah tautan yang utuh.
+  const inputScan: UrlScan = { urls: [], truncatedCount: 0 }
+  const addInputUrl = (raw: string): void => {
+    if (!isTruncatedUrlText(raw)) {
+      inputScan.urls.push({ url: raw, truncated: false })
+      return
+    }
+    inputScan.truncatedCount++
+    const fixed = repairTruncatedUrl(raw)
+    if (fixed) inputScan.urls.push({ url: fixed, truncated: true })
+  }
+  if (typeof input.sourceUrl === 'string' && input.sourceUrl.trim()) addInputUrl(input.sourceUrl.trim())
   if (Array.isArray(input.qrUrls)) {
     for (const u of input.qrUrls.slice(0, MAX_OFF_PORTAL_QR_URLS)) {
-      if (typeof u === 'string' && u.trim()) candidateUrls.push(u.trim())
+      if (typeof u === 'string' && u.trim()) addInputUrl(u.trim())
     }
   }
-  for (const u of extractApplyKeyUrls(lines)) candidateUrls.push(u)
-  for (const u of extractUrlsFromText(rawText)) candidateUrls.push(u)
+  const urlScan = mergeUrlScans(inputScan, scanApplyKeyUrls(lines), scanTextUrls(rawText))
+  const urlTruncated = urlScan.truncatedCount > 0
 
   const acceptedUrls: string[] = []
   const rejectedUrls: string[] = []
-  const seen = new Set<string>()
-  for (const raw of candidateUrls) {
-    if (seen.has(raw)) continue
-    seen.add(raw)
-    if (isPublicHttpUrl(raw)) {
-      acceptedUrls.push(raw)
+  for (const { url } of completeUrlsFirst(urlScan.urls)) {
+    if (isPublicHttpUrl(url)) {
+      acceptedUrls.push(url)
     } else {
-      rejectedUrls.push(raw)
+      rejectedUrls.push(url)
     }
   }
 
@@ -391,6 +423,7 @@ function analyzeOffPortalPosting(input: OffPortalParseInput, now: Date): Analysi
   if (!hasText && socialPosts.length > 0 && applyCandidates.length === 0) {
     warnings.push(buildSocialCaptionRequiredMessage(socialPosts))
     if (socialPosts.some((p) => p.platform === 'linkedin_post')) warnings.push(LINKEDIN_MANUAL_APPLY_WARNING)
+    if (urlTruncated) warnings.push(truncatedUrlSummary(0, 0))
     return {
       result: {
         sourceGroupId,
@@ -441,6 +474,7 @@ function analyzeOffPortalPosting(input: OffPortalParseInput, now: Date): Analysi
         applyUrl: primaryApplyUrl,
         applyEmail,
         whatsappUrl,
+        urlTruncated,
       })
     })
     ai = {
@@ -453,8 +487,12 @@ function analyzeOffPortalPosting(input: OffPortalParseInput, now: Date): Analysi
       applyUrl: primaryApplyUrl,
       applyEmail,
       whatsappUrl,
+      urlTruncated,
     }
   }
+
+  const truncatedJobs = jobs.filter((j) => j.warnings.includes(TRUNCATED_URL_WARNING)).length
+  if (truncatedJobs > 0 || (urlTruncated && jobs.length === 0)) warnings.push(truncatedUrlSummary(truncatedJobs, jobs.length))
 
   // LinkedIn yang bukan tautan lamaran utama (mis. postingan LinkedIn sebagai sumber) tetap diberi peringatan sekali di tingkat hasil.
   if (!primaryIsLinkedIn && (acceptedUrls.some((u) => isLinkedInUrl(u)) || socialPosts.some((p) => p.platform === 'linkedin_post'))) {
@@ -531,8 +569,16 @@ function mergeAiCandidates(result: OffPortalParseResult, ctx: AiMergeContext, ca
         locationFound = true
         aiFields.push('location')
       }
-      const applyUrl = c.applyUrl ?? ctx.applyUrl
-      if (c.applyUrl && c.applyUrl !== ctx.applyUrl) aiFields.push('applyUrl')
+      // AI hanya boleh memakai tautan yang tertulis di teks, dan itu bisa tautan terpotong ("...%E2%80%A6"): pakai bagian utuhnya.
+      let aiApplyUrl = c.applyUrl
+      let aiUrlTruncated = false
+      if (aiApplyUrl && isTruncatedUrlText(aiApplyUrl)) {
+        aiUrlTruncated = true
+        const fixed = repairTruncatedUrl(aiApplyUrl)
+        aiApplyUrl = fixed && isPublicHttpUrl(fixed) && !detectSocialPostPlatform(fixed) && !isWhatsAppUrl(fixed) ? fixed : null
+      }
+      const applyUrl = aiApplyUrl ?? ctx.applyUrl
+      if (aiApplyUrl && aiApplyUrl !== ctx.applyUrl) aiFields.push('applyUrl')
       const applyEmail = ctx.applyEmail ?? c.applyEmail
       if (!ctx.applyEmail && c.applyEmail) aiFields.push('applyEmail')
       return buildJob(ctx.base, {
@@ -546,6 +592,7 @@ function mergeAiCandidates(result: OffPortalParseResult, ctx: AiMergeContext, ca
         whatsappUrl: ctx.whatsappUrl,
         extraction: 'ai',
         aiFields,
+        urlTruncated: ctx.urlTruncated || aiUrlTruncated,
       })
     })
   } else {
@@ -577,6 +624,7 @@ function mergeAiCandidates(result: OffPortalParseResult, ctx: AiMergeContext, ca
         whatsappUrl: job.whatsappUrl,
         extraction: 'ai',
         aiFields,
+        urlTruncated: ctx.urlTruncated,
       })
     })
   }
