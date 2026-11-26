@@ -125,6 +125,11 @@ test('DRAFT_2026-11-26_rls_live_only_user_tables.sql (47.6 F-15) non-destruktif,
   assert.match(run, /ENABLE ROW LEVEL SECURITY/i)
   assert.match(run, /FOR SELECT TO authenticated USING \(auth\.uid\(\) = user_id\)/i)
   assert.match(run, /CREATE POLICY "user_preferences owner"[\s\S]*?auth\.uid\(\) = user_id/i)
+  // Production sudah punya policy pemilik dengan nama lain: penjaga harus memeriksa policy APA PUN, bukan hanya nama draf ini,
+  // supaya tidak menambah policy ganda atau melebarkan user_preferences ke DELETE.
+  assert.match(run, /cmd IN \('SELECT', 'ALL'\)/)
+  assert.doesNotMatch(run, /policyname\s*=/i)
+  assert.match(run, /tablename = 'user_preferences'\s*\)\s*THEN/i)
 })
 
 test('evaluateTwoSessionRls: menolak hasil kosong tanpa baris sendiri, kebocoran lintas pengguna, dan eskalasi RLS', () => {
