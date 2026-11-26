@@ -1767,9 +1767,11 @@ function readGpa(rawGpa: unknown, rawMax: unknown, sourceNumbers: Set<number>): 
   const maxText = m[2] ?? (typeof rawMax === 'number' && Number.isFinite(rawMax) ? String(rawMax) : line(rawMax))
   const maxParsed = /^\d{1,3}(?:[.,]\d{1,2})?$/.test(maxText) ? toNumber(maxText) : null
   const scaleStated = maxParsed !== null && maxParsed > 0 && maxParsed <= 100
-  const max = scaleStated ? (maxParsed as number) : 4
+  const isRaporHint = !scaleStated && gpa > 4 && gpa <= 100 && /\b(?:rapor|rata[- ]?rata|nilai\s+akhir|ujian)\b/i.test(text)
+  const max = scaleStated ? (maxParsed as number) : isRaporHint ? 100 : 4
   if (!sourceNumbers.has(hundredths(gpa))) return none
-  if (!/[.,]/.test(m[1]) && !(scaleStated && max > 4)) return none
+  // 47.1 Sup-2: IPK bulat (mis. 4/4) diterima bila skala dinyatakan; nilai rapor bulat diterima bila ada konteks rapor/skala.
+  if (!/[.,]/.test(m[1]) && !scaleStated && !isRaporHint) return none
   if (gpa < 0 || gpa > max) return { gpa: null, max: null, note: `IPK ${m[1]} melebihi skala ${max}, jadi tidak dimasukkan. Tambahkan manual bila perlu.` }
   return { gpa: Math.round(gpa * 100) / 100, max, note: null }
 }

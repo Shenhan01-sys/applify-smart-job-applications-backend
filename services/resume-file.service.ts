@@ -9,12 +9,14 @@
 export const RESUME_BUCKET = 'resumes'
 
 /**
- * Masa berlaku URL. Persetujuan kedaluwarsa dalam 1 jam, tetapi job apply bisa diulang sesudahnya,
+ * Masa berlaku URL. Persetujuan kedaluwarsa dalam 24 jam, tetapi job apply bisa diulang sesudahnya,
  * jadi URL dibuat berlaku 7 hari. URL hanya tersimpan di baris approval milik pengguna itu (RLS).
  */
 export const RESUME_URL_TTL_SECONDS = 7 * 24 * 60 * 60
 
-const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/
+// 47.1 Sup-5: izinkan spasi dan tanda kurung wajar pada nama berkas CV lama ("CV Budi (final).pdf"),
+// sambil tetap menolak karakter kontrol, path separator, dan "..".
+const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._()\-]{0,119}$/
 const RESUME_EXT = /\.(pdf|doc|docx)$/i
 
 /** Path objek CV yang sah milik pengguna ini, atau null. Menolak folder lain, subfolder, `..`, dan ekstensi lain. */

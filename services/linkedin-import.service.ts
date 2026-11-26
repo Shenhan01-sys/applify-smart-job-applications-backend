@@ -1,5 +1,5 @@
 import { aiPipelineService } from './ai-pipeline.service.js'
-import { LinkedInImportError, OCR_UNAVAILABLE_MESSAGE, PDF_MIN_TEXT_CHARS, PDF_NO_TEXT_MESSAGE, assertPdfUpload, extractPdfPages, findSparsePages, meaningfulChars } from './linkedin-pdf.js'
+import { LinkedInImportError, OCR_UNAVAILABLE_MESSAGE, PDF_MIN_TEXT_CHARS, PDF_NO_TEXT_MESSAGE, assertPdfUpload, extractPdfPages, findSparsePages, isGarbledPdfText, meaningfulChars } from './linkedin-pdf.js'
 import { ocrPdfPages, ocrPdfSelectedPages, type OcrOptions } from './pdf-ocr.js'
 import {
   assemblePreview,
@@ -40,6 +40,10 @@ export type JsonLlm = (params: { system: string; user: string; userId?: string; 
  * pengguna menunggu 90 sampai 110 detik sebelum pratinjau cadangan muncul. Bisa diubah lewat LINKEDIN_IMPORT_AI_BUDGET_MS.
  */
 export const AI_BUDGET_MS = Number(process.env.LINKEDIN_IMPORT_AI_BUDGET_MS) > 0 ? Number(process.env.LINKEDIN_IMPORT_AI_BUDGET_MS) : 40_000
+/** Tenggat total terpadu parse + OCR + AI agar tidak melewati batas proxy/klien 120 detik (47.1 P2-7). */
+export const IMPORT_TOTAL_BUDGET_MS =
+  Number(process.env.LINKEDIN_IMPORT_TOTAL_BUDGET_MS) > 0 ? Number(process.env.LINKEDIN_IMPORT_TOTAL_BUDGET_MS) : 90_000
+const MIN_AI_REMAINING_MS = 4_000
 /** Pagar keras di atas anggaran, untuk panggilan yang menggantung di luar batas waktu axios (mis. DNS). */
 export const AI_HARD_GRACE_MS = 3_000
 export const AI_STEP_TIMEOUT_MS = AI_BUDGET_MS + AI_HARD_GRACE_MS
@@ -65,6 +69,8 @@ export interface LinkedInImportDeps {
   aiTimeoutMs?: number
   /** Anggaran waktu AI (ms) yang diteruskan ke rantai model sebagai deadline. Bawaan: AI_BUDGET_MS. */
   aiBudgetMs?: number
+  /** Tenggat waktu total seluruh tahap parse+OCR+AI (ms). Bawaan: IMPORT_TOTAL_BUDGET_MS. */
+  totalBudgetMs?: number
   /** Penulis log selesai (satu baris). Bawaan: console.log. Hanya tes yang mengisi ini. */
   log?: (line: string) => void
   /** Jam monotonik untuk durasi (ms). Hanya tes yang mengisi ini. */
@@ -88,6 +94,7 @@ export class LinkedInImportService {
   async importFromPdf(body: unknown, ctx: { userId?: string } = {}): Promise<ImportPreview> {
     const clock = this.deps.clock ?? Date.now
     const startedAt = clock()
+    const totalDeadlineAt = startedAt + (this.deps.totalBudgetMs ?? IMPORT_TOTAL_BUDGET_MS)
     const buffer = assertPdfUpload(body)
     let pages: string[]
     let ocrUsed = false
@@ -96,6 +103,9 @@ export class LinkedInImportService {
     const ocrOpts: OcrOptions = { onTruncated: () => { ocrTruncated = true } }
     try {
       pages = await (this.deps.extractPages ?? extractPdfPages)(buffer)
+      if (isGarbledPdfText(pages)) {
+        throw new LinkedInImportError(422, 'pdf_no_text', PDF_NO_TEXT_MESSAGE)
+      }
     } catch (e) {
       if (!(e instanceof LinkedInImportError) || e.code !== 'pdf_no_text') throw e
       // PDF berupa gambar (misalnya CV Canva yang diratakan): baca teksnya dengan OCR.
@@ -161,15 +171,22 @@ export class LinkedInImportService {
     try {
       const llm: JsonLlm = this.deps.llm ?? ((p) => aiPipelineService.completeJson(p))
       const budgetMs = this.deps.aiBudgetMs ?? AI_BUDGET_MS
-      const out = await withTimeout(
-        llm({ system: prompt.system, user: prompt.user, userId: ctx.userId, deadlineAt: Date.now() + budgetMs }),
-        this.deps.aiTimeoutMs ?? budgetMs + AI_HARD_GRACE_MS,
-      )
-      const normalized = normalizeExtraction(JSON.parse(out.text), { sourceText: text, now })
-      if (!isEmptyExtraction(normalized)) {
-        result = normalized
-        method = 'ai'
-        model = out.model ?? null
+      const remainingTotalMs = totalDeadlineAt - clock()
+      if (remainingTotalMs < MIN_AI_REMAINING_MS) {
+        aiFailed = true
+        aiError = 'TotalBudgetExhausted'
+      } else {
+        const effectiveBudgetMs = Math.min(budgetMs, remainingTotalMs)
+        const out = await withTimeout(
+          llm({ system: prompt.system, user: prompt.user, userId: ctx.userId, deadlineAt: Date.now() + effectiveBudgetMs }),
+          this.deps.aiTimeoutMs !== undefined ? Math.min(this.deps.aiTimeoutMs, remainingTotalMs + AI_HARD_GRACE_MS) : effectiveBudgetMs + AI_HARD_GRACE_MS,
+        )
+        const normalized = normalizeExtraction(JSON.parse(out.text), { sourceText: text, now })
+        if (!isEmptyExtraction(normalized)) {
+          result = normalized
+          method = 'ai'
+          model = out.model ?? null
+        }
       }
     } catch (e) {
       aiFailed = true
@@ -192,11 +209,10 @@ export class LinkedInImportService {
     }
     if (!result) {
       this.log({ event: 'import_failed', code: 'nothing_found', method: null, model: null, aiFailed, aiError, pages: pages.length, chars: text.length, durationMs: clock() - startedAt, aiMs })
-      throw new LinkedInImportError(
-        422,
-        'nothing_found',
-        'Tidak ada data profil yang bisa dibaca dari PDF ini. Pastikan PDF diunduh dari LinkedIn (Lainnya, Simpan ke PDF) dan bukan hasil pindai.',
-      )
+      const nothingMsg = ocrUsed
+        ? 'Tidak ada data profil yang bisa dibaca dari PDF ini meskipun sudah dipindai dengan OCR. Pastikan berkas memuat isi CV yang jelas atau isi profil secara manual.'
+        : 'Tidak ada data profil yang bisa dibaca dari PDF ini. Pastikan berkas berupa CV PDF berteks standar atau ekspor LinkedIn (Lainnya, Simpan ke PDF).'
+      throw new LinkedInImportError(422, 'nothing_found', nothingMsg)
     }
 
     // AI sering melewatkan Pendidikan pada CV biasa (bukan ekspor LinkedIn). Bila seksinya ada di PDF tetapi AI
