@@ -39,6 +39,18 @@ export function normalizeKalibrrJob(job: any): JobPosting | null {
 
   const description = htmlToText([job.description, job.qualifications].filter(Boolean).join('\n'))
   const company = (job.company?.name || job.company_name || '').trim() || 'Unknown'
+  // 47.3 P2-03: parse gaji bila Kalibrr menyertakan base_salary / maximum_salary (bukan tersembunyi).
+  const rawMin = Number(job.base_salary)
+  const rawMax = Number(job.maximum_salary)
+  const salaryShown = job.salary_shown !== false
+  const salary_min = salaryShown && Number.isFinite(rawMin) && rawMin > 0 ? Math.round(rawMin) : undefined
+  const salary_max = salaryShown && Number.isFinite(rawMax) && rawMax > 0 ? Math.round(rawMax) : undefined
+  const salary_currency =
+    salary_min || salary_max
+      ? typeof job.salary_currency === 'string' && job.salary_currency.trim()
+        ? job.salary_currency.trim().toUpperCase()
+        : 'IDR'
+      : undefined
 
   return {
     id,
@@ -51,6 +63,9 @@ export function normalizeKalibrrJob(job: any): JobPosting | null {
     experience_level: guessExperienceLevel(title, description),
     job_type: normalizeJobType(job.tenure || job.employment_type),
     work_type: normalizeWorkType(job.is_work_from_home === true ? 'remote' : '', job.work_setup),
+    ...(salary_min ? { salary_min } : {}),
+    ...(salary_max ? { salary_max } : {}),
+    ...(salary_currency ? { salary_currency } : {}),
     platform: 'kalibrr',
     raw_data: { id: job.id, company_code: code, country: addr.country ?? null },
   }

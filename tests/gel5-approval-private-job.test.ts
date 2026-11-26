@@ -80,7 +80,7 @@ describe('Prioritas Tinggi Gelombang 5: POST /api/approvals kepemilikan lowongan
     company: 'PT Privat',
     platform: 'off_portal_poster',
     cover_letter: 'Surat lamaran lengkap untuk posisi ini.',
-    answers: [{ field: 'Nama', answer: 'Budi', confidence: 1 }],
+    answers: [{ question: 'Nama', answer: 'Budi', confidence: 1 }],
   }
 
   it('mengembalikan 404 saat pengguna lain mencoba membuat approval untuk lowongan privat', async () => {

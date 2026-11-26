@@ -58,7 +58,8 @@ export function normalizeSmartRecruitersPosting(j: any, board: string): JobPosti
     url,
     apply_url: url,
     posted_at: j.releasedDate || undefined,
-    experience_level: j.experienceLevel?.label ? String(j.experienceLevel.label).toLowerCase() : guessExperienceLevel(title),
+    // 47.3 P2-02: normalkan experience_level melalui guessExperienceLevel agar tidak menyimpan label mentah tak standar.
+    experience_level: guessExperienceLevel(title, j.experienceLevel?.label ?? ''),
     job_type: normalizeJobType(j.typeOfEmployment?.label),
     work_type: normalizeWorkType(loc.remote ? 'remote' : '', loc.hybrid ? 'hybrid' : ''),
     platform: 'smartrecruiters',
