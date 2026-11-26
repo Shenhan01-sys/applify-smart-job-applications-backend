@@ -11,6 +11,7 @@ import path from 'node:path'
  */
 
 const sqlPath = path.resolve(import.meta.dirname, '../../database/migrations/DRAFT_2026-11-26_db_hardening_and_rls_sync.sql')
+const liveOnlyRlsSqlPath = path.resolve(import.meta.dirname, '../../database/migrations/DRAFT_2026-11-26_rls_live_only_user_tables.sql')
 
 const executableSql = (raw: string): string =>
   raw
@@ -111,6 +112,19 @@ test('DRAFT_2026-11-26_db_hardening_and_rls_sync.sql non-destruktif, idempoten, 
   assert.match(run, /consume_ai_rate_slot\(uuid,text,integer,integer,text\)/i)
   assert.match(run, /check_daily_apply_quota_atomic\(uuid,timestamptz\)/i)
   assert.match(run, /register_notification_otp_attempt\(uuid,integer\)/i)
+})
+
+test('DRAFT_2026-11-26_rls_live_only_user_tables.sql (47.6 F-15) non-destruktif, idempoten, dan menutup 3 tabel live-only', () => {
+  const sql = readFileSync(liveOnlyRlsSqlPath, 'utf8')
+  assert.match(sql.split('\n').slice(0, 3).join('\n'), /DRAFT MIGRATION[\s\S]*BELUM DITERAPKAN KE PRODUCTION/i)
+  const run = executableSql(sql)
+  assert.doesNotMatch(run, /\b(drop\s+table|drop\s+column|drop\s+policy|truncate|delete\s+from)\b/i)
+  for (const tbl of ['activity_logs', 'green_career_passes', 'user_preferences']) {
+    assert.ok(run.includes(tbl), `harus mencakup ${tbl}`)
+  }
+  assert.match(run, /ENABLE ROW LEVEL SECURITY/i)
+  assert.match(run, /FOR SELECT TO authenticated USING \(auth\.uid\(\) = user_id\)/i)
+  assert.match(run, /CREATE POLICY "user_preferences owner"[\s\S]*?auth\.uid\(\) = user_id/i)
 })
 
 test('evaluateTwoSessionRls: menolak hasil kosong tanpa baris sendiri, kebocoran lintas pengguna, dan eskalasi RLS', () => {
