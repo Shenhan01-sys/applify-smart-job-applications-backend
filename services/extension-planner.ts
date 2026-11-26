@@ -20,6 +20,7 @@ import { ACHIEVEMENT_GROUNDING_RULE, ACHIEVEMENT_HEADING, buildAchievementLines 
 import type { GuardDb } from './queue-guard.js'
 import { resumeUrlForUser } from './resume-file.service.js'
 import { planFileTargets, type ExtFileTarget } from './extension-file-targets.js'
+import { indonesiaDialOption, isCountryCodeSelect, isFileLikeSelect, showsIndonesiaCode } from './extension-control-hints.js'
 
 /**
  * Perencana pengisian formulir untuk Ekstensi Browser Applify (`POST /api/extension/plan-form`).
@@ -1209,8 +1210,10 @@ export class ExtensionPlanner {
     this.checkRate(userId)
 
 type FillableControl = SanitizedExtControl & { kind: Exclude<ExtControlKind, 'file' | 'submit'> }
+// Pemilih kode negara telepon dan dropdown unggah berkas punya jalur sendiri (lihat langkah 0b dan pertanyaan di bawah):
+// tidak lewat jawaban tersimpan, pencocokan fakta, atau AI.
 const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
-  c.kind !== 'file' && c.kind !== 'submit' && !isSecretControl(c)
+  c.kind !== 'file' && c.kind !== 'submit' && !isSecretControl(c) && !isCountryCodeSelect(c) && !isFileLikeSelect(c)
 
     const fileControl = controls.find((c) => c.kind === 'file') ?? null
     const submitControl = controls.find((c) => c.kind === 'submit') ?? null
@@ -1281,6 +1284,16 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       if (workHistory === 'none' && freshToggles.length > 0) {
         for (const c of controls) if (c.kind !== 'checkbox' && isWorkExperienceField(c)) plannedControlIds.add(c.controlId)
       }
+    }
+
+    // 0b. Pemilih kode negara telepon (Dealls: "IDN", "+62") diisi Indonesia (+62) bila pilihannya terbaca, dan tidak
+    //     pernah ditanyakan. Sudah menunjukkan Indonesia: dibiarkan. Putaran kedua tidak mengulang aksinya.
+    for (const c of controls) {
+      if (c.kind !== 'select' || !isCountryCodeSelect(c) || isSecretControl(c)) continue
+      plannedControlIds.add(c.controlId)
+      if (isRetry || c.disabled === true || c.readOnly === true || showsIndonesiaCode(c)) continue
+      const option = indonesiaDialOption(c.options)
+      if (option) addAction(c as FillableControl, option, 'fact')
     }
 
     // 1. Jawaban tersimpan pengguna (`user_form_answers`) selalu menang pertama. Putaran kedua melewatkannya: nilai
@@ -1464,6 +1477,18 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       if (c.kind === 'file' || c.kind === 'submit') continue
       const secret = isSecretControl(c)
       if (!secret && plannedControlIds.has(c.controlId)) continue
+      // Kode negara telepon tidak pernah ditanyakan. Dropdown unggah berkas ("File PDF") dilaporkan sebagai berkas
+      // yang diunggah sendiri (jenis `file`), bukan pilihan yang bisa dijawab di Applify.
+      if (!secret && isCountryCodeSelect(c)) continue
+      if (!secret && isFileLikeSelect(c)) {
+        const fileLabel = controlQuestionLabel(c)
+        const fk = questionKey(fileLabel)
+        if (fk && !seenKeys.has(fk)) {
+          seenKeys.add(fk)
+          questionCandidates.push({ key: fk, label: fileLabel, kind: 'file', required: c.required })
+        }
+        continue
+      }
       if (isGuardedCheckbox(c)) {
         if (!c.required || c.checked === true || c.currentValue === 'true' || (c.kind === 'radio' && c.currentValue)) continue
       } else if (!c.required && (c.currentValue || (!secret && c.kind === 'checkbox'))) continue

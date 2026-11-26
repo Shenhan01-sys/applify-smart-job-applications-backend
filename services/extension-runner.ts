@@ -634,6 +634,35 @@ export function sanitizeActionLog(raw: unknown): ActionLogEntry[] {
   return out
 }
 
+export type NextStepKind = 'subform_save' | 'next_page' | 'upload_file' | 'answer_required' | 'login'
+export interface NextStep {
+  kind: NextStepKind
+  label: string
+}
+const NEXT_STEP_KINDS = new Set<string>(['subform_save', 'next_page', 'upload_file', 'answer_required', 'login'])
+export const MAX_NEXT_STEPS = 6
+const MAX_NEXT_STEP_LABEL = 120
+
+/**
+ * `nextSteps` kiriman ekstensi -> `details.next_steps`: langkah yang masih harus dilakukan pengguna sebelum tombol
+ * kirim akhir (simpan sub-formulir, ke halaman berikutnya, unggah berkas, jawab pertanyaan, masuk akun). Daftar
+ * tertutup (jenis dikenal saja), label satu baris dipotong 120 karakter, tanpa duplikat, paling banyak 6. Kunci
+ * lain tidak pernah disalin.
+ */
+export function sanitizeNextSteps(raw: unknown): NextStep[] {
+  if (!Array.isArray(raw)) return []
+  const out: NextStep[] = []
+  for (const item of raw) {
+    if (out.length >= MAX_NEXT_STEPS) break
+    if (!isRecord(item) || typeof item.kind !== 'string' || !NEXT_STEP_KINDS.has(item.kind)) continue
+    const label = cleanLine(item.label, MAX_NEXT_STEP_LABEL)
+    if (!label || isSecretLabel(label)) continue
+    if (out.some((s) => s.kind === item.kind && s.label === label)) continue
+    out.push({ kind: item.kind as NextStepKind, label })
+  }
+  return out
+}
+
 /** `remainingRequired`: daftar label (bentuk worker). Angka (kiriman lama) diganti label pertanyaan WAJIB yang diketahui. */
 function sanitizeRemainingRequired(raw: unknown, questionLabels: string[]): string[] {
   const labels: string[] = []
@@ -719,6 +748,8 @@ export interface ReportRunInput {
   filesAttached?: unknown
   /** Catatan audit per aksi pengisian dari ekstensi, disimpan ke `details.action_log` (tanpa nilai isian). */
   actionLog?: unknown
+  /** Langkah berikutnya bagi pengguna saat pengisian berhenti tanpa tombol kirim akhir, disimpan ke `details.next_steps`. */
+  nextSteps?: unknown
   /** Daftar label kolom wajib yang belum terisi (bentuk worker). Angka diterima sebagai kiriman lama. */
   remainingRequired?: number | unknown[]
   questions?: unknown[]
@@ -850,6 +881,7 @@ export async function reportExtensionRun(
   const secretSkipped = sent || awaitingLogin ? [] : sanitizeSecretSkips(input.questions)
   const documentsAttached = awaitingLogin ? null : sanitizeFilesAttached(input.filesAttached)
   const actionLog = sanitizeActionLog(input.actionLog)
+  const nextSteps = sent ? [] : sanitizeNextSteps(input.nextSteps)
   const rawCount = awaitingLogin ? 0 : Math.max(0, Math.floor(Number(input.filledCount ?? 0) || 0))
   const filledCount = Math.max(rawCount, filledFields.length)
   const stepsCount =
@@ -892,6 +924,7 @@ export async function reportExtensionRun(
     ...(secretSkipped.length > 0 ? { secret_skipped: secretSkipped.map((q) => ({ key: q.key, label: q.label, required: q.required })) } : {}),
     ...(documentsAttached ? { documents_attached: documentsAttached } : {}),
     ...(actionLog.length > 0 ? { action_log: actionLog } : {}),
+    ...(nextSteps.length > 0 ? { next_steps: nextSteps } : {}),
     submit_clicked: sent || outcome === 'validation_error',
     submit_check: buildSubmitCheck(input.submitCheck, outcome, pageUrl),
     screenshots: { filled: filledRef, after: afterRef },
