@@ -190,3 +190,85 @@ test('47.1 P2-5: excludeInternships menyaring magang dan conservativeYearOnly me
   assert.equal(ans.answer, '2')
   assert.equal(ans.needs_review, true)
 })
+
+test('loadWorkExperiences: mengambil notes & employment_type serta fallback kolom jika schema tertinggal', async () => {
+  const { prepareApprovalAnswers } = await import('../services/approval-answers.service.js')
+  const makeDb = (workRows: Array<Record<string, any>>, missingCols: string[] = []) => {
+    const selectedCols: string[] = []
+    return {
+      selectedCols,
+      from(table: string) {
+        let cols = '*'
+        const builder: any = {
+          select(s: string) {
+            cols = s
+            if (table === 'work_experiences') selectedCols.push(s)
+            return builder
+          },
+          eq() { return builder },
+          order() { return builder },
+          limit() { return builder.then ? builder : Promise.resolve(run()) },
+          maybeSingle() {
+            if (table === 'user_automation_settings') return Promise.resolve({ data: {} })
+            if (table === 'profiles') return Promise.resolve({ data: { experience_years: 0 } })
+            return Promise.resolve({ data: null })
+          },
+          then(resolve: any, reject: any) {
+            return Promise.resolve(run()).then(resolve, reject)
+          },
+        }
+        function run() {
+          if (table === 'work_experiences') {
+            for (const c of missingCols) {
+              if (cols.includes(c)) {
+                return { data: null, error: { code: '42703', message: `column work_experiences.${c} does not exist` } }
+              }
+            }
+            return { data: workRows, error: null }
+          }
+          return { data: [], error: null }
+        }
+        return builder
+      },
+    }
+  }
+
+  const deterministicFiller = async (field: any, ctx: any) => {
+    if (field.label === 'Total years of experience') {
+      return { value: ctx.userSettings.years_of_experience ?? '', confidence: 0.95, source: 'rule' as const, needsReview: false }
+    }
+    return { value: '', confidence: 0.3, source: 'default' as const, needsReview: true }
+  }
+
+  // 1) notes + employment_type terbaca: magang dilewati, tahun-saja dari PDF dibatasi 12 bulan/rentang
+  const dbNotes = makeDb([
+    { start_date: '2023-01-01', end_date: '2023-12-01', is_current: false, employment_type: 'internship', role_title: 'Intern' },
+    { start_date: '2024-01-01', end_date: '2025-12-01', is_current: false, employment_type: 'full-time', role_title: 'Backend', notes: ['Bulan mulai tidak tercantum di PDF, disesuaikan ke awal tahun'] },
+  ])
+  const ansNotes = await prepareApprovalAnswers(dbNotes, { userId: 'u-1', jobTitle: 'Backend', company: 'PT Uji' }, deterministicFiller)
+  const yoeNotes = ansNotes.find((a) => a.question === 'Total pengalaman kerja (tahun)')
+  assert.ok(dbNotes.selectedCols[0]?.includes('notes'), 'query pertama wajib memilih kolom notes')
+  assert.equal(yoeNotes?.answer, '1')
+
+  // 2) Fallback 42703 saat kolom notes belum ada, tetap pertahankan employment_type & role_title
+  const dbNoNotes = makeDb(
+    [
+      { start_date: '2022-01-01', end_date: '2022-12-01', is_current: false, employment_type: 'internship', role_title: 'Intern' },
+      { start_date: '2024-01-01', end_date: '2025-12-01', is_current: false, employment_type: 'full-time', role_title: 'Backend' },
+    ],
+    ['notes']
+  )
+  const ansNoNotes = await prepareApprovalAnswers(dbNoNotes, { userId: 'u-2', jobTitle: 'Backend', company: 'PT Uji' }, deterministicFiller)
+  const yoeNoNotes = ansNoNotes.find((a) => a.question === 'Total pengalaman kerja (tahun)')
+  assert.equal(dbNoNotes.selectedCols.length, 2)
+  assert.ok(!dbNoNotes.selectedCols[1]?.includes('notes'))
+  assert.ok(dbNoNotes.selectedCols[1]?.includes('employment_type'))
+  assert.equal(yoeNoNotes?.answer, '2', 'tanpa notes, periode penuh dihitung dan magang tetap tersaring')
+
+  // 3) Fallback ke kolom dasar bila employment_type/role_title juga belum ada
+  const dbBase = makeDb([{ start_date: '2024-01-01', end_date: '2024-12-01', is_current: false }], ['notes', 'employment_type'])
+  const ansBase = await prepareApprovalAnswers(dbBase, { userId: 'u-3', jobTitle: 'Backend', company: 'PT Uji' }, deterministicFiller)
+  assert.equal(dbBase.selectedCols.length, 3)
+  assert.equal(dbBase.selectedCols[2], 'start_date, end_date, is_current')
+  assert.equal(ansBase.find((a) => a.question === 'Total pengalaman kerja (tahun)')?.answer, '1')
+})
