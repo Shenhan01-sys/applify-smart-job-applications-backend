@@ -98,9 +98,15 @@ const CITY_NORMALIZE_MAP: Record<string, string> = {
   solo: 'surakarta',
 }
 
-/** Normalisasi segmen kota pertama agar "Jakarta Selatan" / "Jaksel" cocok dengan "Jakarta" (47.3 P3-02). */
+/** Segmen kota pertama apa adanya (lowercase) untuk tampilan `city`. */
 export const cityOf = (location: unknown): string | null => {
   const raw = String(location ?? '').split(',')[0].trim().toLowerCase().replace(/\s+/g, ' ')
+  return raw || null
+}
+
+/** Normalisasi alias kota agar "Jakarta Selatan" / "Jaksel" cocok dengan "Jakarta" untuk hitungan `same_city_*` (47.3 P3-02). */
+export const cityAliasOf = (location: unknown): string | null => {
+  const raw = cityOf(location)
   if (!raw) return null
   return CITY_NORMALIZE_MAP[raw] ?? raw
 }
@@ -125,6 +131,7 @@ export async function salaryBenchmark(
 
   const keywords = titleKeywords(job.title)
   const city = cityOf(job.location)
+  const cityKey = cityAliasOf(job.location)
   const empty: SalaryBenchmark = {
     n: 0, p25: null, median: null, p75: null, currency: 'IDR', period: 'month', keywords,
     sufficient: false, city, same_city_n: 0, same_city_median: null,
@@ -139,7 +146,7 @@ export async function salaryBenchmark(
       .eq('status', 'active')
       .gt('salary_min', 0)
       .or('salary_currency.eq.IDR,salary_currency.is.null')
-      .or('salary_period.eq.month,salary_period.eq.year,salary_period.is.null')
+      .or('salary_period.eq.month,salary_period.is.null')
       .or(keywords.map((k) => `title.ilike.%${k}%`).join(','))
       .limit(QUERY_LIMIT)
 
@@ -160,7 +167,7 @@ export async function salaryBenchmark(
   if (error) throw new Error(error.message)
   const data = (rawPeers ?? []).filter((r: any) => isJobAccessibleToUser(r, opts?.userId))
 
-  type Cand = { mid: number; hits: number; city: string | null }
+  type Cand = { mid: number; hits: number; cityKey: string | null }
   const cands: Cand[] = []
   for (const r of (data ?? []) as any[]) {
     if (r.id === jobId) continue
@@ -170,22 +177,20 @@ export async function salaryBenchmark(
     if (typeof r.external_url !== 'string' || !r.external_url.startsWith('https://')) continue
     if (String(r.platform_source ?? '').toLowerCase() === 'httpbin') continue
     // Pengaman kedua di sisi aplikasi: filter DB bisa saja tidak ketat (mata uang/periode kosong dianggap rupiah/bulan).
-    // 47.3 P3-02: periode 'year' IDR dikonversi ke bulanan (÷ 12) agar ikut memperkaya sampel.
     if (r.salary_currency != null && String(r.salary_currency).toUpperCase() !== 'IDR') continue
-    if (r.salary_period != null && r.salary_period !== 'month' && r.salary_period !== 'year') continue
-    const rawMid = midpoint(r)
-    const mid = r.salary_period === 'year' ? rawMid / 12 : rawMid
+    if (r.salary_period != null && r.salary_period !== 'month') continue
+    const mid = midpoint(r)
     if (!(mid > 0)) continue
     const t = String(r.title ?? '').toLowerCase()
     const hits = keywords.filter((k) => t.includes(k)).length
     if (hits === 0) continue
-    cands.push({ mid, hits, city: cityOf(r.location) })
+    cands.push({ mid, hits, cityKey: cityAliasOf(r.location) })
   }
 
   const strong = cands.filter((c) => c.hits >= 2)
   const used = strong.length >= MIN_SAMPLE ? strong : cands
   const sorted = used.map((c) => c.mid).sort((a, b) => a - b)
-  const local = used.filter((c) => city !== null && c.city === city).map((c) => c.mid).sort((a, b) => a - b)
+  const local = used.filter((c) => cityKey !== null && c.cityKey === cityKey).map((c) => c.mid).sort((a, b) => a - b)
 
   return {
     ...empty,
