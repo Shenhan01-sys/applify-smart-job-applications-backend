@@ -17,7 +17,8 @@ export async function queueRoutes(
       const status = await queueService.getQueueStatus(userId)
       return status
     } catch (error: any) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error).slice(0, 200) }, 'queue: status failed')
+      return reply.status(500).send({ error: 'Gagal memuat status antrean' })
     }
   })
 
@@ -39,7 +40,8 @@ export async function queueRoutes(
 
       return { success: true, jobId: job.id }
     } catch (error: any) {
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error).slice(0, 200) }, 'queue: scan failed')
+      return reply.status(500).send({ error: 'Gagal menambahkan tugas pemindaian' })
     }
   })
 
@@ -57,7 +59,8 @@ export async function queueRoutes(
       // A forged or stale approval_request_id (403) or a malformed payload (400) is a client error, not a server fault.
       const clientError = clientErrorReply(error)
       if (clientError) return reply.status(clientError.statusCode).send(clientError.body)
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error).slice(0, 200) }, 'queue: apply failed')
+      return reply.status(500).send({ error: 'Gagal menambahkan tugas lamaran' })
     }
   })
 
@@ -77,7 +80,8 @@ export async function queueRoutes(
       if (error instanceof UnsupportedJobTypeError) {
         return reply.status(501).send({ error: error.message })
       }
-      return reply.status(500).send({ error: error.message })
+      request.log.error({ err: String(error?.message ?? error).slice(0, 200) }, 'queue: analyze failed')
+      return reply.status(500).send({ error: 'Gagal menambahkan tugas analisis' })
     }
   })
 }

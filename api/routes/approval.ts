@@ -469,10 +469,15 @@ export async function approvalRoutes(
         rejection_reason: reason || 'No reason provided',
       })
       .eq('id', id)
+      .eq('user_id', userId)
+      .eq('status', 'pending')
       .select()
 
     if (error) {
       return failServer(request, reply, error)
+    }
+    if (Array.isArray(data) && data.length === 0) {
+      return reply.status(409).send({ error: 'Approval request already processed', code: 'already_processed' })
     }
 
     // Log rejection for preference learning
