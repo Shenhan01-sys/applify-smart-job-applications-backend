@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as backendManifest from '../services/domain-manifest.generated.js'
-import { classifyJobChannel, isTestPortalUrl, routesToExtension } from '../services/apply-channel.js'
+import { CORPORATE_COMPLEX_ATS_DOMAINS, classifyJobChannel, isTestPortalUrl, routesToExtension } from '../services/apply-channel.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..', '..')
@@ -29,15 +29,59 @@ test('BS-P2-04: domain-manifest.generated.ts backend sama persis dengan shared/d
   assert.deepEqual(backendManifest.LOGIN_PORTAL_FAMILIES, spec.loginPortalFamilies)
 })
 
-test('BS-P2-04: salinan domainManifest.generated.ts di worker dan frontend identik dengan backend', () => {
+test('BS-P2-04: salinan domainManifest.generated.ts di worker, frontend, dan ekstensi identik serta manifest ekstensi terjaga (J5-08)', () => {
   const backendSrc = readFileSync(path.join(ROOT, 'backend', 'services', 'domain-manifest.generated.ts'), 'utf8')
+  const extRootCandidates = [path.join(ROOT, 'extension'), path.resolve(ROOT, '..', '..', 'extension')]
+  const extRoot = extRootCandidates.find((p) => existsSync(path.join(p, 'src', 'lib', 'domainManifest.generated.ts')))
+
   const siblingPaths = [
     path.join(ROOT, 'worker', 'src', 'lib', 'domainManifest.generated.ts'),
     path.join(ROOT, 'applify-smart-job-applications', 'src', 'lib', 'domainManifest.generated.ts'),
+    ...(extRoot ? [path.join(extRoot, 'src', 'lib', 'domainManifest.generated.ts')] : []),
   ]
   for (const p of siblingPaths) {
     if (!existsSync(p)) continue
     assert.equal(readFileSync(p, 'utf8'), backendSrc, `Salinan ${p} menyimpang dari backend/services/domain-manifest.generated.ts`)
+  }
+
+  // J5-08: verifikasi juga EXTERNAL_AUTH_PORTAL_MAP, pemisahan host auth eksternal, dan optional_host_permissions manifest ekstensi.
+  const spec = JSON.parse(readFileSync(path.join(ROOT, 'shared', 'domains.json'), 'utf8'))
+  assert.deepEqual(backendManifest.EXTERNAL_AUTH_PORTAL_MAP, spec.externalAuthPortalMap)
+  const knownAts = new Set([...spec.publicAtsDomains, ...spec.extraKnownAtsDomains])
+  const loginPortals = new Set<string>(spec.extensionLoginPortalDomains)
+  for (const d of knownAts) {
+    assert.equal(loginPortals.has(d), false, `Domain ${d} tidak boleh masuk ATS dan portal login sekaligus`)
+  }
+  const externalAuthHosts = Object.values(spec.externalAuthPortalMap).flat() as string[]
+  for (const h of externalAuthHosts) {
+    assert.equal(knownAts.has(h) || loginPortals.has(h), false, `Host auth eksternal ${h} tidak boleh masuk izin pengisian`)
+  }
+  if (extRoot && existsSync(path.join(extRoot, 'manifest.json'))) {
+    const manifest = JSON.parse(readFileSync(path.join(extRoot, 'manifest.json'), 'utf8'))
+    const expectedPerms: string[] = []
+    for (const d of [...backendManifest.KNOWN_ATS_DOMAINS, ...backendManifest.EXTENSION_LOGIN_PORTAL_DOMAINS]) {
+      expectedPerms.push(`https://${d}/*`, `https://*.${d}/*`)
+    }
+    assert.deepEqual(manifest.optional_host_permissions, [...new Set(expectedPerms)])
+  }
+})
+
+test('E2E-07: setiap domain tumpang tindih extraKnownAtsDomains & otherAuthPortalDomains ditandai eksperimental pada klasifikasi', () => {
+  const spec = JSON.parse(readFileSync(path.join(ROOT, 'shared', 'domains.json'), 'utf8'))
+  const otherAuth = new Set<string>(spec.otherAuthPortalDomains)
+  const overlapped = (spec.extraKnownAtsDomains as string[]).filter((d) => otherAuth.has(d))
+  assert.ok(overlapped.length > 0)
+  for (const domain of overlapped) {
+    assert.equal(
+      (CORPORATE_COMPLEX_ATS_DOMAINS as readonly string[]).includes(domain),
+      true,
+      `Domain tumpang tindih ${domain} wajib masuk CORPORATE_COMPLEX_ATS_DOMAINS`,
+    )
+    const classified = classifyJobChannel({ external_url: `https://jobs.${domain}/career/123` })
+    assert.equal(classified.extensionSupported, true)
+    assert.equal(classified.experimentalExtension, true)
+    assert.match(classified.reason, /eksperimental/i)
+    assert.match(classified.reason, /manual/i)
   }
 })
 
