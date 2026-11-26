@@ -12,6 +12,7 @@
  */
 import { resolveApplyChannel, routesToExtension } from './apply-channel.js'
 import { clientErrorReply, type GuardDb } from './queue-guard.js'
+import { RESOLVED_UNSENT_REASONS } from './approval-shared.js'
 
 /** One original run plus five reruns. */
 export const MAX_RUNS_PER_APPROVAL = 6
@@ -35,6 +36,8 @@ export interface RerunFacts {
   totalCount: number
   /** Saluran tugas sebelumnya bila terbaca (`extension_apply` -> extension). */
   existingJobType?: string | null
+  /** Log 'incomplete' yang menyatakan pengguna menutup persetujuan ini atau menggantinya dengan persetujuan baru. */
+  resolvedCount?: number
 }
 
 export type RerunVerdict =
@@ -61,6 +64,10 @@ export function decideRerun(facts: RerunFacts): RerunVerdict {
   }
   if (activeCount > 0) {
     return { ok: false, status: 409, error: 'Agent is already working on this application' }
+  }
+  // The user closed this approval or asked for a new one: running it again could send the application twice.
+  if ((facts.resolvedCount ?? 0) > 0) {
+    return { ok: false, status: 409, error: 'Approval was closed or replaced by a new approval' }
   }
   if (totalCount >= MAX_RUNS_PER_APPROVAL) {
     return { ok: false, status: 429, error: 'Too many reruns for this approval' }
@@ -105,6 +112,17 @@ export async function fetchRerunFacts(
     .limit(1)
   if (usedErr) throw new Error(`application log lookup failed: ${usedErr.message}`)
 
+  const { data: resolvedLogs, error: resolvedErr } = await db
+    .from('application_logs')
+    .select('id, details')
+    .eq('user_id', userId)
+    .eq('status', 'incomplete')
+    .contains('details', { approval_request_id: approvalId })
+  if (resolvedErr) throw new Error(`resolution log lookup failed: ${resolvedErr.message}`)
+  const resolvedCount = ((resolvedLogs ?? []) as Array<{ details?: { reason?: unknown } | null }>).filter(
+    (r) => typeof r.details?.reason === 'string' && RESOLVED_UNSENT_REASONS.has(r.details.reason)
+  ).length
+
   const { data: runs, error: runsErr } = await db
     .from('automation_queue')
     .select('id, status, job_type')
@@ -120,6 +138,7 @@ export async function fetchRerunFacts(
     usedCount: used?.length ?? 0,
     activeCount: rows.filter((r) => r.status === 'pending' || r.status === 'processing').length,
     totalCount: rows.length,
+    resolvedCount,
     existingJobType: rows.find((r) => r.job_type === 'extension_apply' || r.job_type === 'apply')?.job_type ?? null,
   }
 }

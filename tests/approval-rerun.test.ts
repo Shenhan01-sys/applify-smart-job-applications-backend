@@ -291,3 +291,21 @@ test('rerun dua kali berturut-turut: yang kedua ditolak karena job pertama masih
   assert.equal((await run(db)).status, 409)
   assert.equal(db.rows('automation_queue').length, 1)
 })
+
+test('rerun: persetujuan yang ditutup atau diganti pengguna ditolak 409, supaya tidak terkirim dua kali', async () => {
+  for (const reason of ['user_closed', 'user_not_sent', 'abandoned_locked_claim']) {
+    const db = new FakeDb({
+      approval_requests: [approvalRow()],
+      application_logs: [{ id: 'l1', user_id: 'u1', action: 'apply', status: 'incomplete', details: { approval_request_id: 'a1', reason } }],
+    })
+    const res = await run(db)
+    assert.equal(res.status, 409, reason)
+    assert.match(String((res.body as any).error), /closed or replaced/)
+    assert.equal(db.rows('automation_queue').length, 0, reason)
+  }
+})
+
+test('decideRerun: resolvedCount menolak 409, log incomplete lain (misalnya no_fields_filled) tidak menghalangi', () => {
+  assert.equal((decideRerun(facts({ resolvedCount: 1 })) as any).status, 409)
+  assert.deepEqual(decideRerun(facts({ resolvedCount: 0 })), { ok: true })
+})

@@ -78,6 +78,9 @@ export function decideExtensionConsent(facts: RerunFacts): Verdict {
   if (activeCount > 0) {
     return { ok: false, status: 409, error: 'Persetujuan ini sedang dikerjakan', code: 'already_active' }
   }
+  if ((facts.resolvedCount ?? 0) > 0) {
+    return { ok: false, status: 409, error: 'Persetujuan ini sudah ditutup atau diganti persetujuan baru', code: 'already_resolved' }
+  }
   if (totalCount >= MAX_RUNS_PER_APPROVAL) {
     return { ok: false, status: 429, error: 'Terlalu banyak percobaan untuk persetujuan ini', code: 'too_many_runs' }
   }
