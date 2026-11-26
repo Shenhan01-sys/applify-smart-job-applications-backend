@@ -179,3 +179,98 @@ test('E2E-04: PATCH /api/approvals/:id/cover-letter menyinkronkan surat di pendi
   assert.equal(conflict.statusCode, 409)
   await app.close()
 })
+
+const U2 = '55555555-5555-4555-8555-555555555555'
+const APR2 = '66666666-6666-4666-8666-666666666666'
+
+/** Aplikasi uji: pengguna diambil dari header `x-test-user` (bawaan U1) agar satu db dipakai dua pengguna. */
+async function buildAsHeaderUser(db: FakeDb) {
+  const app = Fastify()
+  app.addHook('preHandler', async (req: any) => { req.user = { id: String(req.headers['x-test-user'] ?? U1) } })
+  await app.register(approvalRoutes, { prefix: '/api/approvals', db, guard: { checkActionRateLimit: async () => {} } })
+  return app
+}
+
+test('E2E-04: PATCH /api/approvals/:id/cover-letter hanya untuk pemilik, menolak kedaluwarsa dan surat terlalu panjang', async () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString()
+  const past = new Date(Date.now() - 3_600_000).toISOString()
+  const db = new FakeDb({
+    ai_applications: [{ id: A1, user_id: U1, job_id: J1, cover_letter: 'Surat lama' }],
+    approval_requests: [
+      { id: APR1, user_id: U1, application_id: A1, job_id: J1, status: 'pending', expires_at: future, cover_letter: 'Surat lama' },
+      { id: APR2, user_id: U1, application_id: null, job_id: J1, status: 'pending', expires_at: past, cover_letter: 'Surat kedaluwarsa' },
+    ],
+  })
+  const app = await buildAsHeaderUser(db)
+
+  // Pengguna lain tidak boleh menyunting, dan jawabannya sama dengan id yang tidak ada (tidak membocorkan keberadaan).
+  const other = await app.inject({
+    method: 'PATCH',
+    url: `/api/approvals/${APR1}/cover-letter`,
+    headers: { 'x-test-user': U2 },
+    payload: { cover_letter: 'Surat penyusup' },
+  })
+  assert.equal(other.statusCode, 404)
+  assert.equal(db.tables.approval_requests[0].cover_letter, 'Surat lama')
+  assert.equal(db.tables.ai_applications[0].cover_letter, 'Surat lama')
+
+  // Persetujuan yang sudah lewat masa berlaku tidak bisa disunting meski statusnya masih pending.
+  const expired = await app.inject({
+    method: 'PATCH',
+    url: `/api/approvals/${APR2}/cover-letter`,
+    payload: { cover_letter: 'Terlambat' },
+  })
+  assert.equal(expired.statusCode, 410)
+  assert.equal(db.tables.approval_requests[1].cover_letter, 'Surat kedaluwarsa')
+
+  // Batas 25.000 karakter, dan id yang bukan UUID ditolak 400 oleh hook rute.
+  const tooLong = await app.inject({
+    method: 'PATCH',
+    url: `/api/approvals/${APR1}/cover-letter`,
+    payload: { cover_letter: 'a'.repeat(25_001) },
+  })
+  assert.equal(tooLong.statusCode, 400)
+  assert.equal(tooLong.json().code, 'cover_letter_too_long')
+  const badId = await app.inject({ method: 'PATCH', url: '/api/approvals/bukan-uuid/cover-letter', payload: { cover_letter: 'x' } })
+  assert.equal(badId.statusCode, 400)
+
+  // Status selain pending (rejected) ditolak 409.
+  db.tables.approval_requests[0].status = 'rejected'
+  const rejected = await app.inject({
+    method: 'PATCH',
+    url: `/api/approvals/${APR1}/cover-letter`,
+    payload: { cover_letter: 'Setelah ditolak' },
+  })
+  assert.equal(rejected.statusCode, 409)
+  await app.close()
+})
+
+test('E2E-05: idempotensi pending hanya berlaku per pengguna dan tidak mengembalikan persetujuan yang kedaluwarsa', async () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString()
+  const past = new Date(Date.now() - 3_600_000).toISOString()
+  const db = new FakeDb({
+    jobs: [{ id: J1, title: 'Backend Engineer', company: 'PT Test', visibility: 'public' }],
+    approval_requests: [
+      { id: APR1, user_id: U1, job_id: J1, status: 'pending', expires_at: future, cover_letter: 'Milik U1' },
+      { id: APR2, user_id: U2, job_id: J1, status: 'pending', expires_at: past, cover_letter: 'Milik U2, sudah kedaluwarsa' },
+    ],
+  })
+  const app = await buildAsHeaderUser(db)
+  const payload = { job_id: J1, job_title: 'Backend Engineer', company: 'PT Test', platform: 'greenhouse', cover_letter: 'Surat baru.' }
+
+  // U2 hanya punya persetujuan kedaluwarsa dan U1 punya yang aktif: U2 harus mendapat baris baru, bukan baris U1 atau U2 lama.
+  const u2 = await app.inject({ method: 'POST', url: '/api/approvals', headers: { 'x-test-user': U2 }, payload })
+  assert.equal(u2.statusCode, 200)
+  const created = u2.json()
+  assert.notEqual(created.id, APR1)
+  assert.notEqual(created.id, APR2)
+  assert.equal(created.user_id, U2)
+  assert.equal(db.tables.approval_requests.length, 3)
+
+  // U1 mengajukan lagi: baris aktifnya sendiri dikembalikan, tidak ada baris baru.
+  const u1 = await app.inject({ method: 'POST', url: '/api/approvals', payload })
+  assert.equal(u1.statusCode, 200)
+  assert.equal(u1.json().id, APR1)
+  assert.equal(db.tables.approval_requests.length, 3)
+  await app.close()
+})
