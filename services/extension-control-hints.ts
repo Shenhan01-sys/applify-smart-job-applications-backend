@@ -23,6 +23,11 @@ const COUNTRY_CODE_LABEL_RE =
 const BARE_INDONESIA_CODE_RE = /^\s*(?:\+\s?62|IDN|INA)\s*(?:\(\s*opsional\s*\))?\s*$/i
 const BARE_ANY_CODE_RE = /^\s*(?:\+\s?\d{1,4}|[A-Za-z]{2,3})\s*$/
 const INDONESIA_NAME_RE = /\bindonesia\b/i
+/**
+ * Nama negara diikuti kode telepon ("Afghanistan +93", "Åland Islands +358", "Indonesia (+62)"): tampilan pilihan terpilih
+ * pemilih kode negara SmartRecruiters. Tanpa angka di nama dan paling panjang 40 huruf, supaya label biasa tidak ikut.
+ */
+const COUNTRY_WITH_DIAL_RE = /^[\p{L}\p{M}][\p{L}\p{M} .,'’()-]{1,39}?\s*\(?\+\s?\d{1,4}\)?$/u
 const PLUS_62_RE = /\+\s?62(?!\d)/
 
 /** Pemilih kode negara telepon: pilihannya (paling sedikit tiga) sebagian besar memuat kode telepon, atau labelnya menyebut kode negara. */
@@ -34,7 +39,7 @@ export function isCountryCodeSelect(c: HintControl): boolean {
   const own = [c.label, c.groupLabel, c.name, c.placeholder, c.elementId ?? ''].join(' ')
   if (COUNTRY_CODE_LABEL_RE.test(own)) return true
   const shown = [c.label, c.currentValue].map((v) => String(v ?? '').trim()).filter(Boolean)
-  if (shown.some((v) => BARE_INDONESIA_CODE_RE.test(v))) return true
+  if (shown.some((v) => BARE_INDONESIA_CODE_RE.test(v) || COUNTRY_WITH_DIAL_RE.test(v))) return true
   // Label berupa kode negara lain ("SGP", "+65") hanya dihitung bila pilihannya memang daftar negara atau kode telepon.
   return (
     shown.some((v) => BARE_ANY_CODE_RE.test(v)) &&

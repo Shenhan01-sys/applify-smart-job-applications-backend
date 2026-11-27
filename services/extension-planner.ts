@@ -629,7 +629,8 @@ const controlQuestionLabel = (c: SanitizedExtControl): string => {
  * fakta, atau AI: persetujuan hanya boleh diberikan pengguna sendiri. Persetujuan wajib menjadi pertanyaan; opt-in
  * pemasaran tidak pernah dicentang (bila wajib, ditanyakan dengan alasan `marketing_optin`).
  */
-export const CONSENT_RE = /syarat|ketentuan|kebijakan privasi|terms|privacy|consent|setuju|agree/i
+export const CONSENT_RE =
+  /syarat|ketentuan|kebijakan privasi|terms|privacy|consent|setuju|agree|personal data|data pribadi|data processing|data controller|pemrosesan data|pengolahan data|gdpr/i
 export const MARKETING_OPT_IN_RE = /newsletter|promo|marketing|info lowongan/i
 
 /** Kotak centang, atau radio satu pilihan ("Saya setuju"): jawaban persetujuan yang hanya boleh diberikan pengguna. */
@@ -1545,7 +1546,9 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       if (c.kind !== 'select' || !isCountryCodeSelect(c) || isSecretControl(c)) continue
       plannedControlIds.add(c.controlId)
       if (isRetry || c.disabled === true || c.readOnly === true || showsIndonesiaCode(c)) continue
-      const option = indonesiaDialOption(c.options)
+      // Daftar pilihan yang dimuat malas (SmartRecruiters: pilihan baru muncul sesudah dibuka) tiba kosong: nama negara saja
+      // yang dikirim, ekstensi membuka daftar dan memilih satu-satunya pilihan yang diawali "Indonesia".
+      const option = indonesiaDialOption(c.options) ?? (c.options.length === 0 ? 'Indonesia' : null)
       if (option) addAction(c as FillableControl, option, 'fact')
     }
 
