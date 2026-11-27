@@ -4,6 +4,7 @@ import Fastify from 'fastify'
 import { approvalRoutes } from '../api/routes/approval.js'
 import { classifyJobChannel, EXTENSION_HOST_DOMAINS, isExtensionUrl, routesToExtension } from '../services/apply-channel.js'
 import { decideExtensionConsent } from '../services/extension-consent.js'
+import { MAX_RUNS_PER_APPROVAL } from '../services/rerun-guard.js'
 import { makeExtensionTestDb, OTHER_USER_ID, USER_ID } from './extension-test-db.js'
 
 /**
@@ -366,5 +367,5 @@ test('decideExtensionConsent: urutan aturan', () => {
   assert.equal((decideExtensionConsent({ ...base, approval: null }) as any).status, 404)
   assert.equal((decideExtensionConsent({ ...base, usedCount: 1, activeCount: 1 }) as any).code, 'already_submitted')
   assert.equal((decideExtensionConsent({ ...base, activeCount: 1 }) as any).code, 'already_active')
-  assert.equal((decideExtensionConsent({ ...base, totalCount: 6 }) as any).status, 429)
+  assert.equal((decideExtensionConsent({ ...base, totalCount: MAX_RUNS_PER_APPROVAL }) as any).status, 429)
 })

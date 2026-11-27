@@ -80,17 +80,17 @@ test('decideRerun: agen sedang bekerja pada persetujuan ini: 409', () => {
   })
 })
 
-test('decideRerun: batas 6 job per persetujuan (1 asli + 5 ulang): 5 lolos, 6 ditolak 429', () => {
-  assert.equal(MAX_RUNS_PER_APPROVAL, 6)
-  assert.deepEqual(decideRerun(facts({ totalCount: 5 })), { ok: true })
-  assert.deepEqual(decideRerun(facts({ totalCount: 6 })), {
+test('decideRerun: batas 20 job per persetujuan (1 asli + 19 ulang): 19 lolos, 20 ditolak 429', () => {
+  assert.equal(MAX_RUNS_PER_APPROVAL, 20)
+  assert.deepEqual(decideRerun(facts({ totalCount: 19 })), { ok: true })
+  assert.deepEqual(decideRerun(facts({ totalCount: 20 })), {
     ok: false, status: 429, error: 'Too many reruns for this approval',
   })
   assert.equal((decideRerun(facts({ totalCount: 40 })) as any).status, 429)
 })
 
 test('decideRerun: urutan aturan. Terkirim mengalahkan aktif, aktif mengalahkan batas; status mengalahkan semuanya', () => {
-  const all = { usedCount: 1, activeCount: 1, totalCount: 9 }
+  const all = { usedCount: 1, activeCount: 1, totalCount: MAX_RUNS_PER_APPROVAL + 3 }
   assert.equal((decideRerun(facts(all)) as any).error, 'Application was already sent for this approval')
   assert.equal((decideRerun(facts({ ...all, usedCount: 0 })) as any).error, 'Agent is already working on this application')
   assert.equal((decideRerun(facts({ ...all, usedCount: 0, activeCount: 0 })) as any).status, 429)
@@ -216,18 +216,18 @@ test('rerun: job aktif milik persetujuan lain, user lain, atau jenis lain tidak 
   assert.equal((await run(db)).status, 200)
 })
 
-test('rerun: 6 job apply selesai atau gagal untuk persetujuan ini: 429; 5 masih boleh', async () => {
+test('rerun: 20 job apply selesai atau gagal untuk persetujuan ini: 429; 19 masih boleh', async () => {
   const runs = (n: number) =>
     Array.from({ length: n }, (_, i) => queueRow({ status: i % 2 ? 'failed' : 'completed' }))
-  const five = new FakeDb({ approval_requests: [approvalRow()], automation_queue: runs(5) })
-  assert.equal((await run(five)).status, 200)
-  assert.equal(five.rows('automation_queue').length, 6)
+  const underLimit = new FakeDb({ approval_requests: [approvalRow()], automation_queue: runs(19) })
+  assert.equal((await run(underLimit)).status, 200)
+  assert.equal(underLimit.rows('automation_queue').length, 20)
 
-  const six = new FakeDb({ approval_requests: [approvalRow()], automation_queue: runs(6) })
-  const res = await run(six)
+  const atLimit = new FakeDb({ approval_requests: [approvalRow()], automation_queue: runs(20) })
+  const res = await run(atLimit)
   assert.equal(res.status, 429)
   assert.deepEqual(res.body, { error: 'Too many reruns for this approval' })
-  assert.equal(six.rows('automation_queue').length, 6)
+  assert.equal(atLimit.rows('automation_queue').length, 20)
 })
 
 test('rerun: baris antrean persetujuan lain dan user lain tidak dihitung ke batas', async () => {

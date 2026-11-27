@@ -14,8 +14,8 @@ import { resolveApplyChannel, routesToExtension } from './apply-channel.js'
 import { clientErrorReply, type GuardDb } from './queue-guard.js'
 import { RESOLVED_UNSENT_REASONS } from './approval-shared.js'
 
-/** One original run plus five reruns. */
-export const MAX_RUNS_PER_APPROVAL = 6
+/** One original run plus nineteen reruns so multi-wave user answers do not hit 429. */
+export const MAX_RUNS_PER_APPROVAL = 20
 
 export interface RerunApproval {
   status?: string | null

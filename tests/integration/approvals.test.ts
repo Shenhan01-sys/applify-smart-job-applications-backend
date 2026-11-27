@@ -1,5 +1,6 @@
 import { test, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { MAX_RUNS_PER_APPROVAL } from '../../services/rerun-guard.js'
 
 /**
  * Integrasi: rute persetujuan (/api/approvals) pada server backend sungguhan dan klien supabase-js sungguhan,
@@ -131,16 +132,16 @@ test('rerun: ditolak selama ada pekerjaan aktif, diterima sesudah selesai, memua
   assert.equal(queueRows().length, 2)
 })
 
-test('rerun: batas enam jalan per persetujuan (429)', async () => {
+test('rerun: batas MAX_RUNS_PER_APPROVAL jalan per persetujuan (429)', async () => {
   const { approvalId } = seedApproval()
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < MAX_RUNS_PER_APPROVAL; i++) {
     const r = await api('POST', `/api/approvals/${approvalId}/rerun`)
     assert.equal(r.status, 200, `jalan ke-${i + 1}: ${r.text}`)
     queueRows()[queueRows().length - 1].status = 'completed'
   }
   const over = await api('POST', `/api/approvals/${approvalId}/rerun`)
   assert.equal(over.status, 429)
-  assert.equal(queueRows().length, 6)
+  assert.equal(queueRows().length, MAX_RUNS_PER_APPROVAL)
 })
 
 test('rerun: sudah terkirim (log success atau submit_unverified) 409, kedaluwarsa 410, belum disetujui 409, bukan milik sendiri 404', async () => {

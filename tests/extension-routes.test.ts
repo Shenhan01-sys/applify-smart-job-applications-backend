@@ -290,3 +290,40 @@ test('plan-form: kolom polos "Name" (_systemfield_name) diisi full_name, tetapi 
   assert.equal(body.actions.find((a: any) => a.controlId === 'c-hs'), undefined)
   assert.equal(body.actions.find((a: any) => a.controlId === 'c-co'), undefined)
 })
+
+test('plan-form: kolom berlabel "Portofolio (Link) if any :" diisi portfolio_url secara deterministik', async () => {
+  const now = new Date('2026-11-23T12:00:00Z')
+  const future = new Date('2026-11-24T12:00:00Z').toISOString()
+  const approvalId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa8'
+  const planner = new ExtensionPlanner(
+    async () => ({ model: 'test-model', text: '{"actions":[]}' }),
+    () => now.getTime()
+  )
+  const store = makeExtensionTestDb({
+    approval_requests: [{ id: approvalId, user_id: USER_ID, job_id: 'job-1', application_id: 'app-1', status: 'approved', expires_at: future }],
+    jobs: [{ id: 'job-1', title: 'AI-Native Software Engineer', company: 'BIOTA Smart Home', description: '' }],
+    profiles: [{ id: USER_ID, full_name: 'Hans Gunawan', portfolio_url: 'https://hans-porto-web.vercel.app' }],
+  })
+  const app = buildApp({ db: store.db, primaryUserId: USER_ID, planner, now: () => now.getTime() })
+  const { token } = (await app.inject({ method: 'POST', url: '/api/extension/token' })).json()
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/extension/plan-form',
+    headers: { authorization: `Bearer ${token}` },
+    payload: {
+      approvalId,
+      pageUrl: 'https://apply.workable.com/j/test',
+      controls: [
+        { controlId: 'c-porto', kind: 'text', label: 'Portofolio (Link) if any :', required: true },
+      ],
+    },
+  })
+  assert.equal(res.statusCode, 200, res.body)
+  assert.deepEqual(res.json().actions.find((a: any) => a.controlId === 'c-porto'), {
+    controlId: 'c-porto',
+    kind: 'text',
+    value: 'https://hans-porto-web.vercel.app',
+    source: 'fact',
+  })
+})

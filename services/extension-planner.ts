@@ -1131,7 +1131,7 @@ function directFactMatch(control: SanitizedExtControl, tokens: Record<string, st
   const urlField = isUrlishControl(control)
   if (urlField && /\blinkedin\b/.test(hay)) return tokens.linkedin_url ?? null
   if (urlField && /\bgithub\b/.test(hay)) return tokens.github_url ?? null
-  if (urlField && /\b(portfolio|website|personal site)\b/.test(hay)) return tokens.portfolio_url ?? null
+  if (urlField && /\b(portfolio|portofolio|website|personal site)\b/.test(hay)) return tokens.portfolio_url ?? null
   if (/\b(years of experience|pengalaman)\b/.test(hay)) return tokens.years_of_experience ?? null
   if (/\b(cover letter|surat lamaran)\b/.test(hay) && control.kind === 'textarea') return tokens.cover_letter ?? null
   return null
