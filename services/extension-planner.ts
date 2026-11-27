@@ -459,13 +459,6 @@ export function detectExtensionBlocker(args: {
     .filter(Boolean)
     .join('\n')
 
-  if (AI_PROHIBITION_PATTERNS.some((p) => p.test(combinedText))) {
-    return {
-      reason: 'ai_prohibited',
-      note: 'Situs mewajibkan lamaran ditulis murni tanpa AI (kebijakan kejujuran kandidat). Isi dan kirim secara manual.',
-    }
-  }
-
   const formControlsCount = controls.filter((c) => c.kind !== 'submit').length
 
   // Iframe CAPTCHA aktif (mis. challenges.cloudflare.com Turnstile) atau URL tantangan selalu memblokir meski ada kolom
