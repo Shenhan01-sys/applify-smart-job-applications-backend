@@ -2,8 +2,12 @@
 //
 // Klasifikator frontend belum mengenali beberapa pertanyaan formulir ATS yang juga hanya bisa dijawab pengguna: usia
 // minimal 18 tahun, pemakaian produk perusahaan, nomor identitas (NIK atau KTP), kesanggupan hadir di kantor, rujukan dari
-// karyawan atau pimpinan, dan "currently employed by <perusahaan>". Berkas ini menambahkannya tanpa mengubah salinan
-// frontend, dan memberi satu pintu masuk untuk backend dan worker: `classifyPersonalFact`.
+// karyawan atau pimpinan, dan "currently employed by <perusahaan>". Temuan audit formulir Lever (Palantir SG New Grad)
+// menambah empat kelas lagi: status penduduk tetap (PR atau green card), tawaran kerja lain beserta tenggatnya,
+// persetujuan (AI notetaker, perekaman wawancara, penyimpanan atau pembagian data di luar lamaran ini), dan magang terakhir
+// sebelum lulus. Persetujuan wajib berupa kebijakan privasi atau syarat dan ketentuan sengaja tidak termasuk: itu ditangani
+// jalur kotak persetujuan yang sudah ada (CONSENT_RE di planner, CONSENT_CHECKBOX_LABEL di worker). Berkas ini
+// menambahkannya tanpa mengubah salinan frontend, dan memberi satu pintu masuk untuk backend dan worker: `classifyPersonalFact`.
 //
 // Berkas ini disalin byte demi byte ke worker/src/lib/personal-fact-extras.ts; ubah keduanya sekaligus. Tes worker
 // (tests/personal-fact-questions.test.ts) memeriksa kesamaannya. Fungsi murni, satu-satunya impor adalah salinan frontend.
@@ -16,6 +20,10 @@ export type ExtraPersonalFactCategory =
   | 'national_id'
   | 'office_attendance'
   | 'employee_referral'
+  | 'permanent_residency'
+  | 'competing_offers'
+  | 'consent'
+  | 'final_internship'
 
 export type NeedsUserCategory = PersonalFactCategory | ExtraPersonalFactCategory
 
@@ -26,6 +34,10 @@ export const EXTRA_PERSONAL_FACT_REASON: Record<ExtraPersonalFactCategory, strin
   national_id: 'Nomor identitas hanya kamu yang boleh mengisi.',
   office_attendance: 'Kesanggupan hadir di kantor atau pindah lokasi hanya kamu yang bisa memastikan.',
   employee_referral: 'Rujukan dari karyawan atau pimpinan hanya kamu yang tahu.',
+  permanent_residency: 'Status penduduk tetap (permanent resident atau green card) hanya kamu yang tahu.',
+  competing_offers: 'Tawaran kerja lain dan tenggatnya hanya kamu yang tahu.',
+  consent: 'Persetujuan (rekaman, notetaker AI, penggunaan data) hanya kamu yang boleh memutuskan.',
+  final_internship: 'Apakah ini magang terakhirmu sebelum lulus hanya kamu yang tahu.',
 }
 
 export interface PersonalFactVerdict {
@@ -67,6 +79,28 @@ const EXTRA_RULES: Array<[NeedsUserCategory, RegExp]> = [
   [
     'office_attendance',
     /^(?![^?]*\bexperience\b).*?(?:\b(?:work|working|be|being|come|coming|commute|attend|report)\b[^?]{0,40}\b(?:(?:from )?(?:the |our |an )?office|on[- ]?site|in[- ]person|in[- ]office)\b|\b(?:on[- ]?site|in[- ]office|in[- ]person)\b[^?]{0,40}\b(?:required|requirement|expectation|days?|comfortable|willing|able|available)\b|\b(?:in|at|from)\s+(?:the|our)\s+office\b[^?]{0,40}\b(?:days?|times?|per|a week|weekly|required|willing|able)\b|\bhybrid\s+(?:work|working|schedule|arrangement|model|setup|environment|role|position)\b|\b(?:willing|able|open|prepared|comfortable)\b[^?]{0,30}\bhybrid\b|\brelocat\w+|\bwfo\b|\bwfh\b|\b(?:hadir|bekerja|masuk|datang)\b[^?]{0,40}\bkantor\b|\b(?:bersedia|sanggup|bisa|mau)\b[^?]{0,60}\b(?:kantor|onsite|on-site|hybrid|wfo|ditempatkan|penempatan)\b)/i,
+  ],
+  [
+    // "PR" berdiri sendiri bisa berarti pull request atau public relations, jadi hanya dikenali bersama "status" atau
+    // "holder", atau sebagai jawaban "Are you a (Singapore) PR?" di akhir kalimat.
+    'permanent_residency',
+    /\bpermanent[- ]residen(?:t|ts|ce|cy)\b|\bgreen[- ]?card\b|\b(?:PR|SPR)\s+(?:status|holder)\b|\b(?:are you|you are)\s+(?:currently\s+)?an?\s+(?:[a-z]+\s+)?(?:PR|SPR)\s*[?.]?\s*$|penduduk tetap|izin tinggal tetap|residen tetap/i,
+  ],
+  [
+    // "offer" saja tidak cukup (mis. "what we offer"): harus tenggat tawaran, tawaran lain atau pesaing, atau "do you have an offer".
+    'competing_offers',
+    /\boffers?\s+deadlines?\b|\bdeadlines?\b[^?]{0,30}\boffers?\b|\b(?:other|another|competing|outstanding|pending)\s+(?:job\s+|employment\s+)?offers?\b|\boffers?\s+(?:from|with)\s+(?:another|other|any other|competing)\b|\b(?:have|has|hold|holding|received|got|gotten)\s+(?:any\s+|an?\s+)?(?:(?:job|employment|written|other|another)\s+)*offers?\b|\bpenawaran\s+(?:kerja\s+)?(?:lain|dari perusahaan lain)\b|\btenggat\w*\s+(?:penawaran|offering)\b/i,
+  ],
+  [
+    // Persetujuan yang jadi keputusan pengguna: notetaker AI, perekaman, dan "consent to ..." selain kebijakan privasi, syarat, atau
+    // pemrosesan data wajib (kotak persetujuan itu sudah ditangani jalur persetujuan planner dan worker).
+    'consent',
+    /\bnote[- ]?takers?\b|\bconsent(?:s|ed|ing)?\s+(?:to|for)\b(?![^?]*\b(?:privacy (?:policy|notice|statement)|terms|data processing|processing of (?:my|your|the) (?:personal )?(?:data|information)|syarat|ketentuan|kebijakan privasi)\b)|^(?=.*\b(?:consent|agree|permission|comfortable|okay|willing|allow|authori[sz]e|opt[- ]in)\w*\b).*\b(?:recorded|recordings?|transcri(?:be|bed|bing|ption)s?)\b|\b(?:setuju|bersedia|izin|persetujuan)\b[^?]{0,40}\b(?:direkam|rekaman|perekaman)\b|\bdirekam\b/i,
+  ],
+  [
+    // Hanya pertanyaan "apakah ini magang terakhirmu"; "Describe your last internship" boleh dijawab dari profil.
+    'final_internship',
+    /\b(?:is|will)\s+this\s+(?:be\s+)?(?:your|the)\s+(?:final|last)\s+internship\b|\b(?:final|last)\s+internship\b[^?]{0,30}\b(?:before|prior to)\b[^?]{0,20}\bgraduat\w+|\b(?:before|prior to)\b[^?]{0,20}\bgraduat\w+[^?]{0,40}\b(?:final|last)\s+internship\b|\bmagang\s+(?:terakhir|akhir)\b[^?]{0,40}\b(?:sebelum|lulus)\b/i,
   ],
   [
     'demographics',

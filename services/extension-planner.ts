@@ -761,17 +761,49 @@ export function latestWorkExperience(rows: any[] | null): any | null {
   return usable[0] ?? null
 }
 
+/**
+ * Baris pendidikan setingkat SMA (kolom `degree` teks bebas, mis. "SMA/IPA", "High School Diploma", "SMK"), atau
+ * institusi yang namanya diawali SMA/SMK/SMAN/SMKN. Dipisahkan dari kuliah supaya pertanyaan "University" tidak terisi nama SMA.
+ * "MA" sengaja tidak dihitung: bisa berarti Master of Arts.
+ */
+const HIGH_SCHOOL_DEGREE_RE = /\b(?:high school|senior high|secondary school|sma|smk|sekolah menengah|ged|a-levels?)\b/i
+const HIGH_SCHOOL_INSTITUTION_RE = /^(?:sman?|smkn?|smak)\b|\bhigh school\b/i
+const isHighSchoolEducation = (r: any): boolean =>
+  HIGH_SCHOOL_DEGREE_RE.test(String(r?.degree ?? '')) || HIGH_SCHOOL_INSTITUTION_RE.test(String(r?.institution ?? '').trim())
+
+/** Tahun empat digit yang masuk akal dari kolom integer `start_year`/`end_year`, atau 0 bila tidak ada. */
+const educationYear = (v: unknown): number => {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\d{4}$/.test(v.trim()) ? Number(v) : NaN
+  return Number.isInteger(n) && n >= 1900 && n <= 2100 ? n : 0
+}
+
+/**
+ * Pendidikan terbaru dari tabel `education` (institution, degree, start_year, end_year, is_current): yang sedang berjalan lebih
+ * dulu, lalu tahun lulus atau perkiraan lulus terbesar, lalu tahun masuk terbesar. `highSchool` memilih baris setingkat SMA,
+ * selain itu baris kuliah. Baris tanpa nama institusi dilewati.
+ */
+export function latestEducation(rows: any[] | null, highSchool = false): any | null {
+  if (!Array.isArray(rows)) return null
+  const usable = rows.filter((r) => r && String(r.institution ?? '').trim() && isHighSchoolEducation(r) === highSchool)
+  usable.sort((a, b) => {
+    if ((a.is_current === true) !== (b.is_current === true)) return a.is_current === true ? -1 : 1
+    return educationYear(b.end_year) - educationYear(a.end_year) || educationYear(b.start_year) - educationYear(a.start_year)
+  })
+  return usable[0] ?? null
+}
+
 function buildFactTokens(args: {
   profile: Record<string, any> | null
   settings: Record<string, any> | null
   skills: string[]
   workExperiences: any[] | null
+  education?: any[] | null
   achievements: string[]
   email: string
   coverLetter: string
   jobLocation?: string | null
 }): { tokens: Record<string, string>; summaryLines: string[] } {
-  const { profile, settings, skills, workExperiences, achievements, email, coverLetter, jobLocation } = args
+  const { profile, settings, skills, workExperiences, education, achievements, email, coverLetter, jobLocation } = args
   const fullName = cleanLine(
     `${settings?.first_name ?? ''} ${settings?.last_name ?? ''}`.trim() || profile?.full_name || '',
     120
@@ -846,6 +878,21 @@ function buildFactTokens(args: {
     if (typeof latest.description === 'string') put('latest_role_description', latest.description.slice(0, 1500))
   }
 
+  // Pendidikan dari tabel `education`. Tahun lulus = `end_year` (pada baris yang masih berjalan, itu perkiraan lulus). Tanpa
+  // `end_year` tokennya dilewati, tidak ditebak. Kolom bahasa tidak ada di skema, jadi tidak ada token bahasa.
+  const university = latestEducation(education ?? null)
+  if (university) {
+    put('school_name', cleanLine(university.institution ?? '', 160))
+    const gradYear = educationYear(university.end_year)
+    if (gradYear) put('graduation_year', String(gradYear))
+  }
+  const highSchool = latestEducation(education ?? null, true)
+  if (highSchool) {
+    put('high_school_name', cleanLine(highSchool.institution ?? '', 160))
+    const hsYear = educationYear(highSchool.end_year)
+    if (hsYear) put('high_school_year', String(hsYear))
+  }
+
   const summaryLines = [
     `Nama lengkap: ${tokens.full_name ?? '(kosong)'} -> gunakan token {{full_name}}`,
     tokens.first_name ? `Nama depan: token {{first_name}}` : '',
@@ -872,6 +919,10 @@ function buildFactTokens(args: {
           .filter(Boolean)
           .join('\n')
       : '',
+    tokens.school_name ? `Universitas atau sekolah: ${tokens.school_name} -> token {{school_name}}` : '',
+    tokens.graduation_year ? `Tahun lulus (atau perkiraan lulus): ${tokens.graduation_year} -> token {{graduation_year}}` : '',
+    tokens.high_school_name ? `SMA atau sekolah menengah: ${tokens.high_school_name} -> token {{high_school_name}}` : '',
+    tokens.high_school_year ? `Tahun lulus SMA: ${tokens.high_school_year} -> token {{high_school_year}}` : '',
     tokens.work_authorization ? `Izin kerja: ${tokens.work_authorization} -> token {{work_authorization}}` : '',
     tokens.require_visa ? `Butuh sponsor visa: ${tokens.require_visa} -> token {{require_visa}}` : '',
     tokens.expected_salary ? `Ekspektasi gaji: tersedia, gunakan token {{expected_salary}} (angkanya tidak ditulis di sini)` : '',
@@ -1066,6 +1117,7 @@ interface CachedPlannerContext {
   settings: any
   skillRows: any
   workRows: any
+  educationRows: any
   achievementRows: any
   resumeUrl: string | null
 }
@@ -1105,7 +1157,7 @@ export class ExtensionPlanner {
     private readonly llmTimeoutMs: number = EXT_PLAN_LLM_TIMEOUT_MS
   ) {}
 
-  /** Tujuh kueri statis per lamaran. user_form_answers sengaja tidak masuk cache dan dibaca segar oleh pemanggil. */
+  /** Delapan kueri statis per lamaran. user_form_answers sengaja tidak masuk cache dan dibaca segar oleh pemanggil. */
   private async loadContext(db: GuardDb, userId: string, jobId: string, withResume: boolean): Promise<CachedPlannerContext> {
     let perDb = contextCacheByDb.get(db)
     if (!perDb) {
@@ -1121,12 +1173,13 @@ export class ExtensionPlanner {
       return hit.value
     }
 
-    const [job, profile, settings, skillRows, workRows, achievementRows, resumeUrl] = await Promise.all([
+    const [job, profile, settings, skillRows, workRows, educationRows, achievementRows, resumeUrl] = await Promise.all([
       db.from('jobs').select('id, title, company, description, location').eq('id', jobId).maybeSingle(),
       db.from('profiles').select('*').eq('id', userId).maybeSingle(),
       db.from('user_automation_settings').select('*').eq('user_id', userId).maybeSingle(),
       db.from('user_skills').select('name').eq('user_id', userId),
       db.from('work_experiences').select('company_name, role_title, is_current, start_date, end_date, description').eq('user_id', userId).limit(50),
+      db.from('education').select('institution, degree, start_year, end_year, is_current').eq('user_id', userId).limit(20),
       db.from('achievements').select('title, category, issuer, achievement_date, is_featured, created_at').eq('user_id', userId).limit(20),
       withResume ? resumeUrlForUser(db as any, userId) : Promise.resolve(null),
     ])
@@ -1136,12 +1189,13 @@ export class ExtensionPlanner {
       settings: settings.data,
       skillRows: skillRows.data,
       workRows: workRows.data,
+      educationRows: educationRows.data,
       achievementRows: achievementRows.data,
       resumeUrl,
     }
     // Supabase mengembalikan {data: null, error} (tidak melempar). Hasil gagal atau tanpa lowongan/profil tidak boleh
     // di-cache: kalau tidak, satu gangguan sesaat membuat konteks kosong dipakai ulang sampai TTL habis.
-    const queryFailed = [job, profile, settings, skillRows, workRows, achievementRows].some((r) => Boolean(r?.error))
+    const queryFailed = [job, profile, settings, skillRows, workRows, educationRows, achievementRows].some((r) => Boolean(r?.error))
     if (!queryFailed && job?.data != null && profile?.data != null) {
       perDb.set(key, { value, expiresAt: this.now() + EXT_CONTEXT_CACHE_TTL_MS })
       while (perDb.size > EXT_CONTEXT_CACHE_MAX) {
@@ -1258,7 +1312,7 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       this.loadContext(db, userId, jobId, Boolean(fileControl)),
       db.from('user_form_answers').select('question_key, question_label, answer').eq('user_id', userId).limit(200),
     ])
-    const { job, profile, settings, skillRows, workRows, achievementRows, resumeUrl } = context
+    const { job, profile, settings, skillRows, workRows, educationRows, achievementRows, resumeUrl } = context
 
     const savedMap = new Map<string, string>()
     for (const row of Array.isArray(answerRows) ? answerRows : []) {
@@ -1392,6 +1446,7 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       settings: settings ?? null,
       skills,
       workExperiences: Array.isArray(workRows) ? workRows : null,
+      education: Array.isArray(educationRows) ? educationRows : null,
       achievements,
       email: args.userEmail ?? '',
       coverLetter: args.coverLetter ?? '',

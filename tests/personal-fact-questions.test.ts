@@ -136,6 +136,59 @@ test('classifyPersonalFact: usia, pemakaian produk, NIK atau KTP, hadir di kanto
   assert.equal(classifyPersonalFact('Are you at least 18 years of age?')?.reason, 'Usiamu hanya kamu yang tahu.')
 })
 
+test('classifyPersonalFact: temuan audit Lever (Palantir SG New Grad): PR, tawaran lain, persetujuan, magang terakhir', () => {
+  const cases: Array<[string, string]> = [
+    ['Are you a Singapore permanent resident?', 'permanent_residency'],
+    ['Do you hold a green card?', 'permanent_residency'],
+    ['Are you a Singapore PR?', 'permanent_residency'],
+    ['Do you have PR status in Singapore?', 'permanent_residency'],
+    ['Apakah Anda penduduk tetap Singapura?', 'permanent_residency'],
+    ['Do you have any upcoming offer deadlines?', 'competing_offers'],
+    ['Do you currently hold any other offers?', 'competing_offers'],
+    ['Have you received offers from other companies?', 'competing_offers'],
+    ['Do you have a job offer from another company?', 'competing_offers'],
+    ['Apakah Anda memiliki penawaran kerja lain?', 'competing_offers'],
+    ['Do you consent to the use of an AI Notetaker during interviews?', 'consent'],
+    ['Are you comfortable with the interview being recorded?', 'consent'],
+    ['Do you agree to your call being recorded?', 'consent'],
+    ['Do you consent to us retaining your data for future roles?', 'consent'],
+    ['Apakah Anda bersedia wawancara direkam?', 'consent'],
+    ['Is this your final internship before graduating?', 'final_internship'],
+    ['Will this be your last internship before you graduate?', 'final_internship'],
+    ['Apakah ini magang terakhir Anda sebelum lulus?', 'final_internship'],
+  ]
+  for (const [label, category] of cases) {
+    const verdict = classifyPersonalFact(label)
+    assert.equal(verdict?.category, category, label)
+    assert.ok(verdict?.reason && verdict.reason.length > 0, `alasan kosong: ${label}`)
+  }
+  assert.equal(classifyPersonalFact('Are you a Singapore permanent resident?')?.reason, 'Status penduduk tetap (permanent resident atau green card) hanya kamu yang tahu.')
+})
+
+test('classifyPersonalFact: pertanyaan teknis, kata "PR", "offer", "record", dan kotak persetujuan wajib tidak ikut ditandai', () => {
+  const fine = [
+    'Describe a project where you used AI',
+    'Which programming languages do you know?',
+    'Describe your experience with pull requests and PR reviews',
+    'Do you have experience in Singapore PR and communications?',
+    'Are you a PR professional?',
+    'What does the company offer?',
+    'Tell us about a tight deadline you handled',
+    'Do you have experience with offer management systems?',
+    'Describe your last internship',
+    'Tell us about your final year project before graduating',
+    'When do you expect to graduate?',
+    'Do you have experience with call recording software?',
+    'Tell us about your track record',
+    'Do you have experience taking meeting notes?',
+    // Kebijakan privasi, syarat, dan pemrosesan data wajib tetap lewat jalur kotak persetujuan yang sudah ada.
+    'I agree to the Privacy Policy',
+    'I consent to the processing of my personal data',
+    'I consent to the Terms of Service',
+  ]
+  for (const label of fine) assert.equal(classifyPersonalFact(label), null, label)
+})
+
 test('classifyPersonalFact: pertanyaan biasa dan teknis tidak ikut ditandai', () => {
   const fine = [
     'Why are you interested in this role?',
