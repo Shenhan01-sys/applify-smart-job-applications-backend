@@ -127,30 +127,33 @@ test('approve: ATS publik ke worker; LinkedIn tidak diantrekan ke worker (manual
   assert.equal(queueOf(li.store).length, 0, JOB_LINKEDIN)
 })
 
-// ---- Izin pengguna saat approve -----------------------------------------------------------------------
+// ---- Persetujuan kanal ekstensi langsung masuk antrean tanpa jeda izin ------------------------------------
 
-test('approve portal login tanpa extension_auto_use: tidak diantrekan, balasan meminta izin', async () => {
+test('approve portal login tanpa extension_auto_use: langsung diantrekan ke extension_apply tanpa meminta izin', async () => {
   const { store, app } = await build({ approval_requests: [approval()] })
   const res = await approve(app)
   assert.equal(res.statusCode, 200, res.body)
   const body = res.json()
   assert.equal(body.success, true)
   assert.equal(body.apply_channel, 'extension')
-  assert.equal(body.extension_consent_required, true)
-  assert.equal(body.queue_job_id, null)
-  assert.equal(queueOf(store).length, 0)
+  assert.equal(body.extension_consent_required, undefined)
+  assert.ok(body.queue_job_id)
+  assert.equal(queueOf(store).length, 1)
+  assert.equal(queueOf(store)[0].job_type, 'extension_apply')
   assert.equal(store.tables.approval_requests[0].status, 'approved')
   assert.equal(store.tables.approval_requests[0].apply_channel, 'extension')
 })
 
-test('approve portal login dengan extension_auto_use=false eksplisit: tetap meminta izin', async () => {
+test('approve portal login dengan extension_auto_use=false eksplisit: tetap langsung diantrekan', async () => {
   const { store, app } = await build({
     approval_requests: [approval()],
     user_automation_settings: [{ id: 's1', user_id: USER_ID, extension_auto_use: false }],
   })
   const res = await approve(app)
-  assert.equal(res.json().extension_consent_required, true)
-  assert.equal(queueOf(store).length, 0)
+  assert.equal(res.json().extension_consent_required, undefined)
+  assert.ok(res.json().queue_job_id)
+  assert.equal(queueOf(store).length, 1)
+  assert.equal(queueOf(store)[0].job_type, 'extension_apply')
 })
 
 test('approve portal login dengan extension_auto_use=true: langsung extension_apply', async () => {
@@ -166,39 +169,23 @@ test('approve portal login dengan extension_auto_use=true: langsung extension_ap
   assert.equal(queueOf(store)[0].job_type, 'extension_apply')
 })
 
-test('approve: extension_auto_use milik pengguna lain tidak berlaku', async () => {
-  const { store, app } = await build({
-    approval_requests: [approval()],
-    user_automation_settings: [{ id: 's1', user_id: OTHER_USER_ID, extension_auto_use: true }],
-  })
-  const res = await approve(app)
-  assert.equal(res.json().extension_consent_required, true)
-  assert.equal(queueOf(store).length, 0)
-})
-
-test('approve sebelum migrasi (kolom extension_auto_use dan apply_channel belum ada): dianggap false, minta izin', async () => {
+test('approve sebelum migrasi (kolom extension_auto_use dan apply_channel belum ada): tetap langsung extension_apply', async () => {
   const { store, app } = await build(
     { approval_requests: [approval()] },
     { missingColumns: { user_automation_settings: ['extension_auto_use'], approval_requests: ['apply_channel'] } }
   )
   const res = await approve(app)
   assert.equal(res.statusCode, 200, res.body)
-  assert.equal(res.json().extension_consent_required, true)
-  assert.equal(queueOf(store).length, 0)
-  assert.equal(store.tables.approval_requests[0].status, 'approved')
-
-  // Izin lalu diberikan: antre extension_apply tetap berjalan tanpa kolom baru.
-  const ok = await consent(app, { always: true })
-  assert.equal(ok.statusCode, 200, ok.body)
+  assert.equal(res.json().extension_consent_required, undefined)
+  assert.ok(res.json().queue_job_id)
   assert.equal(queueOf(store)[0].job_type, 'extension_apply')
-  assert.equal(ok.json().extension_auto_use, false)
+  assert.equal(store.tables.approval_requests[0].status, 'approved')
 })
 
-// ---- POST /:id/extension-consent ----------------------------------------------------------------------
+// ---- POST /:id/extension-consent (tetap berfungsi untuk pengalihan manual/cadangan) -------------------
 
-test('extension-consent: persetujuan portal yang menunggu izin diantrekan, payload sama dengan approve', async () => {
-  const { store, app } = await build({ approval_requests: [approval()] })
-  await approve(app)
+test('extension-consent: persetujuan yang disetujui ulang manual diantrekan, payload sama dengan approve', async () => {
+  const { store, app } = await build({ approval_requests: [approval({ status: 'approved', apply_channel: 'extension' })] })
   const res = await consent(app, {})
   assert.equal(res.statusCode, 200, res.body)
   const body = res.json()
@@ -216,8 +203,7 @@ test('extension-consent: persetujuan portal yang menunggu izin diantrekan, paylo
 })
 
 test('extension-consent always:true menyimpan extension_auto_use, persetujuan berikutnya langsung diantrekan', async () => {
-  const { store, app } = await build({ approval_requests: [approval()] })
-  await approve(app)
+  const { store, app } = await build({ approval_requests: [approval({ status: 'approved', apply_channel: 'extension' })] })
   const res = await consent(app, { always: true })
   assert.equal(res.statusCode, 200, res.body)
   assert.equal(res.json().extension_auto_use, true)
@@ -234,10 +220,9 @@ test('extension-consent always:true menyimpan extension_auto_use, persetujuan be
 
 test('extension-consent always:true memperbarui baris pengaturan yang sudah ada', async () => {
   const { store, app } = await build({
-    approval_requests: [approval()],
+    approval_requests: [approval({ status: 'approved', apply_channel: 'extension' })],
     user_automation_settings: [{ id: 's1', user_id: USER_ID, first_name: 'Budi', extension_auto_use: false }],
   })
-  await approve(app)
   const res = await consent(app, { always: true })
   assert.equal(res.statusCode, 200, res.body)
   assert.equal(store.tables.user_automation_settings.length, 1)
@@ -262,8 +247,7 @@ test('extension-consent: 409 bila sudah ada tugas apply atau extension_apply akt
 })
 
 test('extension-consent: dua panggilan beruntun, yang kedua 409 dan antrean tetap satu', async () => {
-  const { store, app } = await build({ approval_requests: [approval()] })
-  await approve(app)
+  const { store, app } = await build({ approval_requests: [approval({ status: 'approved', apply_channel: 'extension' })] })
   const a = await consent(app, {})
   const b = await consent(app, {})
   assert.equal(a.statusCode, 200)

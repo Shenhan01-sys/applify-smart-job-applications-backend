@@ -248,3 +248,45 @@ test('authorize-submit & report-run: 1 approval = 1 submission, validasi PNG mag
   })
   assert.equal(replayReport.statusCode, 409)
 })
+
+test('plan-form: kolom polos "Name" (_systemfield_name) diisi full_name, tetapi "High School Name" dan "Company Name" tidak', async () => {
+  const now = new Date('2026-11-23T12:00:00Z')
+  const future = new Date('2026-11-24T12:00:00Z').toISOString()
+  const approvalId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa9'
+  const planner = new ExtensionPlanner(
+    async () => ({ model: 'test-model', text: '{"actions":[]}' }),
+    () => now.getTime()
+  )
+  const store = makeExtensionTestDb({
+    approval_requests: [{ id: approvalId, user_id: USER_ID, job_id: 'job-1', application_id: 'app-1', status: 'approved', expires_at: future }],
+    jobs: [{ id: 'job-1', title: 'SDK Engineer', company: 'Supabase', description: '' }],
+    profiles: [{ id: USER_ID, full_name: 'Hans Gunawan', location: 'Yogyakarta, Indonesia' }],
+  })
+  const app = buildApp({ db: store.db, primaryUserId: USER_ID, planner, now: () => now.getTime() })
+  const { token } = (await app.inject({ method: 'POST', url: '/api/extension/token' })).json()
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/extension/plan-form',
+    headers: { authorization: `Bearer ${token}` },
+    payload: {
+      approvalId,
+      pageUrl: 'https://jobs.ashbyhq.com/supabase/test/application',
+      controls: [
+        { controlId: 'c-name', kind: 'text', name: '_systemfield_name', label: 'Name', required: true },
+        { controlId: 'c-hs', kind: 'text', label: 'High School Name', required: true },
+        { controlId: 'c-co', kind: 'text', label: 'Company Name', required: false },
+      ],
+    },
+  })
+  assert.equal(res.statusCode, 200, res.body)
+  const body = res.json()
+  assert.deepEqual(body.actions.find((a: any) => a.controlId === 'c-name'), {
+    controlId: 'c-name',
+    kind: 'text',
+    value: 'Hans Gunawan',
+    source: 'fact',
+  })
+  assert.equal(body.actions.find((a: any) => a.controlId === 'c-hs'), undefined)
+  assert.equal(body.actions.find((a: any) => a.controlId === 'c-co'), undefined)
+})

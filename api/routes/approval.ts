@@ -2,7 +2,7 @@ import { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } f
 import { QueueService, queueService } from '../../services/queue.service.js'
 import { ApprovalChannelConflictError, PlatformLimitReachedError } from '../../services/queue-guard.js'
 import { approvalDispatchTarget, resolveApplyChannel, type ApprovalDispatchTarget } from '../../services/apply-channel.js'
-import { grantExtensionConsent, readExtensionAutoUse } from '../../services/extension-consent.js'
+import { grantExtensionConsent } from '../../services/extension-consent.js'
 import { coverLetterFromApplication, prepareApprovalAnswers, sanitizeClientAnswers } from '../../services/approval-answers.service.js'
 import { aiPipelineService } from '../../services/ai-pipeline.service.js'
 import { AiAccessError, aiGuardService, type AiGuardService } from '../../services/ai-guard.service.js'
@@ -560,17 +560,6 @@ export async function approvalRoutes(
     // Persetujuan pengguna = izin kirim untuk lamaran ini (HITL). Worker tetap memerlukan
     // ALLOW_REAL_SUBMIT=true sebelum benar-benar menekan tombol kirim; ekstensi menunggu klik Kirim Sekarang.
     try {
-      // Jalur ekstensi butuh izin pengguna. Bila belum memilih "selalu pakai ekstensi", persetujuan tetap
-      // tercatat tetapi TIDAK diantrekan; klien menampilkan pilihan lalu memanggil POST /:id/extension-consent.
-      if (dispatchTarget === 'extension' && !(await readExtensionAutoUse(db, userId))) {
-        return {
-          success: true,
-          message: 'Application approved; permission to use the browser extension is required before it is queued',
-          queue_job_id: null,
-          apply_channel: 'extension',
-          extension_consent_required: true,
-        }
-      }
       const qs = getQueue()
       const queued =
         dispatchTarget === 'extension'
