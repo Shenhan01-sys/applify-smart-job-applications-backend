@@ -548,6 +548,7 @@ const SECRET_KEYWORDS = [
   'nik',
   'npwp',
   'passport',
+  'paspor',
   'national\\s+id',
   'tax\\s+id',
 ]
@@ -568,10 +569,23 @@ const splitWords = (text: string): string =>
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replace(/[_\-.[\]]+/g, ' ')
 
+/**
+ * Label paspor yang menanyakan negara penerbit atau kewarganegaraan ("Passport Country"), BUKAN nomor atau dokumen
+ * rahasia ("Passport Number", "No Paspor"). Tetap dijaga sebagai fakta pribadi (`citizenship`) agar AI tidak menebak,
+ * tetapi pengguna bisa menjawabnya di kartu Persetujuan atau panel ekstensi.
+ */
+const NON_SECRET_PASSPORT_COUNTRY_RE =
+  /\b(?:passport\s+(?:country|nationality|issuing\s+country|state)|(?:country|nation)\s+of\s+passport|negara\s+paspor|kewarganegaraan\s+paspor)\b/i
+const NON_COUNTRY_PASSPORT_DETAIL_RE =
+  /\b(?:password|passcode|passphrase|pin|otp|cv[vc]2?|ssn|ktp|nik|npwp|secret|number|no|nomor|id|expiry|expiration|exp|scan|photo|upload|copy|file|image)\b/i
+
 /** Apakah label, nama, atau placeholder kontrol menyebut data rahasia. Satu-satunya pemeriksaan rahasia untuk planner dan pelapor. */
 export function isSecretLabel(text: unknown): boolean {
   const raw = String(text ?? '')
-  return SECRET_LABEL_RE.test(raw) || SECRET_LABEL_RE.test(splitWords(raw))
+  const split = splitWords(raw)
+  if (!(SECRET_LABEL_RE.test(raw) || SECRET_LABEL_RE.test(split))) return false
+  if (NON_SECRET_PASSPORT_COUNTRY_RE.test(split) && !NON_COUNTRY_PASSPORT_DETAIL_RE.test(split)) return false
+  return true
 }
 
 function isSecretControl(c: SanitizedExtControl): boolean {

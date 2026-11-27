@@ -70,9 +70,44 @@ test('regex rahasia: nama atribut dengan garis bawah, tanda hubung, angka, dan c
   for (const name of ['user_pin', 'card_number', 'cc-number card number', 'password1', 'password_confirmation', 'confirmPassword', 'userPin', 'OTPCode', 'new-password', 'newpassword', 'userpasscode', 'confirmcvv']) {
     assert.equal(isSecretLabel(name), true, name)
   }
-  for (const name of ['shipping_address', 'job_application[opinion]', 'pinterest_url', 'mapping_experience', 'classname', 'footprint', 'compass_code']) {
+  for (const name of ['shipping_address', 'job_application[opinion]', 'pinterest_url', 'mapping_experience', 'classname', 'footprint', 'compass_code', 'Passport Country', 'passport_country', 'Country of Passport', 'Negara Paspor']) {
     assert.equal(isSecretLabel(name), false, name)
   }
+  for (const name of ['Passport', 'Passport Number', 'passport_number', 'No. Paspor', 'Passport Country and Number']) {
+    assert.equal(isSecretLabel(name), true, name)
+  }
+})
+
+test('planner: Passport Country tidak dianggap secret_skip, dijaga fakta pribadi citizenship, dan ditanyakan ke pengguna', async () => {
+  const store = makeExtensionTestDb({
+    jobs: [{ id: 'job-1', title: 'SDK Engineer - Python', company: 'Supabase', description: '', location: 'Remote' }],
+    profiles: [{ id: USER_ID, full_name: 'Hans Gunawan', location: 'Jakarta, Indonesia' }],
+  })
+  let aiPrompt = ''
+  const planner = new ExtensionPlanner(async (req) => {
+    aiPrompt = req.user
+    return { model: 'm', text: JSON.stringify({ actions: [{ controlId: 'c1', value: 'Indonesia' }] }) }
+  }, () => NOW.getTime())
+
+  const res = await planner.planForm({
+    db: store.db,
+    userId: USER_ID,
+    jobId: 'job-1',
+    pageUrl: 'https://jobs.ashbyhq.com/supabase/1/application',
+    rawControls: [
+      { controlId: 'c1', kind: 'text', label: 'Passport Country', required: true },
+      { controlId: 'c2', kind: 'text', label: 'Passport Number', required: true },
+    ],
+  })
+
+  // AI diblokir menebak kewarganegaraan/paspor (citizenship), tetapi Passport Country tetap jadi pertanyaan yang bisa dijawab user.
+  assert.deepEqual(res.actions, [])
+  assert.ok(aiPrompt.includes('c1'), 'Passport Country bukan secret')
+  assert.ok(!aiPrompt.includes('c2'), 'Passport Number tetap secret dan tidak dikirim ke AI')
+  assert.deepEqual(res.pendingQuestions, [
+    { key: 'passport country', label: 'Passport Country', kind: 'text', required: true },
+    { key: 'passport number', label: 'Passport Number', kind: 'secret_skip', required: true },
+  ])
 })
 
 test('planner: kontrol "Shipping address" dan "Pinterest" kembali diproses (tidak dibuang), kontrol rahasia dilaporkan secret_skip', async () => {
