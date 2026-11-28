@@ -62,6 +62,7 @@ export const EXT_MAX_PAGE_TEXT = 300
 export const EXT_MAX_PROMPT_URL_CHARS = 500
 
 export type ExtControlKind = 'text' | 'textarea' | 'select' | 'checkbox' | 'radio' | 'file' | 'submit'
+export type FillableControl = SanitizedExtControl & { kind: Exclude<ExtControlKind, 'file' | 'submit'> }
 
 export interface SanitizedExtControl {
   controlId: string
@@ -990,6 +991,14 @@ function buildFactTokens(args: {
   if (university) {
     put('school_name', cleanLine(university.institution ?? '', 160))
     put('degree', cleanLine(university.degree ?? '', 120))
+    put('field_of_study', cleanLine(university.field_of_study ?? '', 120))
+    if (university.gpa !== null && university.gpa !== undefined && String(university.gpa).trim() !== '') {
+      const maxGpa = university.max_gpa !== null && university.max_gpa !== undefined ? university.max_gpa : 4
+      put('gpa', `${String(university.gpa).trim()}/${String(maxGpa).trim()}`)
+    }
+    if (university.is_current === true) put('education_ongoing', 'true')
+    const startYear = educationYear(university.start_year)
+    if (startYear) put('education_start_year', String(startYear))
     const gradYear = educationYear(university.end_year)
     if (gradYear) put('graduation_year', String(gradYear))
   }
@@ -1028,7 +1037,12 @@ function buildFactTokens(args: {
           .join('\n')
       : '',
     tokens.school_name ? `Universitas atau sekolah: ${tokens.school_name} -> token {{school_name}}` : '',
-    tokens.degree ? `Gelar / jurusan pendidikan terakhir: ${tokens.degree} -> token {{degree}}` : '',
+    tokens.degree ? `Gelar / jenjang pendidikan terakhir: ${tokens.degree} -> token {{degree}}` : '',
+    tokens.field_of_study ? `Jurusan / bidang studi terakhir: ${tokens.field_of_study} -> token {{field_of_study}}` : '',
+    tokens.gpa ? `IPK / GPA pendidikan terakhir: ${tokens.gpa}${tokens.education_ongoing ? ' (masih berjalan)' : ''} -> token {{gpa}}` : '',
+    tokens.education_start_year
+      ? `Tahun mulai studi terakhir: ${tokens.education_start_year}${tokens.education_ongoing ? ' (sedang menempuh studi)' : ''}`
+      : '',
     tokens.graduation_year ? `Tahun lulus (atau perkiraan lulus): ${tokens.graduation_year} -> token {{graduation_year}}` : '',
     tokens.high_school_name ? `SMA atau sekolah menengah: ${tokens.high_school_name} -> token {{high_school_name}}` : '',
     tokens.high_school_year ? `Tahun lulus SMA: ${tokens.high_school_year} -> token {{high_school_year}}` : '',
@@ -1109,14 +1123,33 @@ function countryAnswer(control: SanitizedExtControl, country: string | undefined
 
 function directFactMatch(control: SanitizedExtControl, tokens: Record<string, string>): string | null {
   const hay = `${control.groupLabel} ${control.label} ${control.name} ${control.placeholder}`.toLowerCase()
+  const rawQuestionLabel = controlQuestionLabel(control).toLowerCase()
+  const questionLabel = normalizeLabelText(rawQuestionLabel)
+  if (
+    !isInstitutionControl(control) &&
+    (control.kind === 'select' || control.kind === 'radio') &&
+    /\b(?:first(?: university)? degree|bachelor|undergrad\w*)\b[^?]{0,80}\b(?:complet\w*|graduat\w*)\b/.test(questionLabel)
+  ) {
+    const years = [...rawQuestionLabel.matchAll(/\b(202\d)\b/g)].map((m) => Number(m[1]))
+    const degNorm = (tokens.degree ?? '').replace(/\./g, '')
+    const isBachelor = /\b(?:bsc|bs|ba|beng|btech|bcom|bba|skom|ssi|st|se|s1|sarjana|bachelor|undergrad)\b/i.test(degNorm)
+    const expectedYear = tokens.graduation_year
+      ? Number(tokens.graduation_year)
+      : tokens.education_ongoing === 'true' && isBachelor && tokens.education_start_year
+        ? Number(tokens.education_start_year) + 4
+        : null
+    if (expectedYear && years.length > 0) {
+      const yesNo = years.includes(expectedYear) ? 'Yes' : 'No'
+      return control.options.length > 0 ? matchOptionStrict(yesNo, control.options) : yesNo
+    }
+  }
   if (control.kind === 'checkbox' || control.kind === 'radio') return null
   // Nama institusi hanya dari tabel `education` (`planInstitutionAnswers`), tidak pernah dari kecocokan label di sini.
   if (isInstitutionControl(control)) return null
   // Combobox pencarian "Lokasi" tanpa pilihan: teks bebas dari kota di profil (lalu dicocokkan sisi pengisi).
-  if (control.kind === 'select' && control.searchable === true && LOCATION_LABEL_RE.test(normalizeLabelText(controlQuestionLabel(control)))) {
+  if (control.kind === 'select' && control.searchable === true && LOCATION_LABEL_RE.test(questionLabel)) {
     return tokens.city ?? tokens.location ?? null
   }
-  const questionLabel = normalizeLabelText(controlQuestionLabel(control))
   // Ringkasan profil (Workable: "Summary"): area teks berlabel polos, dari `profiles.summary`.
   if (control.kind === 'textarea' && SUMMARY_LABEL_RE.test(questionLabel)) return tokens.summary ?? null
   // "Address" (Workable): lokasi profil (kota, negara), tidak pernah alamat jalan. Kolom yang meminta jalan atau kode pos
@@ -1157,23 +1190,28 @@ function directFactMatch(control: SanitizedExtControl, tokens: Record<string, st
   ) {
     const direct = matchOptionStrict(tokens.degree, control.options)
     if (direct) return direct
-    const levelToken = tokens.degree.match(/\b(s1|sarjana|bachelor|s2|magister|master|d3|diploma|sma|smk|phd|doctor)\b/i)?.[1]?.toLowerCase()
+    const normalizedDeg = tokens.degree.replace(/\./g, '')
+    const levelToken = normalizedDeg
+      .match(/\b(bsc|bs|ba|beng|btech|bcom|bba|skom|ssi|st|se|s1|sarjana|bachelor|undergraduate|msc|ms|ma|meng|mba|s2|magister|master|d3|d4|diploma|associate|sma|smk|phd|doctor|s3)\b/i)?.[1]
+      ?.toLowerCase()
     if (levelToken) {
       const aliased = matchOptionStrict(levelToken, control.options)
       if (aliased) return aliased
+      const bachelorChoices = ["Bachelor's Degree", 'Bachelors']
+      const masterChoices = ["Master's Degree", 'Masters']
+      const assocChoices = ["Associate's Degree", 'Associates', 'Technical Diploma']
+      const phdChoices = ['Doctor of Philosophy (Ph.D.)', 'Doctorate']
       const canonicalByLevel: Record<string, readonly string[]> = {
-        s1: ["Bachelor's Degree", 'Bachelors'],
-        sarjana: ["Bachelor's Degree", 'Bachelors'],
-        bachelor: ["Bachelor's Degree", 'Bachelors'],
-        s2: ["Master's Degree", 'Masters'],
-        magister: ["Master's Degree", 'Masters'],
-        master: ["Master's Degree", 'Masters'],
-        d3: ["Associate's Degree", 'Associates'],
-        diploma: ["Associate's Degree", 'Associates'],
-        sma: ['High School'],
-        smk: ['High School'],
-        phd: ['Doctor of Philosophy (Ph.D.)', 'Doctorate'],
-        doctor: ['Doctor of Philosophy (Ph.D.)', 'Doctorate'],
+        bsc: bachelorChoices, bs: bachelorChoices, ba: bachelorChoices, beng: bachelorChoices,
+        btech: bachelorChoices, bcom: bachelorChoices, bba: bachelorChoices, skom: bachelorChoices,
+        ssi: bachelorChoices, st: bachelorChoices, se: bachelorChoices, s1: bachelorChoices,
+        sarjana: bachelorChoices, bachelor: bachelorChoices, undergraduate: bachelorChoices,
+        msc: masterChoices, ms: masterChoices, ma: masterChoices, meng: masterChoices,
+        mba: ["Master of Business Administration (M.B.A.)", ...masterChoices], s2: masterChoices,
+        magister: masterChoices, master: masterChoices,
+        d3: assocChoices, d4: assocChoices, diploma: assocChoices, associate: assocChoices,
+        sma: ['High School'], smk: ['High School'],
+        phd: phdChoices, doctor: phdChoices, s3: phdChoices,
       }
       for (const cand of canonicalByLevel[levelToken] ?? []) {
         const hit = matchOptionStrict(cand, control.options)
@@ -1181,8 +1219,128 @@ function directFactMatch(control: SanitizedExtControl, tokens: Record<string, st
       }
     }
   }
+  if (
+    tokens.field_of_study &&
+    /^(?:discipline|major(?: of study)?|field of study|jurusan|program studi)$/.test(questionLabel) &&
+    control.kind !== 'textarea'
+  ) {
+    return tokens.field_of_study
+  }
+  if (
+    tokens.gpa &&
+    (control.kind === 'textarea' || control.kind === 'text') &&
+    (/\b(?:university )?degree result\b|\bgpa score\b/.test(questionLabel) ||
+      (/\b(?:gpa|ipk)\b/.test(questionLabel) && !/\bhigh school\b/.test(questionLabel)))
+  ) {
+    return `GPA score of ${tokens.gpa}${tokens.education_ongoing === 'true' ? ' (predicted/current)' : ''}`
+  }
   if (/\b(cover letter|surat lamaran)\b/.test(hay) && control.kind === 'textarea') return tokens.cover_letter ?? null
   return null
+}
+
+const SKILL_CHECKBOX_GROUP_RE =
+  /\b(?:programming languages?|areas? of engineering|engineering areas?|skills?|technolog(?:y|ies)|tech stack|tools?|frameworks?|interests?)\b/i
+const SKILL_GROUP_CAP_RE = /(?:choose|select|pick|pilih)\s+(?:up\s+to|maksimal|at\s+most)\s+(one|two|three|four|five|\d+)\b/i
+const NUMBER_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5 }
+const SKILL_LABEL_ALIASES: Record<string, readonly string[]> = {
+  golang: ['go', 'golang'],
+  'web back-end': ['fastapi', 'laravel', 'node.js', 'nodejs', 'php', 'backend', 'back-end', 'api', 'full-stack', 'fullstack'],
+  'web front-end': ['react', 'next.js', 'nextjs', 'frontend', 'front-end', 'typescript', 'full-stack', 'fullstack'],
+  databases: ['sql', 'mysql', 'postgresql', 'postgres', 'oracle db', 'mongodb', 'supabase', 'redis', 'database', 'databases'],
+  'ai/ml': ['ai/ml', 'llm', 'gemini', 'xgboost', 'yolov8', 'machine learning', 'ai', 'ml', 'groq', 'openrouter', 'langfuse'],
+  'data science': ['data science', 'xgboost', 'timesfm', 'pandas', 'python', 'sql'],
+  cloud: ['cloud', 'aws', 'gcp', 'azure', 'supabase'],
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function scoreSkillLabel(
+  label: string,
+  skillSet: ReadonlySet<string>,
+  evidenceLower: string
+): number {
+  const lbl = label.trim().toLowerCase()
+  if (!lbl) return 0
+  let score = 0
+  if (skillSet.has(lbl)) score += 3
+  const aliases = SKILL_LABEL_ALIASES[lbl] ?? [lbl]
+  for (const kw of aliases) {
+    if (skillSet.has(kw)) score += 2
+    else if (kw.length >= 2 && new RegExp(`(?:^|[^a-z0-9+])${escapeRegex(kw)}(?:$|[^a-z0-9+])`, 'i').test(evidenceLower)) score += 1
+  }
+  return score
+}
+
+function planSkillCheckboxes(
+  fillable: readonly FillableControl[],
+  skills: readonly string[],
+  workRows: readonly any[] | null | undefined,
+  profile: Record<string, any> | null | undefined,
+  plannedControlIds: ReadonlySet<string>,
+  noAiControlIds: ReadonlySet<string>,
+  addAction: (c: FillableControl, value: boolean | string, source: 'fact') => void
+): void {
+  const evidenceParts = [
+    ...skills,
+    typeof profile?.current_title === 'string' ? profile.current_title : '',
+    ...(Array.isArray(workRows) ? workRows.map((w) => `${w?.role_title ?? ''} ${w?.description ?? ''}`) : []),
+  ]
+  const evidenceLower = evidenceParts.join(' | ').toLowerCase()
+  const skillSet = new Set(skills.map((s) => s.trim().toLowerCase()).filter(Boolean))
+  if (skillSet.size === 0) return
+
+  // 1) Grup kotak centang yang diekstrak `extractControls` sebagai satu `radio` ber-opsi (seperti di Greenhouse).
+  for (const c of fillable) {
+    if (c.kind !== 'radio' || c.options.length === 0 || plannedControlIds.has(c.controlId) || noAiControlIds.has(c.controlId)) continue
+    if (isGuardedCheckbox(c) || c.currentValue.trim()) continue
+    const qLabel = controlQuestionLabel(c)
+    if (!SKILL_CHECKBOX_GROUP_RE.test(qLabel) || classifyPersonalFact(qLabel)) continue
+    let bestOpt: string | null = null
+    let bestScore = 0
+    for (const opt of c.options) {
+      const s = scoreSkillLabel(opt, skillSet, evidenceLower)
+      if (s > bestScore) {
+        bestScore = s
+        bestOpt = opt
+      }
+    }
+    if (bestOpt) addAction(c, bestOpt, 'fact')
+  }
+
+  // 2) Kotak centang individual dalam satu grup/bagian.
+  const groups = new Map<string, FillableControl[]>()
+  for (const c of fillable) {
+    if (c.kind !== 'checkbox' || plannedControlIds.has(c.controlId) || noAiControlIds.has(c.controlId)) continue
+    if (isGuardedCheckbox(c) || isNoWorkExperienceToggle(c)) continue
+    const heading = (c.groupHeading || c.sectionHeading || c.groupLabel || '').trim()
+    if (!heading || !SKILL_CHECKBOX_GROUP_RE.test(heading)) continue
+    if (classifyPersonalFact(heading)) continue
+    const arr = groups.get(heading) ?? []
+    arr.push(c)
+    groups.set(heading, arr)
+  }
+
+  for (const [heading, boxes] of groups) {
+    if (boxes.length < 2) continue
+    const capMatch = heading.match(SKILL_GROUP_CAP_RE)?.[1]?.toLowerCase()
+    const maxCap = capMatch ? (NUMBER_WORDS[capMatch] ?? Number(capMatch)) : 5
+    const alreadyChecked = boxes.filter((b) => b.checked === true || b.currentValue === 'true').length
+    let remaining = Math.max(0, maxCap - alreadyChecked)
+    if (remaining === 0) continue
+
+    const scored = boxes
+      .filter((box) => box.checked !== true && box.currentValue !== 'true')
+      .map((box) => ({ box, score: scoreSkillLabel(controlQuestionLabel(box), skillSet, evidenceLower) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+    for (const { box } of scored) {
+      if (remaining <= 0) break
+      addAction(box, true, 'fact')
+      remaining--
+    }
+  }
 }
 
 /**
@@ -1366,7 +1524,7 @@ export class ExtensionPlanner {
       db.from('user_automation_settings').select('*').eq('user_id', userId).maybeSingle(),
       db.from('user_skills').select('name').eq('user_id', userId),
       db.from('work_experiences').select('company_name, role_title, is_current, start_date, end_date, description').eq('user_id', userId).limit(50),
-      db.from('education').select('institution, degree, start_year, end_year, is_current').eq('user_id', userId).limit(20),
+      db.from('education').select('institution, degree, field_of_study, start_year, end_year, is_current, gpa, max_gpa').eq('user_id', userId).limit(20),
       db.from('achievements').select('title, category, issuer, achievement_date, is_featured, created_at').eq('user_id', userId).limit(20),
       withResume ? resumeUrlForUser(db as any, userId) : Promise.resolve(null),
     ])
@@ -1484,10 +1642,9 @@ export class ExtensionPlanner {
 
     this.checkRate(userId)
 
-type FillableControl = SanitizedExtControl & { kind: Exclude<ExtControlKind, 'file' | 'submit'> }
-// Pemilih kode negara telepon dan dropdown unggah berkas punya jalur sendiri (lihat langkah 0b dan pertanyaan di bawah):
-// tidak lewat jawaban tersimpan, pencocokan fakta, atau AI.
-const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
+    // Pemilih kode negara telepon dan dropdown unggah berkas punya jalur sendiri (lihat langkah 0b dan pertanyaan di bawah):
+    // tidak lewat jawaban tersimpan, pencocokan fakta, atau AI.
+    const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
   c.kind !== 'file' && c.kind !== 'submit' && !isSecretControl(c) && !isCountryCodeSelect(c) && !isFileLikeSelect(c)
 
     const fileControl = controls.find((c) => c.kind === 'file') ?? null
@@ -1602,7 +1759,7 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       if (isRetry || c.disabled === true || c.readOnly === true || showsIndonesiaCode(c)) continue
       // Daftar pilihan yang dimuat malas (SmartRecruiters: pilihan baru muncul sesudah dibuka) tiba kosong: nama negara saja
       // yang dikirim, ekstensi membuka daftar dan memilih satu-satunya pilihan yang diawali "Indonesia".
-      const option = indonesiaDialOption(c.options) ?? (c.options.length === 0 ? 'Indonesia' : null)
+      const option = indonesiaDialOption(c.options) ?? 'Indonesia'
       if (option) addAction(c as FillableControl, option, 'fact')
     }
 
@@ -1640,7 +1797,16 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
         else if (isNoLike(saved) && isChecked) addAction(c, false, 'saved')
         continue
       }
-      const matched = c.kind === 'select' || c.kind === 'radio' ? matchOption(saved, c.options) : saved.slice(0, 2000)
+      const normalizedSaved =
+        (c.kind === 'select' || c.kind === 'radio') && /\b(?:race|ethnicity|etnis|suku)\b/i.test(qLabel) && saved.trim().toLowerCase() === 'asean'
+          ? 'Asian'
+          : saved
+      const matched =
+        c.kind === 'select' || c.kind === 'radio'
+          ? isFreeTextSearch(c)
+            ? fitToConstraints(c, normalizedSaved.slice(0, 200))
+            : matchOption(normalizedSaved, c.options)
+          : normalizedSaved.slice(0, 2000)
       const val = matched && c.kind !== 'select' && c.kind !== 'radio' ? fitToConstraints(c, matched) : matched
       if (val) addAction(c, val, 'saved')
     }
@@ -1686,9 +1852,17 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
       if (plannedControlIds.has(c.controlId) || noAiControlIds.has(c.controlId)) continue
       const fact = directFactMatch(c, tokens)
       if (!fact) continue
-      const matched = c.kind === 'select' || c.kind === 'radio' ? matchOption(fact, c.options) : fitToConstraints(c, fact)
+      const matched =
+        c.kind === 'select' || c.kind === 'radio'
+          ? isFreeTextSearch(c)
+            ? fitToConstraints(c, fact.slice(0, 200))
+            : matchOption(fact, c.options)
+          : fitToConstraints(c, fact)
       if (matched) addAction(c, matched, 'fact')
     }
+
+    // 2b. Kotak centang skill/bahasa pemrograman/minat teknis berdasarkan `user_skills` dan pengalaman nyata.
+    if (!isRetry) planSkillCheckboxes(fillable, skills, Array.isArray(workRows) ? workRows : null, profile, plannedControlIds, noAiControlIds, addAction)
 
     // 3. Kontrol tersisa -> serahkan ke AI pipeline dengan data faktual & prompt framing anti-injection.
     const remainingForAi = fillable.filter((c) => !plannedControlIds.has(c.controlId) && !noAiControlIds.has(c.controlId) && !isGuardedCheckbox(c))

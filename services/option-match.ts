@@ -33,6 +33,7 @@ const isBoundaryChar = (ch: string): boolean => !/[\p{L}\p{N}]/u.test(ch)
  * Bulan memakai nama lengkap dan singkatan tiga huruf.
  */
 const ALIAS_GROUPS: readonly (readonly string[])[] = [
+  ['indonesia', 'indonesian', 'wni'],
   ['ya', 'yes', 'y'],
   ['tidak', 'no', 'tdk', 'n'],
   ['laki-laki', 'laki laki', 'pria', 'male', 'man'],
