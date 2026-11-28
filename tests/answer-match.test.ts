@@ -135,6 +135,13 @@ test('findFlexibleSavedAnswer: sinonim Discipline/Major, School/University tanpa
     findFlexibleSavedAnswer('School', [{ key: 'high school name', label: 'High school name', answer: 'SMA Kolese De Britto' }]),
     undefined
   )
+  assert.equal(
+    findFlexibleSavedAnswer(
+      "What was your bachelor's university degree result, or expected result if you have not yet graduated?",
+      bank
+    ),
+    undefined
+  )
   assert.equal(findFlexibleSavedAnswer('In which country do you currently work?', bank)?.answer, 'Indonesia')
 })
 
@@ -157,11 +164,13 @@ test('ExtensionPlanner: "In which country do you currently work?" terisi determi
     rawControls: [
       { controlId: 'c_work_country', kind: 'select', label: 'In which country do you currently work?*', options: ['United States', 'Indonesia'], required: true },
       { controlId: 'c_school', kind: 'select', label: 'School*', options: ['Other', 'Universitas Kristen Duta Wacana'], required: true },
+      { controlId: 'c_deg_select', kind: 'select', label: 'Degree', options: ["Associate's Degree", "Bachelor's Degree", "Master's Degree"], required: false },
       { controlId: 'c_deg_text', kind: 'text', label: 'Degree / Discipline', required: true },
     ],
   })
   assert.equal(res.actions.find((a) => a.controlId === 'c_work_country')?.value, 'Indonesia')
   assert.equal(res.actions.find((a) => a.controlId === 'c_school')?.value, 'Universitas Kristen Duta Wacana')
+  assert.equal(res.actions.find((a) => a.controlId === 'c_deg_select')?.value, "Bachelor's Degree")
   assert.equal(res.actions.find((a) => a.controlId === 'c_deg_text')?.value, 'S1 Sistem Informasi')
   assert.ok(userPrompt.includes('{{degree}}'))
 })

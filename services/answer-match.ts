@@ -34,7 +34,7 @@ const SYNONYM_BUCKETS: Array<[RegExp, string]> = [
   [/\b(?:in which country do you(?: currently)? (?:work|live|reside)|country you currently (?:work|live|reside) in|country of residence|negara domisili)\b/i, 'concept_residence_country'],
   [/\b(?:discipline|major(?: of study)?|field of study|jurusan|program studi)\b/i, 'concept_major'],
   [/\b(?:which gender|gender identity|jenis kelamin)\b/i, 'concept_gender'],
-  [/\b(?:university|universitas|college|kampus|institut|institution|almamater|(?<!high\s)school)\b/i, 'concept_university'],
+  [/^(?:(?:name of |your |last )?(?:university|universitas|college|kampus|institut|institution|almamater)(?: name)?|school(?: name)?|nama sekolah|nama universitas)$/i, 'concept_university'],
   [/\b(?:over the age of 18|18 years old|usia 18|berusia 18)\b/i, 'concept_over_18'],
   [/\b(?:bersedia relokasi|willing to relocate|relocation)\b/i, 'concept_relocate'],
   [/\b(?:kapan bisa bergabung|how soon are you able to join|earliest start date|ketersediaan mulai)\b/i, 'concept_join_when'],

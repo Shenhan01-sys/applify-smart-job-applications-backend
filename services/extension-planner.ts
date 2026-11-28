@@ -1149,6 +1149,20 @@ function directFactMatch(control: SanitizedExtControl, tokens: Record<string, st
   if (urlField && /\bgithub\b/.test(hay)) return tokens.github_url ?? null
   if (urlField && /\b(portfolio|portofolio|website|personal site)\b/.test(hay)) return tokens.portfolio_url ?? null
   if (/\b(years of experience|pengalaman)\b/.test(hay)) return tokens.years_of_experience ?? null
+  if (
+    tokens.degree &&
+    /^(?:degree|jenjang|gelar|education level|tingkat pendidikan)$/.test(questionLabel) &&
+    control.kind === 'select' &&
+    control.options.length > 0
+  ) {
+    const direct = matchOptionStrict(tokens.degree, control.options)
+    if (direct) return direct
+    const levelToken = tokens.degree.match(/\b(s1|sarjana|bachelor|s2|magister|master|d3|diploma|sma|smk|phd|doctor)\b/i)?.[1]
+    if (levelToken) {
+      const aliased = matchOptionStrict(levelToken, control.options)
+      if (aliased) return aliased
+    }
+  }
   if (/\b(cover letter|surat lamaran)\b/.test(hay) && control.kind === 'textarea') return tokens.cover_letter ?? null
   return null
 }
