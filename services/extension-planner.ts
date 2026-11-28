@@ -1157,10 +1157,28 @@ function directFactMatch(control: SanitizedExtControl, tokens: Record<string, st
   ) {
     const direct = matchOptionStrict(tokens.degree, control.options)
     if (direct) return direct
-    const levelToken = tokens.degree.match(/\b(s1|sarjana|bachelor|s2|magister|master|d3|diploma|sma|smk|phd|doctor)\b/i)?.[1]
+    const levelToken = tokens.degree.match(/\b(s1|sarjana|bachelor|s2|magister|master|d3|diploma|sma|smk|phd|doctor)\b/i)?.[1]?.toLowerCase()
     if (levelToken) {
       const aliased = matchOptionStrict(levelToken, control.options)
       if (aliased) return aliased
+      const canonicalByLevel: Record<string, readonly string[]> = {
+        s1: ["Bachelor's Degree", 'Bachelors'],
+        sarjana: ["Bachelor's Degree", 'Bachelors'],
+        bachelor: ["Bachelor's Degree", 'Bachelors'],
+        s2: ["Master's Degree", 'Masters'],
+        magister: ["Master's Degree", 'Masters'],
+        master: ["Master's Degree", 'Masters'],
+        d3: ["Associate's Degree", 'Associates'],
+        diploma: ["Associate's Degree", 'Associates'],
+        sma: ['High School'],
+        smk: ['High School'],
+        phd: ['Doctor of Philosophy (Ph.D.)', 'Doctorate'],
+        doctor: ['Doctor of Philosophy (Ph.D.)', 'Doctorate'],
+      }
+      for (const cand of canonicalByLevel[levelToken] ?? []) {
+        const hit = matchOptionStrict(cand, control.options)
+        if (hit) return hit
+      }
     }
   }
   if (/\b(cover letter|surat lamaran)\b/.test(hay) && control.kind === 'textarea') return tokens.cover_letter ?? null

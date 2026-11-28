@@ -164,7 +164,7 @@ test('ExtensionPlanner: "In which country do you currently work?" terisi determi
     rawControls: [
       { controlId: 'c_work_country', kind: 'select', label: 'In which country do you currently work?*', options: ['United States', 'Indonesia'], required: true },
       { controlId: 'c_school', kind: 'select', label: 'School*', options: ['Other', 'Universitas Kristen Duta Wacana'], required: true },
-      { controlId: 'c_deg_select', kind: 'select', label: 'Degree', options: ["Associate's Degree", "Bachelor's Degree", "Master's Degree"], required: false },
+      { controlId: 'c_deg_select', kind: 'select', label: 'Degree', options: ["Associate's Degree", 'Bachelors', "Bachelor's Degree", "Master's Degree"], required: false },
       { controlId: 'c_deg_text', kind: 'text', label: 'Degree / Discipline', required: true },
     ],
   })
