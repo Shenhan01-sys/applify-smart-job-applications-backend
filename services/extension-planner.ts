@@ -51,7 +51,7 @@ export const EXT_MAX_NOTICE_CHARS = 2500
 export const EXT_PLAN_RATE_PER_MINUTE = 15
 export const EXT_PLAN_WINDOW_MS = 60_000
 /** Batas waktu satu panggilan LLM perencana, agar tidak menggantung sampai batas bawaan 90 detik. */
-export const EXT_PLAN_LLM_TIMEOUT_MS = 12_000
+export const EXT_PLAN_LLM_TIMEOUT_MS = 20_000
 /** Cache konteks statis lamaran: hanya dipakai selama satu sesi pengisian. */
 export const EXT_CONTEXT_CACHE_TTL_MS = 90_000
 export const EXT_CONTEXT_CACHE_MAX = 200
@@ -767,7 +767,8 @@ const STREET_ADDRESS_HINT_RE =
   /\b(?:street|jalan|jl|post ?code|postal|zip|kode pos|address ?(?:line ?)?[12]|addr(?:ess)? ?line|line [12]|apartment|apt|suite|house number|nomor rumah|no rumah|rt ?rw|kelurahan|kecamatan)\b/
 
 /** Label kolom negara tempat tinggal (bukan kewarganegaraan, negara asal, atau kode telepon). */
-const COUNTRY_LABEL_RE = /^(?:your |current )?(?:country|negara)(?: region| of residence| residence| domisili| tinggal| saat ini| anda)?$/
+const COUNTRY_LABEL_RE =
+  /^(?:(?:(?:in )?which country do you(?: currently)? (?:work|live|reside)(?: in)?)|(?:(?:your |current )?(?:country|negara)(?: region| of residence| residence| domisili| tinggal| saat ini| anda| you currently (?:work|live|reside) in)?))$/
 
 /** Label ringkasan profil. Hanya untuk area teks. Ringkasan diambil dari kolom `profiles.summary`. */
 const SUMMARY_LABEL_RE =
@@ -988,6 +989,7 @@ function buildFactTokens(args: {
   const university = latestEducation(education ?? null)
   if (university) {
     put('school_name', cleanLine(university.institution ?? '', 160))
+    put('degree', cleanLine(university.degree ?? '', 120))
     const gradYear = educationYear(university.end_year)
     if (gradYear) put('graduation_year', String(gradYear))
   }
@@ -1026,6 +1028,7 @@ function buildFactTokens(args: {
           .join('\n')
       : '',
     tokens.school_name ? `Universitas atau sekolah: ${tokens.school_name} -> token {{school_name}}` : '',
+    tokens.degree ? `Gelar / jurusan pendidikan terakhir: ${tokens.degree} -> token {{degree}}` : '',
     tokens.graduation_year ? `Tahun lulus (atau perkiraan lulus): ${tokens.graduation_year} -> token {{graduation_year}}` : '',
     tokens.high_school_name ? `SMA atau sekolah menengah: ${tokens.high_school_name} -> token {{high_school_name}}` : '',
     tokens.high_school_year ? `Tahun lulus SMA: ${tokens.high_school_year} -> token {{high_school_year}}` : '',
@@ -1740,7 +1743,7 @@ const isFillableControl = (c: SanitizedExtControl): c is FillableControl =>
           system: systemPrompt,
           user: userPrompt,
           userId,
-          maxTokens: 1200,
+          maxTokens: 2200,
           temperature: 0.2,
           deadlineAt: Date.now() + this.llmTimeoutMs,
         })

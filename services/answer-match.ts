@@ -31,6 +31,10 @@ const SYNONYM_BUCKETS: Array<[RegExp, string]> = [
   [/\b(?:portofolio|portfolio)(?: link| url)?\b/i, 'concept_portfolio'],
   [/\b(?:kewarganegaraan|nationality|citizenship)\b/i, 'concept_nationality'],
   [/\b(?:negara paspor|passport country)\b/i, 'concept_passport_country'],
+  [/\b(?:in which country do you(?: currently)? (?:work|live|reside)|country you currently (?:work|live|reside) in|country of residence|negara domisili)\b/i, 'concept_residence_country'],
+  [/\b(?:discipline|major(?: of study)?|field of study|jurusan|program studi)\b/i, 'concept_major'],
+  [/\b(?:which gender|gender identity|jenis kelamin)\b/i, 'concept_gender'],
+  [/\b(?:university|universitas|college|kampus|institut|institution|almamater|(?<!high\s)school)\b/i, 'concept_university'],
   [/\b(?:over the age of 18|18 years old|usia 18|berusia 18)\b/i, 'concept_over_18'],
   [/\b(?:bersedia relokasi|willing to relocate|relocation)\b/i, 'concept_relocate'],
   [/\b(?:kapan bisa bergabung|how soon are you able to join|earliest start date|ketersediaan mulai)\b/i, 'concept_join_when'],
@@ -39,7 +43,7 @@ const SYNONYM_BUCKETS: Array<[RegExp, string]> = [
 const CONFLICT_GROUPS: ReadonlyArray<[RegExp, RegExp]> = [
   [/\b(?:start|mulai|awal|from|dari)\b/i, /\b(?:end|berakhir|akhir|selesai|until|to|sampai)\b/i],
   [/\b(?:current|saat ini|terakhir|last|previous)\b/i, /\b(?:expected|desired|diharapkan|ekspektasi)\b/i],
-  [/\b(?:high school|sma|smk|sekolah menengah)\b/i, /\b(?:university|universitas|college|kampus|bachelor|s1|s2|master)\b/i],
+  [/\b(?:high school|sma|smk|sekolah menengah)\b/i, /\b(?:university|universitas|college|kampus|bachelor|s1|s2|master|(?<!high\s)school)\b/i],
   [/\b(?:first|depan)\b/i, /\b(?:last|belakang)\b/i],
 ]
 

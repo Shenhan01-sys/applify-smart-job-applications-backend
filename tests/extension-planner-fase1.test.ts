@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ExtensionPlanner, invalidatePlannerContextCache } from '../services/extension-planner.js'
+import { EXT_PLAN_LLM_TIMEOUT_MS, ExtensionPlanner, invalidatePlannerContextCache } from '../services/extension-planner.js'
 import { saveExtensionAnswers } from '../services/extension-answers.js'
 import { makeExtensionTestDb, USER_ID } from './extension-test-db.js'
 
@@ -41,8 +41,8 @@ test('fase 1 butir 1: deadlineAt 12 detik diteruskan ke completeJson, dan bisa d
   })
   const after = Date.now()
   assert.ok(request, 'completeJson dipanggil')
-  assert.ok(request.deadlineAt >= before + 11_000, `deadline terlalu dekat: ${request.deadlineAt}`)
-  assert.ok(request.deadlineAt <= after + 12_000 + 1_000, `deadline terlalu jauh: ${request.deadlineAt}`)
+  assert.ok(request.deadlineAt >= before + EXT_PLAN_LLM_TIMEOUT_MS - 1_000, `deadline terlalu dekat: ${request.deadlineAt}`)
+  assert.ok(request.deadlineAt <= after + EXT_PLAN_LLM_TIMEOUT_MS + 1_000, `deadline terlalu jauh: ${request.deadlineAt}`)
 
   let override: any = null
   const quick = new ExtensionPlanner(async (req) => {

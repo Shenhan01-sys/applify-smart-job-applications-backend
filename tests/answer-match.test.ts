@@ -121,3 +121,47 @@ test('ExtensionPlanner: placeholder "tahun" tidak dipakai sebagai label pertanya
   assert.notEqual(res.pendingQuestions[0].label, 'tahun')
   assert.equal(res.pendingQuestions[0].label, 'Kolom wajib tanpa label 1')
 })
+
+test('findFlexibleSavedAnswer: sinonim Discipline/Major, School/University tanpa membocorkan SMA, serta lokasi kerja', () => {
+  const bank = [
+    { key: 'major of study', label: 'Major of Study', answer: 'Information Systems' },
+    { key: 'university', label: 'University', answer: 'Universitas Kristen Duta Wacana' },
+    { key: 'high school name', label: 'High school name', answer: 'SMA Kolese De Britto' },
+    { key: 'country of residence', label: 'Country of residence', answer: 'Indonesia' },
+  ]
+  assert.equal(findFlexibleSavedAnswer('Discipline*', bank)?.answer, 'Information Systems')
+  assert.equal(findFlexibleSavedAnswer('School', bank)?.answer, 'Universitas Kristen Duta Wacana')
+  assert.equal(
+    findFlexibleSavedAnswer('School', [{ key: 'high school name', label: 'High school name', answer: 'SMA Kolese De Britto' }]),
+    undefined
+  )
+  assert.equal(findFlexibleSavedAnswer('In which country do you currently work?', bank)?.answer, 'Indonesia')
+})
+
+test('ExtensionPlanner: "In which country do you currently work?" terisi deterministik dari lokasi profil dan degree masuk konteks', async () => {
+  const store = makeExtensionTestDb({
+    jobs: [{ id: 'job-c', title: 'Software Engineer', company: 'Canonical', description: '', location: 'Remote' }],
+    profiles: [{ id: USER_ID, full_name: 'Hans Gunawan', location: 'Yogyakarta dan Sekitarnya' }],
+    education: [{ user_id: USER_ID, institution: 'Universitas Kristen Duta Wacana', degree: 'S1 Sistem Informasi', start_year: 2022, end_year: 2026, is_current: true }],
+  })
+  let userPrompt = ''
+  const planner = new ExtensionPlanner(async (req) => {
+    userPrompt = req.user
+    return { model: 'mock:test', text: JSON.stringify({ actions: [{ controlId: 'c_deg_text', value: '{{degree}}' }] }) }
+  })
+  const res = await planner.planForm({
+    db: store.db,
+    userId: USER_ID,
+    jobId: 'job-c',
+    pageUrl: 'https://job-boards.greenhouse.io/canonical/jobs/1',
+    rawControls: [
+      { controlId: 'c_work_country', kind: 'select', label: 'In which country do you currently work?*', options: ['United States', 'Indonesia'], required: true },
+      { controlId: 'c_school', kind: 'select', label: 'School*', options: ['Other', 'Universitas Kristen Duta Wacana'], required: true },
+      { controlId: 'c_deg_text', kind: 'text', label: 'Degree / Discipline', required: true },
+    ],
+  })
+  assert.equal(res.actions.find((a) => a.controlId === 'c_work_country')?.value, 'Indonesia')
+  assert.equal(res.actions.find((a) => a.controlId === 'c_school')?.value, 'Universitas Kristen Duta Wacana')
+  assert.equal(res.actions.find((a) => a.controlId === 'c_deg_text')?.value, 'S1 Sistem Informasi')
+  assert.ok(userPrompt.includes('{{degree}}'))
+})
