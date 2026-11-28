@@ -89,11 +89,11 @@ test('sanitizer: kontrol tanpa keadaan tidak mendapat kunci baru (bentuk lama ti
   ])
 })
 
-test('sanitizer: kata sandi tetap dibuang walau membawa keadaan, dan batas 150 kontrol tetap berlaku', () => {
+test('sanitizer: kata sandi tetap dibuang walau membawa keadaan, dan batas 300 kontrol tetap berlaku', () => {
   const pw = sanitizeExtensionControls([base({ kind: 'text', inputType: 'password', role: 'textbox' })])
   assert.deepEqual(pw, [])
-  const many = Array.from({ length: 200 }, (_, i) => base({ controlId: `k${i}`, role: 'checkbox', checked: false }))
-  assert.equal(sanitizeExtensionControls(many).length, 150)
+  const many = Array.from({ length: 350 }, (_, i) => base({ controlId: `k${i}`, role: 'checkbox', checked: false }))
+  assert.equal(sanitizeExtensionControls(many).length, 300)
 })
 
 // -------------------------------------------------------------------------------------------------------------

@@ -56,8 +56,8 @@ const valueOf = (res: { actions: Array<{ controlId: string; value: string | bool
 
 // ---------- Sanitizer: pilihan dropdown kustom ----------
 
-test('sanitizer: dropdown kustom membawa options terbatas 50 x 120 karakter, kosong dibuang, role dipertahankan', () => {
-  const huge = Array.from({ length: 80 }, (_, i) => `Opsi ${i} ${'x'.repeat(200)}`)
+test('sanitizer: dropdown kustom membawa options terbatas 100 x 120 karakter, kosong dibuang, role dipertahankan', () => {
+  const huge = Array.from({ length: 120 }, (_, i) => `Opsi ${i} ${'x'.repeat(200)}`)
   const [c] = sanitizeExtensionControls([
     { controlId: 'cb1', kind: 'select', role: 'combobox', label: 'Country', options: ['', '   ', 'Indonesia', ...huge] },
   ])

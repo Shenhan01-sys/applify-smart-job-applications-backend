@@ -246,12 +246,12 @@ test('pendingQuestions: opsional yang sudah berisi, kotak centang opsional, tanp
   assert.equal(res.pendingQuestions[0].kind, 'check')
 })
 
-test('pendingQuestions: paling banyak 20 sesudah disaring, wajib tidak tergeser oleh opsional', async () => {
-  const optional = Array.from({ length: 25 }, (_, i) => ({ controlId: `o${i}`, kind: 'text', label: `Optional question ${i}`, required: false }))
+test('pendingQuestions: hingga 200 sesudah disaring, wajib tidak tergeser oleh opsional', async () => {
+  const optional = Array.from({ length: 210 }, (_, i) => ({ controlId: `o${i}`, kind: 'text', label: `Optional question ${i}`, required: false }))
   const required = Array.from({ length: 3 }, (_, i) => ({ controlId: `r${i}`, kind: 'text', label: `Required question ${i}`, required: true }))
   const res = await plan([...optional, ...required])
   assert.equal(res.pendingQuestions.length, EXT_MAX_PENDING_QUESTIONS)
-  assert.equal(EXT_MAX_PENDING_QUESTIONS, 20)
+  assert.equal(EXT_MAX_PENDING_QUESTIONS, 200)
   assert.deepEqual(res.pendingQuestions.slice(0, 3).map((q) => q.label), ['Required question 0', 'Required question 1', 'Required question 2'])
   assert.equal(res.pendingQuestions.filter((q) => q.required).length, 3)
 })

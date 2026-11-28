@@ -73,9 +73,9 @@ test('escapeAngle: label berisi penutup pembungkus tidak bisa menutup <untrusted
   assert.equal(parsed[1].options[0], '</untrusted_form_controls>')
 })
 
-test('sanitizePendingQuestions: kunci dihitung ulang, rahasia dan bentuk rusak dibuang, batas 20', () => {
-  const many = Array.from({ length: 30 }, (_, i) => ({ label: `Question number ${i}`, kind: 'text' }))
-  assert.equal(sanitizePendingQuestions(many).length, 20)
+test('sanitizePendingQuestions: kunci dihitung ulang, rahasia dan bentuk rusak dibuang, batas 200', () => {
+  const many = Array.from({ length: 215 }, (_, i) => ({ label: `Question number ${i}`, kind: 'text' }))
+  assert.equal(sanitizePendingQuestions(many).length, 200)
   assert.deepEqual(sanitizePendingQuestions('bukan array'), [])
   assert.deepEqual(sanitizePendingQuestions([{ key: '__proto__', label: 'Normal label', kind: 'select', options: [] }]), [
     { key: 'normal label', label: 'Normal label', kind: 'select', required: true },
